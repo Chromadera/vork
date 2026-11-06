@@ -1,0 +1,6 @@
+Declaration-only NVIDIA ABI headers from FFmpeg/nv-codec-headers, n12.2.72.0,
+commit c69278340ab1d5559c7d7bf0edf615dc33ddbba7.
+https://github.com/FFmpeg/nv-codec-headers
+include/ffnvcodec/{nvEncodeAPI.h,dynlink_cuda.h}
+Unmodified headers retain upstream MIT notices.
+Driver libraries are loaded dynamically; the CUDA SDK is not required.

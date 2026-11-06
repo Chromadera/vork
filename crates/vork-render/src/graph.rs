@@ -1,0 +1,1203 @@
+//! Install-time frame graph. Passes declare the named resources they read and
+//! write, in execution order; `Graph::new` drops passes the plan does not run or
+//! whose writes reach no sink (the view colour, and CPU readback when the install
+//! reads pixels back), and rejects a read of a produced resource before its writer. The compiled graph is
+//! a flat step list with one run bit per step: a frame sets the bits from its
+//! values and walks the list. No names, hashing or allocation exist per frame.
+//!
+//! Transients are backed once per installed scene and shared by every frame
+//! slot: one queue executes slot submissions in order, and `Transients::submit`
+//! keeps each frame's samples contiguous. Within a frame, one backing serves
+//! several names whose step intervals are disjoint and whose descriptors are
+//! identical (wgpu cannot place two resources in one allocation).
+//!
+//! Each view records its steps once, when it is created: pass modules build
+//! their bind groups and dispatches and hand compute work to a `Recorder`;
+//! `Graph::record` orders it with the raster and frame passes.
+//!
+//! To add a pass: add a `Pass` variant, declare it in `declare` at its place in
+//! the order with its reads, writes, install condition and run bit, then record
+//! its compute work with `Recorder::compute` (post passes; also list it in
+//! `Pass::is_compute`), or encode it in `encode_view` (raster) or
+//! `FrameSlot::encode_sample` (frame passes).
+use crate::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub(crate) enum Pass {
+    Deform,
+    /// Acceleration-structure rebuilds after deformation, before any ray reads.
+    Rays,
+    /// The irradiance volume update, when its lighting inputs changed.
+    Probes,
+    Fibre,
+    /// Every render image view, in install DAG order.
+    Images,
+    /// Same-frame seed publications, without retained lighting.
+    ImageInputs,
+    Depth,
+    /// Decoupled visibility passes and their slot merges (passes/decoupled.rs).
+    Visibility,
+    Clusters,
+    Forward,
+    /// Decoupled slot shading into the resolved colour.
+    Shade,
+    /// Screen refraction: the shade's opaque image pyramid, then the transparent
+    /// composite over the resolved colour (passes/decoupled.rs).
+    Refraction,
+    SubsurfaceDiffuse,
+    SubsurfaceCompose,
+    TransparentControls,
+    Controls,
+    Path,
+    Reflections,
+    Ao,
+    Volume,
+    PostSource,
+    Denoise,
+    Compositor,
+    Resolve,
+    AovResolve,
+    Readback,
+}
+impl Pass {
+    /// Post passes whose work is prebuilt compute dispatches.
+    fn is_compute(self) -> bool {
+        matches!(
+            self,
+            Pass::SubsurfaceDiffuse | Pass::Controls
+                | Pass::Path
+                | Pass::Reflections
+                | Pass::Ao
+                | Pass::Volume
+                | Pass::PostSource
+                | Pass::Compositor
+                | Pass::Resolve
+        )
+    }
+    /// View passes run once per view; frame passes once per sample of the frame.
+    pub(crate) fn per_view(self) -> bool {
+        !matches!(
+            self,
+            Pass::Deform | Pass::Rays | Pass::Probes | Pass::Fibre | Pass::Images | Pass::ImageInputs | Pass::Readback
+        )
+    }
+}
+
+/// Per-frame run condition of a compiled step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Run {
+    Always,
+    /// The view produces colour (not a nominal controls-only sample).
+    Color,
+    /// Colour post processing after the last shutter sample.
+    FinalColor,
+    /// The probe volume's lighting inputs changed.
+    Probes,
+    Fibre,
+    /// First sample of a frame whose images are captured.
+    Images,
+    /// The sample's pixels are read back.
+    Pixels,
+}
+/// Values of the run conditions for one sample of one view.
+#[derive(Clone, Copy)]
+pub(crate) struct RunBits {
+    pub color: bool,
+    pub final_sample: bool,
+    pub probes: bool,
+    pub fibre: bool,
+    pub images: bool,
+    pub pixels: bool,
+}
+impl RunBits {
+    pub(crate) fn runs(self, run: Run) -> bool {
+        match run {
+            Run::Always => true,
+            Run::Color => self.color,
+            Run::FinalColor => self.color && self.final_sample,
+            Run::Probes => self.probes,
+            Run::Fibre => self.fibre,
+            Run::Images => self.images,
+            Run::Pixels => self.pixels,
+        }
+    }
+}
+
+/// Resources that outlive one sample: read before their writer is valid.
+/// Frame scope spans the shutter samples of one output frame; persistent
+/// resources span frames and are rewritten only when their inputs change.
+const RETAINED: &[&str] = &[
+    "catcher radiance sums",
+    "time step accumulation",
+    "time step albedo",
+    "time step normal",
+    "linear sample accumulation",
+    "denoising guides",
+    "filtered denoising guides",
+    // AOV planes share the packed readback buffer and sum across samples.
+    "packed PNG pixels",
+    "path adaptive moments",
+
+    "render images",
+    "ray structures",
+    "mesh source areas",
+    "light probe volume",
+    "fibre transport",
+];
+fn retained(name: &str) -> bool {
+    RETAINED.contains(&name)
+}
+
+pub(crate) struct Declared {
+    pass: Pass,
+    reads: &'static [&'static str],
+    writes: &'static [&'static str],
+    run: Run,
+    enabled: bool,
+}
+impl Declared {
+    pub(crate) fn reads(&mut self, names: &'static [&'static str]) -> &mut Self {
+        self.reads = names;
+        self
+    }
+    pub(crate) fn writes(&mut self, names: &'static [&'static str]) -> &mut Self {
+        self.writes = names;
+        self
+    }
+    pub(crate) fn run(&mut self, run: Run) -> &mut Self {
+        self.run = run;
+        self
+    }
+    /// Install-time condition: the scene plan needs this pass.
+    pub(crate) fn when(&mut self, enabled: bool) -> &mut Self {
+        self.enabled = enabled;
+        self
+    }
+}
+#[derive(Default)]
+pub(crate) struct Builder(Vec<Declared>);
+impl Builder {
+    pub(crate) fn pass(&mut self, pass: Pass) -> &mut Declared {
+        self.0.push(Declared {
+            pass,
+            reads: &[],
+            writes: &[],
+            run: Run::Always,
+            enabled: true,
+        });
+        self.0.last_mut().unwrap()
+    }
+}
+
+/// Resources outside the frame: what the install's consumers read.
+const VIEW_COLOUR: &str = "view colour";
+const CPU_READBACK: &str = "CPU readback";
+
+const MSAA: &[&str] = &[
+    "depth 4x",
+    "ID 4x",
+    "screen motion 4x",
+    "world normals 4x",
+    "ambient 4x",
+];
+
+fn declare(b: &mut Builder, plan: &crate::plan::ScenePlan) {
+    use Pass::*;
+    let e = &plan.effects;
+    b.pass(Deform)
+        .when(plan.deform)
+        .writes(&["deformed vertices"]);
+    b.pass(Rays)
+        .when(plan.rays)
+        .reads(&["deformed vertices", "ray structures"])
+        .writes(&["ray structures", "mesh source areas"]);
+    if e.image_feedback {
+        b.pass(ImageInputs).run(Run::Images)
+            .reads(&["deformed vertices", "ray structures"])
+            .writes(&["render image inputs"]);
+    }
+    b.pass(Probes)
+        .when(e.probes)
+        .run(Run::Probes)
+        .reads(&["deformed vertices", "ray structures", "mesh source areas", "light probe volume"])
+        .writes(&["light probe volume"]);
+    if e.image_feedback && e.probes {
+        b.0.last_mut().unwrap().reads(&["deformed vertices", "ray structures", "mesh source areas", "light probe volume", "render image inputs"]);
+    }
+    b.pass(Fibre).when(e.fibre).run(Run::Fibre).reads(&["deformed vertices"]).writes(&["fibre transport"]);
+    if e.image_feedback && e.fibre {
+        b.0.last_mut().unwrap().reads(&["deformed vertices", "render image inputs"]);
+    }
+    b.pass(Images)
+        .run(Run::Images)
+        .reads(&["deformed vertices", "light probe volume", "fibre transport"])
+        .writes(&["render images"]);
+    b.pass(Depth)
+        .reads(&["deformed vertices"])
+        .writes(&["depth 4x", "camera eligibility"]);
+    // Visibility draws the depth pass's camera-culled draw commands.
+    b.pass(Visibility)
+        .when(plan.decoupled)
+        .run(Run::Color)
+        .reads(&["deformed vertices", "camera eligibility"])
+        .writes(&["visibility keys", "visibility depth", "visibility slots", "volume receiver samples"]);
+    b.pass(Clusters)
+        .when(plan.cluster)
+        .run(Run::Color)
+        .writes(&["cluster light lists"]);
+    // Controls: unlit surface responses, no lights or shadows.
+    b.pass(Forward)
+        .reads(&["deformed vertices", "depth 4x", "camera eligibility", "render images"])
+        .writes(&MSAA[1..]);
+    b.pass(TransparentControls)
+        .when(plan.transparent)
+        .reads(&["deformed vertices", "depth 4x"])
+        .writes(&MSAA[1..]);
+    b.pass(Controls).when(!e.fuse_controls()).reads(MSAA).writes(&[
+        "denoising guides",
+        "resolved depth",
+        "resolved IDs",
+        "resolved normals",
+        "resolved ambient",
+        "resolved motion",
+    ]);
+    // The shade blends transparent slots over the opaque ones. Its ambient is the
+    // opaque surfaces' as far as they are transmitted, replacing the controls'
+    // nearest-surface (transparent) ambient.
+    b.pass(Volume).when(plan.volume && !e.path).run(Run::Color)
+        .reads(&["ray structures","cluster light lists","volume receiver samples"]).writes(&["volume receiver samples"]);
+    const SHADE_READS: &[&str] = &["visibility slots", "visibility keys", "volume receiver samples", "cluster light lists", "ray structures", "light probe volume", "fibre transport", "resolved IDs"];
+    b.pass(Shade)
+        .when(plan.decoupled)
+        .run(Run::Color)
+        .reads(&SHADE_READS[..SHADE_READS.len()-usize::from(!e.indirect)])
+        .writes(&[
+            "resolved IDs",
+            "HDR resolved",
+            "resolved ambient",
+            "decoupled AO receivers",
+            "decoupled AO normals",
+            "reflection records",
+            "reflection guides",
+            "AOV resolved",
+            "refraction pyramid",
+            "refraction receivers",
+            "subsurface records",
+        ]);
+    // Burley diffusion filters the shade's capture; the compose replaces the
+    // captured slot's diffusion in the resolved colour and ambient.
+    b.pass(SubsurfaceDiffuse)
+        .when(e.subsurface)
+        .run(Run::Color)
+        .reads(&["visibility slots", "subsurface records"])
+        .writes(if plan.screen_refraction {&["subsurface correction", "subsurface ambient correction", "subsurface receiver correction", "subsurface receiver ambient correction"]} else {&["subsurface correction", "subsurface ambient correction"]});
+    b.pass(SubsurfaceCompose)
+        .when(e.subsurface)
+        .run(Run::Color)
+        .reads(if plan.screen_refraction {&["subsurface correction", "subsurface ambient correction", "HDR resolved", "resolved ambient", "subsurface receiver correction", "subsurface receiver ambient correction", "refraction pyramid"]} else {&["subsurface correction", "subsurface ambient correction", "HDR resolved", "resolved ambient"]})
+        .writes(if plan.screen_refraction {&["HDR resolved", "resolved ambient", "refraction pyramid"]} else {&["HDR resolved", "resolved ambient"]});
+    b.pass(Refraction)
+        .when(plan.screen_refraction)
+        .run(Run::Color)
+        .reads(&["visibility slots", "cluster light lists", "ray structures", "light probe volume", "refraction pyramid", "refraction receivers", "HDR resolved", "AOV resolved"])
+        .writes(&["refraction pyramid", "HDR resolved", "AOV resolved", "reflection records", "reflection guides"]);
+    b.pass(Path)
+        .when(e.path)
+        .run(if e.implicit {Run::Always} else {Run::Color})
+        .reads(&["ray structures", "mesh source areas", "render images", "path adaptive moments", "denoising guides"])
+        .writes(if e.implicit {&["HDR resolved", "path adaptive moments", "AOV resolved", "denoising guides", "catcher radiance sums", "packed PNG pixels", "resolved depth", "resolved normals", "resolved IDs"]} else {&["HDR resolved", "path adaptive moments", "AOV resolved", "denoising guides", "catcher radiance sums", "packed PNG pixels"]});
+    b.pass(AovResolve).when(plan.aovs).run(Run::Color).reads(&["AOV resolved"]).writes(&["packed PNG pixels"]);
+    b.pass(Reflections)
+        .when(e.reflections)
+        .run(Run::Color)
+        .reads(&[
+            "visibility slots",
+            "reflection records",
+            "reflection guides",
+            "resolved depth",
+            "resolved normals",
+            "decoupled AO receivers",
+            "decoupled AO normals",
+            "resolved ambient",
+            "HDR resolved",
+            "ray structures",
+            "light probe volume",
+        ])
+        .writes(&["full-resolution reflection estimates"]);
+    b.pass(Ao)
+        .when(e.indirect)
+        .run(Run::Color)
+        .reads(&[
+            "resolved depth",
+            "resolved normals",
+            "resolved ambient",
+            "HDR resolved",
+            "decoupled AO receivers",
+            "decoupled AO normals",
+            "ray structures",
+            "light probe volume",
+        ])
+        .writes(&[
+            "AO selected receivers",
+            "AO filtered visibility depth normal",
+            "AO per-sample visibility depth normal",
+            "hemisphere incident radiance",
+            "hemisphere per-sample incident radiance",
+        ]);
+    b.pass(PostSource)
+        .when(e.compositor || e.denoise)
+        .run(Run::Color)
+        .reads(&[
+            "cluster light lists",
+
+            "HDR resolved",
+            "resolved depth",
+            "resolved IDs",
+            "resolved normals",
+            "resolved ambient",
+            "resolved motion",
+            "full-resolution reflection estimates",
+            "reflection guides",
+            "hemisphere incident radiance",
+            "hemisphere per-sample incident radiance",
+            "AO selected receivers",
+            "AO filtered visibility depth normal",
+            "AO per-sample visibility depth normal",
+            "linear sample accumulation",
+        ])
+        .writes(&[
+            "linear sample accumulation",
+        ]);
+    b.pass(Denoise)
+        .when(e.denoise)
+        .run(Run::FinalColor)
+        .reads(&["linear sample accumulation", "resolved normals", "denoising guides"])
+        .writes(&["linear sample accumulation"]);
+    b.pass(Compositor)
+        .when(e.compositor)
+        .run(Run::FinalColor)
+        .reads(&["linear sample accumulation", "resolved depth", "resolved IDs", "resolved normals", "resolved motion", "AOV resolved", "catcher radiance sums"])
+        .writes(&["compositor colour"]);
+    b.pass(Resolve)
+        .when(!e.fuse_controls())
+        .reads(&[
+            "cluster light lists",
+
+            "HDR resolved",
+            "decoupled AO receivers",
+            "decoupled AO normals",
+            "resolved depth",
+            "resolved IDs",
+            "resolved normals",
+            "resolved ambient",
+            "resolved motion",
+            "full-resolution reflection estimates",
+            "reflection guides",
+            "hemisphere incident radiance",
+            "hemisphere per-sample incident radiance",
+            "AO selected receivers",
+            "AO filtered visibility depth normal",
+            "AO per-sample visibility depth normal",
+            "linear sample accumulation",
+            "compositor colour",
+        ])
+        .writes(&[
+            "linear sample accumulation",
+            "packed PNG pixels",
+            VIEW_COLOUR,
+        ]);
+    b.pass(Resolve)
+        .when(e.fuse_controls())
+        .reads(&["cluster light lists","HDR resolved", "depth 4x", "ID 4x", "world normals 4x", "ambient 4x", "screen motion 4x", "linear sample accumulation"])
+        .writes(&["linear sample accumulation", "packed PNG pixels", VIEW_COLOUR]);
+    b.pass(Readback)
+        .run(Run::Pixels)
+        .reads(&["packed PNG pixels"])
+        .writes(&[CPU_READBACK]);
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Scheduled {
+    pass: Pass,
+    run: Run,
+}
+/// The compiled pass order of one installed scene, and each resource's
+/// interval over it.
+pub(crate) struct Graph {
+    pub(crate) views: crate::views::ViewTable,
+    order: Vec<Scheduled>,
+    intervals: HashMap<&'static str, (u16, u16)>,
+    /// Resources a compiled pass or a sink reads.
+    #[cfg(test)]
+    read: HashSet<&'static str>,
+}
+impl Graph {
+    /// The compiled passes in queue order, once each.
+    pub(crate) fn passes(&self) -> Vec<Pass> {
+        let mut passes = Vec::new();
+        for scheduled in &self.order {
+            if !passes.contains(&scheduled.pass) {passes.push(scheduled.pass);}
+        }
+        passes
+    }
+    /// `readback`: the install's consumers read pixels back to the CPU.
+    pub(crate) fn new(plan: &crate::plan::ScenePlan, readback: bool) -> Result<Self> {
+        let mut b = Builder::default();
+        declare(&mut b, plan);
+        let sinks: &[_] = if readback {
+            &[VIEW_COLOUR, CPU_READBACK]
+        } else {
+            &[VIEW_COLOUR]
+        };
+        Self::compile(b, sinks)
+    }
+    fn compile(b: Builder, sinks: &[&'static str]) -> Result<Self> {
+        // A pass runs if a running pass or a sink reads one of its writes. Order
+        // does not decide liveness, so a misordered writer is an error below.
+        let mut declared: Vec<_> = b.0.into_iter().filter(|d| d.enabled).collect();
+        let mut live = vec![false; declared.len()];
+        let mut read: HashSet<_> = sinks.iter().copied().collect();
+        while let Some(i) = (0..declared.len())
+            .find(|&i| !live[i] && declared[i].writes.iter().any(|name| read.contains(name)))
+        {
+            live[i] = true;
+            read.extend(declared[i].reads.iter().copied());
+        }
+        let mut live = live.into_iter();
+        declared.retain(|_| live.next().unwrap());
+        // Outputs of dropped passes stay bound as unread placeholders.
+        let produced: HashSet<_> = declared
+            .iter()
+            .flat_map(|d| d.writes.iter().copied())
+            .collect();
+        let mut written = HashSet::new();
+        let mut intervals = HashMap::<&'static str, (u16, u16)>::new();
+        for (at, d) in declared.iter().enumerate() {
+            let at = at as u16;
+            for &name in d.reads.iter().chain(d.writes) {
+                intervals
+                    .entry(name)
+                    .and_modify(|i| i.1 = at)
+                    .or_insert((at, at));
+            }
+            for name in d.reads {
+                ensure!(
+                    !produced.contains(name) || written.contains(name) || retained(name),
+                    "frame graph: {:?} reads {name} before its writer",
+                    d.pass
+                );
+            }
+            written.extend(d.writes.iter().copied());
+        }
+        for name in RETAINED.iter() {
+            intervals.insert(name, (0, u16::MAX));
+        }
+        Ok(Self {
+            views: Default::default(),
+            intervals,
+            #[cfg(test)]
+            read,
+            order: declared
+                .iter()
+                .map(|d| Scheduled {
+                    pass: d.pass,
+                    run: d.run,
+                })
+                .collect(),
+        })
+    }
+    /// Some compiled pass or sink reads `name`; an unread output needs no backing.
+    #[cfg(test)]
+    pub(crate) fn reads(&self, name: &str) -> bool {
+        self.read.contains(name)
+    }
+    /// One view's step list: its recorded compute work and the raster and
+    /// frame passes, in graph order. Compute passes the view recorded nothing
+    /// for drop out. Image views run no frame passes.
+    pub(crate) fn record(&self, frame_passes: bool, recorder: Recorder) -> Result<Vec<Step>> {
+        let mut recorded=HashMap::<Pass,Vec<Compute>>::new();
+        for (pass,node) in recorder.0 {recorded.entry(pass).or_default().push(node);}
+        let mut steps = Vec::new();
+        for &Scheduled { pass, run } in &self.order {
+            if !frame_passes && !pass.per_view() {
+                continue;
+            }
+            let nodes=recorded.remove(&pass).unwrap_or_default();
+            if nodes.is_empty() {
+                if !pass.is_compute() { steps.push(Step {pass,run,work:Work::Encode}); }
+            } else {
+                let count=nodes.len();
+                for (index,mut node) in nodes.into_iter().enumerate() {
+                    // Expanded program passes are ordinary nodes in this graph.
+                    // One timestamp interval covers their entire ordered chain.
+                    node.begin=index==0;
+                    node.end=index+1==count;
+                    steps.push(Step {pass,run,work:Work::Compute(node)});
+                }
+            }
+        }
+        ensure!(
+            recorded.is_empty(),
+            "frame graph: work recorded for passes the graph does not run: {:?}",
+            recorded.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+        Ok(steps)
+    }
+}
+
+/// Fully bound compute work. Optional pipelines are resolved while recording;
+/// replay cannot request a pipeline that was not installed.
+#[derive(Clone)]
+pub(crate) struct Dispatch {
+    pipeline: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    groups: [u32; 3],
+    dynamic_offset: Option<u32>,
+    color_only: bool,
+    /// Group 1 material tables, or screen reflection field storage.
+    material: Option<wgpu::BindGroup>,
+    /// Ray geometry and reflection record arrays as group 3.
+    hits: Option<wgpu::BindGroup>,
+    /// Group 2 read tables: irradiance and shared ray-visibility tables.
+    read_table: Option<wgpu::BindGroup>,
+    /// Volume transport and sample page arrays (resolve_native::PAGE_GROUP).
+    pages: Option<wgpu::BindGroup>,
+}
+impl Dispatch {
+    pub(crate) fn new(
+        pipeline: &wgpu::ComputePipeline,
+        bind: wgpu::BindGroup,
+        groups: [u32; 3],
+    ) -> Self {
+        Self {
+            pipeline: pipeline.clone(),
+            bind,
+            groups,
+            dynamic_offset: None,
+            color_only: true,
+            material: None,
+            hits: None,
+            read_table: None,
+            pages: None,
+        }
+    }
+    pub(crate) fn with_pages(mut self, pages: wgpu::BindGroup) -> Self {
+        self.pages = Some(pages);
+        self
+    }
+    pub(crate) fn with_offset(mut self, offset: u32) -> Self {
+        self.dynamic_offset = Some(offset);
+        self
+    }
+    pub(crate) fn with_material(mut self, material: &wgpu::BindGroup) -> Self {
+        self.material = Some(material.clone());
+        self
+    }
+    pub(crate) fn with_hits(mut self, hits: wgpu::BindGroup) -> Self {
+        self.hits = Some(hits);
+        self
+    }
+    pub(crate) fn with_read_table(mut self, table: Option<wgpu::BindGroup>) -> Self {
+        self.read_table = table;
+        self
+    }
+    /// The dispatch also writes the control targets, not only colour.
+    pub(crate) fn all_targets(mut self) -> Self {
+        self.color_only = false;
+        self
+    }
+}
+/// The prebuilt compute work of one step. Clears and begin timing belong to the
+/// first encoded range; end timing belongs to the last.
+pub(crate) struct Compute {
+    label: &'static str,
+    span: &'static str,
+    /// Binds the view's colour output as group 1.
+    output: bool,
+    dispatches: Vec<Dispatch>,
+    /// Maximum dispatches per submission segment; zero keeps the step together.
+    separate: usize,
+    clear: Vec<wgpu::Buffer>,
+    marker: Option<crate::timing::Marker>,
+    begin: bool,
+    end: bool,
+}
+impl Compute {
+    fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queries: &wgpu::QuerySet,
+        output: &wgpu::BindGroup,
+        color_enabled: bool,
+        range: std::ops::Range<usize>,
+    ) {
+        let first = range.start == 0;
+        let begin = self.begin && first;
+        let end = self.end && range.end == self.dispatches.len();
+        let separate_begin=begin && !self.clear.is_empty();
+        if separate_begin {self.marker.as_ref().expect("installed compositor timing marker").encode(encoder,queries,timing::query(self.span));}
+        if first { for buffer in &self.clear { encoder.clear_buffer(buffer,0,None); } }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(self.label),
+            timestamp_writes: ((begin && !separate_begin) || end).then_some(wgpu::ComputePassTimestampWrites {
+                query_set: queries,
+                beginning_of_pass_write_index: (begin && !separate_begin).then_some(timing::query(self.span)),
+                end_of_pass_write_index: end.then_some(timing::query(self.span) + 1),
+            }),
+        });
+        for dispatch in &self.dispatches[range] {
+            if dispatch.color_only && !color_enabled {
+                continue;
+            }
+            pass.set_pipeline(&dispatch.pipeline);
+            if self.output {
+                pass.set_bind_group(1, output, &[]);
+            }
+            pass.set_bind_group(0, &dispatch.bind, dispatch.dynamic_offset.as_slice());
+            if let Some(material) = &dispatch.material {
+                pass.set_bind_group(1, material, &[]);
+            }
+            if let Some(table) = &dispatch.read_table {
+                pass.set_bind_group(2, table, &[]);
+            }
+            if let Some(hits) = &dispatch.hits {
+                pass.set_bind_group(3, hits, &[]);
+            }
+            if let Some(pages) = &dispatch.pages {
+                pass.set_bind_group(crate::resolve_native::PAGE_GROUP, pages, &[]);
+            }
+            let [x, y, z] = dispatch.groups;
+            pass.dispatch_workgroups(x, y, z);
+        }
+    }
+}
+pub(crate) enum Work {
+    /// Encoded by its pass module over the view's or slot's prebuilt objects.
+    Encode,
+    Compute(Compute),
+}
+/// One recorded step of a view: built once when the view is created.
+pub(crate) struct Step {
+    pub pass: Pass,
+    pub run: Run,
+    pub work: Work,
+}
+impl Step {
+    pub(crate) fn separates(&self) -> bool {
+        matches!(&self.work, Work::Compute(work) if work.separate>0)
+    }
+    /// Only queries written by this recorded step may be resolved. Call after
+    /// checking the step's run bit, using the same view as the encoder.
+    pub(crate) fn timestamp_mask(&self, view: &crate::view::ViewState) -> u64 {
+        let mask = |name| crate::timing::mask(name);
+        match &self.work {
+            Work::Compute(work) => mask(work.span),
+            Work::Encode => match self.pass {
+                Pass::Deform => mask("deform"),
+                Pass::Probes => mask("probes"),
+                Pass::Fibre => mask("fibre"),
+                Pass::Images => mask("images"),
+                Pass::ImageInputs => mask("image inputs"),
+                Pass::Depth => mask("depth"),
+                Pass::Visibility => mask("visibility"),
+                // Banded shading interleaves its stages: one "shade" span covers them.
+                Pass::Shade if crate::passes::decoupled::fused_active(view) => mask("shade"),
+                Pass::Shade if view.decoupled.as_ref().is_some_and(|v| v.bands > 1) => mask("shade"),
+                Pass::Shade => mask("shade") | mask("material compose") | if view.decoupled.as_ref().is_some_and(crate::passes::decoupled::classified) {mask("material classify")} else {0},
+                Pass::Refraction => mask("refraction"),
+                Pass::Clusters if view.lighting.clusters.is_some() => mask("clusters"),
+                Pass::Forward => mask("forward"),
+                Pass::SubsurfaceCompose if view.subsurface.is_some() => mask("subsurface_compose"),
+                // The controls pass finishes the transparency interval; path
+                // controls also start it because there is no raster colour pass.
+                Pass::TransparentControls if !view.transparent_order.is_empty() => mask("transparency"),
+                _ => 0,
+            },
+        }
+    }
+}
+/// Collects the compute work pass modules build while a view is created.
+#[derive(Default)]
+pub(crate) struct Recorder(Vec<(Pass, Compute)>);
+impl Recorder {
+    pub(crate) fn compute(
+        &mut self,
+        pass: Pass,
+        label: &'static str,
+        span: &'static str,
+        output: bool,
+        dispatches: Vec<Dispatch>,
+    ) {
+        debug_assert!(pass.is_compute() && (matches!(pass, Pass::Compositor) || self.0.iter().all(|(p, _)| *p != pass)));
+        self.0.push((
+            pass,
+            Compute {
+                label,
+                span,
+                output,
+                separate: 0,
+                dispatches,
+                clear: Vec::new(),
+                marker: None,
+                begin: true,
+                end: true,
+            },
+        ));
+    }
+    pub(crate) fn separate_last(&mut self) {self.separate_last_every(1);}
+    pub(crate) fn separate_last_every(&mut self,dispatches:usize) {
+        assert!(dispatches>0);
+        self.0.last_mut().expect("recorded compute step").1.separate = dispatches;
+    }
+    pub(crate) fn compositor(&mut self, stage: Pass, dispatches:Vec<Dispatch>, clear:Vec<wgpu::Buffer>, marker:Option<crate::timing::Marker>) {
+        self.compute(stage,"compositor image pass","compositor",false,dispatches);
+        self.0.last_mut().unwrap().1.clear=clear;
+        self.0.last_mut().unwrap().1.marker=marker;
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Texture {
+        size: wgpu::Extent3d,
+        mips: u32,
+        samples: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    },
+    Buffer {
+        size: u64,
+        usage: wgpu::BufferUsages,
+    },
+}
+#[derive(Clone, PartialEq)]
+enum Backing {
+    Texture(wgpu::Texture),
+    Buffer(wgpu::Buffer),
+}
+impl Backing {
+    fn destroy(&self) {
+        match self {
+            Backing::Texture(texture) => texture.destroy(),
+            Backing::Buffer(buffer) => buffer.destroy(),
+        }
+    }
+}
+/// Destroy and drop the backings `outgrown` selects.
+fn destroy_where(physical: &mut Vec<Physical>, outgrown: impl Fn(&Physical) -> bool) {
+    physical.retain(|p| {
+        let destroy = outgrown(p);
+        if destroy { p.backing.destroy(); }
+        !destroy
+    });
+}
+struct Physical {
+    key: Key,
+    busy: Vec<(u16, u16)>,
+    /// Names it held in the replaced generation (Transients::begin_generation).
+    replaced: Vec<String>,
+    backing: Backing,
+    bytes: u64,
+}
+#[derive(Default)]
+pub(crate) struct State {
+    named: HashMap<(String, Key), Backing>,
+    physical: Vec<Physical>,
+    requested: u64,
+}
+/// Transient and frame-scoped backings shared by all frame slots and views of
+/// one installed scene. Used only while creating slots.
+pub(crate) struct Transients {
+    intervals: HashMap<&'static str, (u16, u16)>,
+    state: crate::residency::Cache<Mutex<State>>,
+    /// Submission-ordered input history for the shared published render images.
+    /// Held while one frame submits all its samples.
+    pub(crate) submit: Mutex<crate::values::ChangeTracker>,
+}
+impl Transients {
+    pub(crate) fn new(graph: &Graph, ledger: &std::sync::Arc<crate::residency::Ledger>) -> Self {
+        Self {
+            intervals: graph.intervals.clone(),
+            state: crate::residency::Cache::new(ledger),
+            submit: Mutex::default(),
+        }
+    }
+    pub(crate) fn retain(&self) -> std::sync::Arc<Mutex<State>> {
+        self.state.get_or_try_init(|| {
+            *self.submit.lock().unwrap() = Default::default();
+            Ok((Mutex::new(State::default()), 0))
+        }).expect("transient storage")
+    }
+    fn get(&self, label: &str, key: Key, bytes: u64, create: impl FnOnce() -> Backing) -> Backing {
+        let retained = self.retain();
+        let mut state = retained.lock().unwrap();
+        state.requested += bytes;
+        if let Some(backing) = state.named.get(&(label.to_owned(), key.clone())) {
+            return backing.clone();
+        }
+        // Undeclared names keep a whole-frame interval: shared, never aliased.
+        let interval = self.intervals.get(label).copied().unwrap_or((0, u16::MAX));
+        let disjoint = |&(a, b): &(u16, u16)| b < interval.0 || interval.1 < a;
+        destroy_where(&mut state.physical, |p| p.key != key && p.busy.is_empty() && p.replaced.iter().any(|name| name == label));
+        let found = state
+            .physical
+            .iter()
+            .position(|p| p.key == key && p.busy.iter().all(disjoint));
+        let i = found.unwrap_or_else(|| {
+            state.physical.push(Physical {
+                key: key.clone(),
+                busy: Vec::new(),
+                replaced: Vec::new(),
+                backing: create(),
+                bytes,
+            });
+            state.physical.len() - 1
+        });
+        state.physical[i].busy.push(interval);
+        let backing = state.physical[i].backing.clone();
+        state.named.insert((label.to_owned(), key), backing.clone());
+        self.state.set_bytes(state.physical.iter().map(|p|p.bytes).sum());
+        backing
+    }
+    pub(crate) fn texture(
+        &self,
+        d: &wgpu::Device,
+        desc: &wgpu::TextureDescriptor,
+    ) -> wgpu::Texture {
+        let key = Key::Texture {
+            size: desc.size,
+            mips: desc.mip_level_count,
+            samples: desc.sample_count,
+            format: desc.format,
+            usage: desc.usage,
+        };
+        let bytes = crate::gpu_memory::texture_bytes(desc);
+        match self.get(desc.label.unwrap_or(""), key, bytes, || {
+            Backing::Texture(crate::gpu_memory::texture(&d, desc))
+        }) {
+            Backing::Texture(t) => t,
+            Backing::Buffer(_) => unreachable!(),
+        }
+    }
+    /// One-level 2D target; the transient form of `crate::texture`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn target(
+        &self,
+        d: &wgpu::Device,
+        label: &str,
+        w: u32,
+        h: u32,
+        samples: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::Texture {
+        self.texture(
+            d,
+            &wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent(w, h),
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            },
+        )
+    }
+    pub(crate) fn buffer(
+        &self,
+        d: &wgpu::Device,
+        label: &str,
+        size: u64,
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
+        let key = Key::Buffer { size, usage };
+        match self.get(label, key, size, || {
+            Backing::Buffer(crate::gpu_memory::buffer(&d, &wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            }))
+        }) {
+            Backing::Buffer(b) => b,
+            Backing::Texture(_) => unreachable!(),
+        }
+    }
+    /// Start a generation of frame slots that replaces every existing one
+    /// (InstalledScene::redo_frame). The replaced slots must never submit again,
+    /// even if a replacement fails: the new generation reuses their backings
+    /// where sizes match and destroys each outgrown one before allocating its
+    /// replacement, so a redo never holds both sizes of pooled storage.
+    pub(crate) fn begin_generation(&self) {
+        let retained = self.retain();
+        let mut state = retained.lock().unwrap();
+        state.requested = 0;
+        for physical in &mut state.physical {
+            physical.busy.clear();
+            physical.replaced.clear();
+        }
+        for ((label, _), backing) in std::mem::take(&mut state.named) {
+            if let Some(physical) = state.physical.iter_mut().find(|p| p.backing == backing) { physical.replaced.push(label); }
+        }
+    }
+    /// Destroy the backings the current generation did not request (no busy
+    /// interval): storage of names the replaced slots used and the new ones do not.
+    pub(crate) fn release_previous_generations(&self) {
+        let retained = self.retain();
+        let mut state = retained.lock().unwrap();
+        destroy_where(&mut state.physical, |p| p.busy.is_empty());
+        self.state.set_bytes(state.physical.iter().map(|p|p.bytes).sum());
+    }
+    /// Bytes every slot and view requested (separate allocations before the
+    /// graph) and bytes the graph allocated.
+    pub(crate) fn bytes(&self) -> (u64, u64) {
+        let retained = self.retain();
+        let state = retained.lock().unwrap();
+        (
+            state.requested,
+            state.physical.iter().map(|p| p.bytes).sum::<u64>(),
+        )
+    }
+}
+
+/// Encode one view step over the view's prebuilt resources.
+pub(crate) fn encode_view(
+    encoder: &mut wgpu::CommandEncoder,
+    f: &crate::view::ViewState,
+    step: &Step,
+    r: &crate::Renderer,
+    segments: &mut crate::command_finish::Segments,
+) -> Result<()> {
+    let split = step.separates();
+    if split { crate::command_finish::submission_boundary(r, encoder, segments); }
+    match (&step.work, step.pass) {
+        (Work::Compute(work), _) if split && !work.dispatches.is_empty() => {
+            for begin in (0..work.dispatches.len()).step_by(work.separate) {
+                if begin>0 {crate::command_finish::submission_boundary(r,encoder,segments);}
+                work.encode(encoder,&f.queries,&f.output_bind,f.color_enabled,begin..(begin+work.separate).min(work.dispatches.len()));
+            }
+        }
+        (Work::Compute(work), _) => work.encode(encoder, &f.queries, &f.output_bind,
+            f.color_enabled, 0..work.dispatches.len()),
+        (Work::Encode, Pass::Depth) => passes::depth::encode(encoder, f, r),
+        (Work::Encode, Pass::Clusters) => passes::clusters::encode(encoder, f),
+        (Work::Encode, Pass::Forward) => passes::forward::encode(encoder, f),
+        (Work::Encode, Pass::Visibility) => passes::decoupled::visibility(encoder, f, r, segments)?,
+        (Work::Encode, Pass::Shade) => passes::decoupled::shade(encoder, f, r)?,
+        (Work::Encode, Pass::Refraction) => passes::decoupled::refraction(encoder, f, r)?,
+        (Work::Encode, Pass::AovResolve) => {if let Some(resolve)=&f.aov_resolve {resolve.encode(encoder);}},
+
+        (Work::Encode, Pass::SubsurfaceCompose) => passes::subsurface::compose(encoder, f),
+        (Work::Encode, Pass::TransparentControls) => {
+            passes::transparent::encode_controls(encoder, f)
+        }
+        (Work::Encode, pass) => unreachable!("{pass:?} is not a view raster pass"),
+    }
+    if split { crate::command_finish::submission_boundary(r, encoder, segments); }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decoupled_shading_follows_culling_and_controls() {
+        let mut plan = crate::plan::ScenePlan {
+            decoupled: true, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
+            volume: false,  effects: Default::default(),
+            draws: Vec::new(), casters: Default::default(), transparent: false,
+            deform: false, rays: false, cluster: false,
+            samples: 1, aovs: false,
+        };
+        let graph = Graph::new(&plan, true).unwrap();
+        let index = |graph: &Graph, pass| graph.order.iter().position(|p| p.pass == pass).unwrap();
+        assert!(graph.reads("visibility slots"));
+        assert!(index(&graph, Pass::Depth) < index(&graph, Pass::Visibility));
+        assert!(index(&graph, Pass::Visibility) < index(&graph, Pass::Shade));
+        assert!(index(&graph, Pass::Forward) < index(&graph, Pass::Shade));
+        assert!(index(&graph, Pass::Shade) < index(&graph, Pass::Resolve));
+        plan.aovs = true;
+        let graph = Graph::new(&plan, true).unwrap();
+        assert!(index(&graph, Pass::Shade) < index(&graph, Pass::AovResolve));
+        plan.screen_refraction = true;
+        let graph = Graph::new(&plan, true).unwrap();
+        assert!(index(&graph, Pass::Shade) < index(&graph, Pass::Refraction));
+        assert!(index(&graph, Pass::Refraction) < index(&graph, Pass::AovResolve));
+        assert!(index(&graph, Pass::Refraction) < index(&graph, Pass::Resolve));
+        assert!(graph.reads("refraction pyramid") && graph.reads("refraction receivers"));
+        plan.screen_refraction = false;
+        plan.effects.indirect = true;
+        let graph = Graph::new(&plan, true).unwrap();
+        assert!(graph.reads("visibility slots"));
+        assert!(index(&graph, Pass::Depth) < index(&graph, Pass::Visibility));
+        assert!(index(&graph, Pass::Visibility) < index(&graph, Pass::Shade));
+        assert!(index(&graph, Pass::Controls) < index(&graph, Pass::Shade));
+        assert!(index(&graph, Pass::Shade) < index(&graph, Pass::Ao));
+        assert!(index(&graph, Pass::Ao) < index(&graph, Pass::Resolve));
+        assert!(graph.reads("decoupled AO receivers"));
+        plan.effects.indirect = false;
+        plan.effects.reflections = true;
+        let graph = Graph::new(&plan, true).unwrap();
+        assert!(graph.reads("visibility slots"));
+        assert!(index(&graph, Pass::Depth) < index(&graph, Pass::Visibility));
+        assert!(index(&graph, Pass::Visibility) < index(&graph, Pass::Shade));
+        assert!(index(&graph, Pass::Controls) < index(&graph, Pass::Shade));
+        assert!(index(&graph, Pass::Shade) < index(&graph, Pass::Reflections));
+        assert!(index(&graph, Pass::Reflections) < index(&graph, Pass::Resolve));
+        assert!(graph.reads("reflection guides"));
+        assert!(graph.reads("reflection records"));
+    }
+    #[test]
+    fn rejects_read_before_writer() {
+        let mut b = Builder::default();
+        b.pass(Pass::Forward)
+            .reads(&["depth 4x"])
+            .writes(&[VIEW_COLOUR]);
+        b.pass(Pass::Depth).writes(&["depth 4x"]);
+        assert!(Graph::compile(b, &[VIEW_COLOUR]).is_err());
+    }
+    #[test]
+    fn physical_fibre_transport_is_a_live_lighting_dependency() {
+        let plan = crate::plan::ScenePlan {
+            decoupled: true, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
+            volume: false,
+            effects: crate::plan::EffectPlan { fibre: true, ..Default::default() },
+            draws: Vec::new(), casters: Default::default(), transparent: true,
+            deform: false, rays: false, cluster: false,
+            samples: 1, aovs: false,
+        };
+        let graph = Graph::new(&plan, true).unwrap();
+        let fibre = graph.order.iter().position(|p| p.pass == Pass::Fibre)
+            .expect("lighting must retain its transport producer");
+        let shade = graph.order.iter().position(|p| p.pass == Pass::Shade).unwrap();
+        assert!(fibre < shade);
+    }
+
+    #[test]
+    fn probe_volume_update_exists_only_when_enabled_and_precedes_colour() {
+        for probes in [false, true] {
+          for image_feedback in [false, true] {
+            let plan = crate::plan::ScenePlan {
+            decoupled: true, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
+                effects: crate::plan::EffectPlan { probes, image_feedback: image_feedback && probes, ..Default::default() },
+                volume: false,
+                draws: Vec::new(), casters: Default::default(),
+                transparent: false, deform: false,
+                rays: probes, cluster: true, samples: 2, aovs: false,
+            };
+            let graph = Graph::new(&plan, true).unwrap();
+            let index = |p| graph.order.iter().position(|s| s.pass == p);
+            assert_eq!(index(Pass::Probes).is_some(), probes);
+            if let Some(update) = index(Pass::Probes) {
+                assert!(index(Pass::Rays).unwrap() < update && update < index(Pass::Shade).unwrap());
+                assert_eq!(graph.order[update].run, Run::Probes);
+                if image_feedback {
+                    let seed = index(Pass::ImageInputs).expect("same-frame image producer");
+                    assert!(seed < update);
+                    assert!(update < index(Pass::Images).unwrap());
+                } else {
+                    assert!(index(Pass::ImageInputs).is_none());
+                }
+            }
+          }
+        }
+    }
+    #[test]
+    fn clustered_lists_precede_raster_consumers() {
+        for path in [false, true] {
+            for volume in [false, true] {
+                for screen_refraction in [false, true] {
+                    if path && screen_refraction {continue;}
+                    let plan = crate::plan::ScenePlan {
+                        decoupled: !path, exposure_samples: 1, visibility_samples: 1, screen_refraction,
+                        effects: crate::plan::EffectPlan { path, ..Default::default() },
+                        volume,
+                        draws: Vec::new(), casters: Default::default(),
+                        transparent: screen_refraction, deform: false,
+                        rays: path, cluster: !path || volume, samples: 2, aovs: false,
+                    };
+                    let graph = Graph::new(&plan, true).unwrap();
+                    let index = |p| graph.order.iter().position(|s| s.pass == p);
+                    assert_eq!(index(Pass::Clusters).is_some(), !path || volume);
+                    if let Some(clusters) = index(Pass::Clusters) {
+                        assert!(clusters < index(if path { Pass::Path } else { Pass::Shade }).unwrap());
+                        if screen_refraction {assert!(clusters < index(Pass::Refraction).unwrap());}
+                        let step = &graph.order[clusters];
+                        for _volume_run in [false, true] {
+                            let bits = RunBits { color: true, final_sample: false,
+                                probes: false, fibre: false, images: false, pixels: false };
+                            assert!(bits.runs(step.run), "each colour sample needs current camera clusters");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn retained_reads_precede_writers_and_dropped_outputs_are_placeholders() {
+        let mut b = Builder::default();
+        b.pass(Pass::Compositor).when(false).writes(&[]);
+        b.pass(Pass::Resolve)
+            .reads(&["linear sample accumulation"])
+            .writes(&["linear sample accumulation", VIEW_COLOUR]);
+        let graph = Graph::compile(b, &[VIEW_COLOUR]).unwrap();
+        assert_eq!(graph.order.len(), 1);
+        assert_eq!(graph.order[0].pass, Pass::Resolve);
+    }
+    #[test]
+    fn denoiser_retains_controls_before_sample_accumulation() {
+        let plan = crate::plan::ScenePlan {
+            decoupled: false, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
+            volume: false,
+            effects: crate::plan::EffectPlan {
+                denoise: true,
+                ..Default::default()
+            },
+            draws: Vec::new(),
+            casters: Default::default(),
+            transparent: false,
+            deform: false,
+            rays: false,
+            cluster: false,
+            samples: 4,
+            aovs: false,
+        };
+        let graph = Graph::new(&plan, true).unwrap();
+        let index = |p| graph.order.iter().position(|s| s.pass == p).unwrap();
+        assert!(index(Pass::Controls) < index(Pass::PostSource));
+        assert!(index(Pass::PostSource) < index(Pass::Denoise));
+        assert!(index(Pass::Denoise) < index(Pass::Resolve));
+    }
+    #[test]
+    fn passes_prune_by_sinks() {
+        let build = || {
+            let mut b = Builder::default();
+            b.pass(Pass::Rays).writes(&["ray structures"]);
+            b.pass(Pass::Forward)
+                .reads(&["ray structures"])
+                .writes(&["HDR resolved"]);
+            // Written but read by nothing that reaches a sink.
+            b.pass(Pass::Ao)
+                .writes(&["AO filtered visibility depth normal"]);
+            b.pass(Pass::Resolve)
+                .reads(&["HDR resolved"])
+                .writes(&["packed PNG pixels", VIEW_COLOUR]);
+            b.pass(Pass::Readback)
+                .reads(&["packed PNG pixels"])
+                .writes(&[CPU_READBACK]);
+            b
+        };
+        let passes = |g: &Graph| g.order.iter().map(|s| s.pass).collect::<Vec<_>>();
+        let all = Graph::compile(build(), &[VIEW_COLOUR, CPU_READBACK]).unwrap();
+        use Pass::*;
+        assert_eq!(passes(&all), [Rays, Forward, Resolve, Readback]);
+        assert!(all.reads("packed PNG pixels"));
+        let colour = Graph::compile(build(), &[VIEW_COLOUR]).unwrap();
+        assert_eq!(passes(&colour), [Rays, Forward, Resolve]);
+        assert!(!colour.reads("packed PNG pixels"));
+    }
+}

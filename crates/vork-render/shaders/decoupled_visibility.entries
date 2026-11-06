@@ -1,0 +1,7 @@
+vs vertex
+fs fragment
+single_fs fragment
+masked_vs vertex
+masked_fs fragment
+transparent_fragments_fs fragment
+transparent_triangles_fs fragment

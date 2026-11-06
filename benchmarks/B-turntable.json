@@ -1,0 +1,137 @@
+{
+  "animation": [
+    {
+      "tracks": [
+        {
+          "keys": [
+            [
+              0.0,
+              [
+                0.0017263685500000028,
+                0.11650702970054756,
+                0.25739090239005435
+              ]
+            ],
+            [
+              2.5,
+              [
+                0.25911727439430043,
+                0.11650702970054756,
+                -3.4542460505038962e-09
+              ]
+            ],
+            [
+              5.0,
+              [
+                0.0017263685500000343,
+                0.11650702970054756,
+                -0.25739090929854647
+              ]
+            ],
+            [
+              7.5,
+              [
+                -0.2556645372943004,
+                0.11650702970054756,
+                -3.454246113546486e-09
+              ]
+            ],
+            [
+              10.0,
+              [
+                0.0017263685499999397,
+                0.11650702970054756,
+                0.25739090239005435
+              ]
+            ]
+          ],
+          "path": [
+            "nodes",
+            "camera",
+            "translation"
+          ]
+        }
+      ]
+    }
+  ],
+  "materials": {
+    "benchmark-camera": {
+      "inputs": {
+        "clip_end": 10000,
+        "clip_start": 0.01,
+        "lens": 45
+      },
+      "program": "std/camera"
+    }
+  },
+  "nodes": [
+    {
+      "file": "assets/khronos/ToyCar/ToyCar.gltf",
+      "name": "asset",
+      "type": "asset"
+    },
+    {
+      "material": "benchmark-camera",
+      "name": "camera",
+      "target": [
+        0.0017263685500000028,
+        -0.0017948260093168921,
+        -3.4542460662645436e-09
+      ],
+      "translation": [
+        0.183729223488253,
+        0.11650702970054756,
+        0.18200285148400694
+      ],
+      "type": "camera"
+    },
+    {
+      "color": [
+        1,
+        1,
+        1
+      ],
+      "energy": 3,
+      "name": "sun",
+      "shape": "sun",
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "translation": [
+        4,
+        8,
+        5
+      ],
+      "type": "light"
+    },
+    {
+      "color": [
+        0.05,
+        0.05,
+        0.05
+      ],
+      "energy": 1,
+      "name": "world",
+      "shape": "environment",
+      "type": "light"
+    }
+  ],
+  "render": {
+    "camera": "camera",
+    "display": {
+      "inputs": {
+        "dither_intensity": 0
+      },
+      "program": "std/agx"
+    },
+    "duration": 10.0,
+    "fps": 24,
+    "resolution": [
+      1920,
+      1080
+    ]
+  },
+  "version": 2
+}

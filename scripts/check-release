@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Install a release, then compile authored materials and denoise without external tools."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('archive', type=Path)
+p.add_argument('--skip-setup', action='store_true',
+               help='install with VORK_SKIP_SETUP=1')
+p.add_argument('--skip-render', action='store_true', help='GPU-free hosted check: verify installed assets/tools, without rendering')
+a = p.parse_args()
+repo = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory(prefix='vork-release-') as tmp:
+    root = Path(tmp)
+    archive = root / a.archive.name
+    shutil.copy2(a.archive.resolve(), archive)
+    (root / 'SHA256SUMS').write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
+    version = archive.name.removeprefix('vork-').rsplit('-', 2)[0]
+    env = os.environ.copy()
+    for key in ('VORK_SLANGC', 'VORK_OIDN'):
+        env.pop(key, None)
+    env.update(VERSION=version, PREFIX=str(root / 'installed'), VORK_DOWNLOAD_BASE=root.as_uri(),
+               VORK_CACHE_DIR=str(root / 'cache'), HOME=str(root / 'home'), USERPROFILE=str(root / 'home'))
+    if a.skip_setup:
+        env['VORK_SKIP_SETUP'] = '1'
+    (root / 'home').mkdir()
+    if os.name == 'nt':
+        subprocess.run([shutil.which('pwsh') or 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                        '-File', str(repo / 'install.ps1')], env=env, check=True)
+        package = root / 'installed'
+        binary = package / 'vork.exe'
+    else:
+        subprocess.run(['sh', str(repo / 'install.sh')], env=env, check=True)
+        package = root / 'installed/lib/vork'
+        binary = root / 'installed/bin/vork'
+    # Validate the installed immutable assets against the exact installed binary.
+    from shader_bundle import package as verify_shaders
+    verify_shaders(binary.resolve(), package / 'shaders', root / 'verified-shaders')
+    subprocess.run([str(binary), '--version'], cwd=root, env=env, check=True)
+    compiler = package / ('slang/bin/slangc.exe' if os.name == 'nt' else 'slang/bin/slangc')
+    subprocess.run([str(compiler), '-version'], cwd=root, env=env, check=True)
+    if a.skip_render:
+        print('release check: installed binary, bundled compiler and verified portable shaders; GPU rendering requires hardware acceptance')
+        raise SystemExit(0)
+    nvidia_smi = shutil.which('nvidia-smi')
+    nvidia = bool(nvidia_smi) and subprocess.run([nvidia_smi, '-L'], capture_output=True).returncode == 0
+    env['PATH'] = str(root / 'empty-path')
+    Path(env['PATH']).mkdir()
+    # Use installed assets, not the source checkout or the extracted archive.
+    # The installed symlink must resolve Filmic data beside the real executable.
+    filmic = {'version': 2, 'render': {'resolution': [1, 1],
+              'display': {'program': 'blender/filmic', 'inputs': {'dither_intensity':0}}, 'background': [.18, .18, .18]},
+              'nodes': [{'type': 'camera'}]}
+    filmic_scene = root / 'filmic.json'
+    filmic_scene.write_text(json.dumps(filmic))
+    command = [str(binary), 'render', str(filmic_scene), '--at', '0', '--profile', 'std/draft',
+               '--out', str(root / 'filmic')]
+    subprocess.run(command, cwd=root, env=env, check=True)
+    lut = package / 'libraries/blender/filmic.exr'
+    data = lut.read_bytes()
+    lut.unlink()
+    try:
+        result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+        if result.returncode == 0 or str(lut.resolve()) not in result.stdout + result.stderr:
+            p.error(f'missing Filmic LUT must fail naming {lut}: {result.stdout}{result.stderr}')
+        filmic['render']['display'] = {'program':'std/standard'}
+        filmic_scene.write_text(json.dumps(filmic))
+        subprocess.run(command, cwd=root, env=env, check=True)
+    finally:
+        lut.write_bytes(data)
+    scene = {'version': 2, 'nodes': [
+        {'type': 'camera', 'translation': [0, 0, 4], 'target': [0, 0, 0]},
+        {'type': 'mesh', 'geometry': {'std': 'sphere'}, 'materials': [{'program': {
+            'source': 'import vork; struct Inputs {}; Closure surface(ShadingContext ctx, Inputs inputs) { Closure c = {}; '
+                      'c.base_weight = 1.; c.specular_weight = 1.; c.base_color = float3(0.1, 0.4, 0.7); '
+                      'c.specular_roughness = 0.4; return c; }'}}]},
+        {'type': 'light', 'shape': 'rectangle', 'translation': [0, 3, 3],
+         'target': [0, 0, 0], 'energy': 700, 'size': 4}], 'render': {}}
+    scene['render']['resolution'] = [64, 64]
+    # Check authored-program compilation and OIDN separately so each required
+    # installed capability has its own render result and failure context.
+    for name, denoiser in [('program', None), ('oidn', {})]:
+        scene_path = package / f'examples/release-check-{name}.json'
+        scene_path.write_text(json.dumps(scene))
+        profile = package / f'examples/release-check-{name}.profile.json'
+        profile.write_text(json.dumps({'version': 1, 'level': 0, 'description': 'release check', 'settings': {'denoise': denoiser is not None}}))
+        subprocess.run([str(binary), 'render', str(scene_path), '--profile', str(profile), '--at', '0', '--channels', 'color',
+                        '--out', str(root / name)], cwd=root, env=env, check=True)
+        if not (root / name / '000000.png').is_file():
+            p.error(f'installed {name} render produced no PNG')
+    if nvidia:
+        # A default render on NVIDIA must not silently lose the GPU denoiser.
+        scene_path = package / 'examples/release-check-gpu-denoiser.json'
+        scene_path.write_text(json.dumps(scene))
+        run = subprocess.run([str(binary), 'render', str(scene_path), '--profile', 'std/draft', '--at', '0', '--channels', 'color',
+                              '--out', str(root / 'gpu-denoiser')], cwd=root, env=env, capture_output=True, text=True)
+        meta = root / 'gpu-denoiser/meta.json'
+        used = json.loads(meta.read_text()).get('denoiser') if run.returncode == 0 and meta.is_file() else None
+        if used != 'gpu':
+            p.error(f'NVIDIA GPU present but the GPU denoiser was not used (denoiser={used}): {run.stdout}{run.stderr}')
+print('release check: installed copy compiled custom materials and denoised with bundled tools only')

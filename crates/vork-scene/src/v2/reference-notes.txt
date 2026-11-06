@@ -1,0 +1,5 @@
+names: string; tables/layers nonempty; named entries unique; excludes '/'
+paths: scene-relative
+structure: install-time; non-keyable
+normal maps: tangent-space; +Y
+colour: linear Rec.709

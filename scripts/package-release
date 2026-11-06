@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Package each supported platform identically. Does not publish anything."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
+import zipfile
+from shader_bundle import package as package_shaders
+
+ROOT = Path(__file__).resolve().parents[1]
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--binary', type=Path, required=True)
+p.add_argument('--platform', choices=['darwin-arm64', 'linux-x64', 'windows-x64'], required=True)
+p.add_argument('--output', type=Path, required=True)
+p.add_argument('--shader-cache', type=Path, help='Portable bundle from scripts/prepare-shaders; defaults to shaders beside the binary')
+p.add_argument('--slang-toolchain', type=Path, required=True, help='Pinned Slang toolchain directory; its compiler, runtime libraries and notices ship')
+p.add_argument('--oidn-toolchain', type=Path, required=True, help='Pinned OIDN distribution from scripts/install-oidn; its runtime libraries and notices ship')
+p.add_argument('--msvc-runtime', type=Path, help='windows-x64: Visual Studio redist folder (VC\\Redist\\MSVC\\<version>\\x64\\Microsoft.VC14x.CRT); the VC++ runtime DLLs that shipped DLLs import are copied beside them')
+a = p.parse_args()
+cargo_version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
+try:
+    reported = subprocess.check_output([str(a.binary.resolve()), '--version'], text=True).split()
+except (OSError, subprocess.CalledProcessError) as error:
+    p.error(f'cannot read binary version: {error}')
+if len(reported) < 2 or reported[0] != 'vork' or reported[1] != cargo_version:
+    p.error(f'binary version {reported!r} does not match Cargo version {cargo_version!r}')
+windows = a.platform.startswith('windows')
+if windows and not (a.msvc_runtime and a.msvc_runtime.is_dir()):
+    p.error('windows-x64 needs --msvc-runtime: OIDN imports the VC++ runtime, which ships app-local beside it')
+compiler = a.slang_toolchain / ('bin/slangc.exe' if windows else 'bin/slangc')
+if not compiler.is_file():
+    p.error(f'Slang toolchain missing compiler: {compiler}')
+# slangc prints its version on stderr.
+try:
+    version = subprocess.run([str(compiler), '-version'], capture_output=True, text=True, check=True).stderr.strip()
+except (OSError, subprocess.CalledProcessError) as error:
+    p.error(f'cannot run pinned Slang compiler {compiler}: {error}')
+pinned = json.loads((ROOT / 'dist/slang.json').read_text())['version']
+if version != pinned:
+    p.error(f'Slang {pinned} required, found {version}')
+for required in ['LICENSE', 'LICENSES', 'third-party-notices', 'bin', 'lib']:
+    if not (a.slang_toolchain / required).exists():
+        p.error(f'Slang toolchain missing {required}')
+oidn_pin = json.loads((ROOT / 'dist/oidn.json').read_text())
+try:
+    oidn_receipt = json.loads((a.oidn_toolchain / 'vork-oidn.json').read_text())
+except (OSError, ValueError) as error:
+    p.error(f'OIDN needs scripts/install-oidn receipt: {error}')
+if oidn_receipt != {'version': oidn_pin['version'], 'platform': a.platform, 'sha256': oidn_pin['archives'][a.platform]['sha256']}:
+    p.error('OIDN receipt does not match pinned version and target platform')
+for required in ['doc/LICENSE.txt', 'doc/third-party-programs.txt', 'bin', 'lib']:
+    if not (a.oidn_toolchain / required).exists():
+        p.error(f'OIDN distribution missing {required}')
+subprocess.run([sys.executable, str(ROOT / 'scripts/generate-notice'), '--check'], check=True)
+# Ship what vork runs plus every upstream notice. vork drives slangc only for
+# Metal, SPIR-V and WGSL, so Slang's LLVM (CPU/host targets only), language
+# server, interpreter, GFX, headers and docs stay out. Standard modules and the
+# GLSL module stay: authored programs may import them. The SPIR-V optimizer stays where Vulkan runs.
+# OIDN keeps every runtime library (all device backends and built-in models)
+# and drops its sample tools, headers, CMake files and manuals.
+NOTICES = ['LICENSE', 'LICENSES', 'third-party-notices']
+SLANG = {
+    'darwin-arm64': NOTICES + ['bin/slangc', 'lib/libslang-compiler.0.*.dylib', 'lib/libslang-glsl-module-*.dylib', 'lib/slang-standard-module-*'],
+    'linux-x64': NOTICES + ['bin/slangc', 'lib/libslang-compiler.so.*', 'lib/libslang-glsl-module-*.so', 'lib/libslang-glslang-*.so', 'lib/slang-standard-module-*'],
+    'windows-x64': NOTICES + ['bin/slangc.exe', 'bin/slang-compiler.dll', 'bin/slang-glsl-module.dll', 'bin/slang-glslang.dll', 'bin/slang-standard-module-*'],
+}
+OIDN_NOTICES = ['vork-oidn.json', 'doc/LICENSE.txt', 'doc/third-party-programs*.txt']
+OIDN = {
+    'darwin-arm64': OIDN_NOTICES + ['lib/*.dylib'],
+    'linux-x64': OIDN_NOTICES + ['lib/*.so*'],
+    'windows-x64': OIDN_NOTICES + ['bin/*.dll'],
+}
+
+
+def copy_selected(source, destination, patterns):
+    for pattern in patterns:
+        matches = sorted(source.glob(pattern))
+        if not matches:
+            p.error(f'{source} has no {pattern}')
+        for f in matches:
+            target = destination / f.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if f.is_symlink():
+                target.symlink_to(f.readlink())
+            elif f.is_dir():
+                shutil.copytree(f, target, symlinks=True, ignore=shutil.ignore_patterns('._*'))
+            else:
+                shutil.copy2(f, target)
+
+
+# Visual C++ runtime DLL names (the Microsoft.VC14x.CRT redist set). UCRT
+# (api-ms-win-crt-*, ucrtbase) is part of Windows 10 and later and is not shipped.
+VC_RUNTIME = ('vcruntime', 'msvcp', 'concrt', 'vccorlib', 'vcamp', 'vcomp')
+
+
+def pe_imports(path):
+    """DLL names in a PE file's import and delay-import tables."""
+    import struct
+    d = path.read_bytes()
+    pe = struct.unpack_from('<I', d, 0x3c)[0]
+    if d[pe:pe + 4] != b'PE\0\0':
+        p.error(f'{path} is not a PE file')
+    sections, optional_size = struct.unpack_from('<H', d, pe + 6)[0], struct.unpack_from('<H', d, pe + 20)[0]
+    optional = pe + 24
+    directories = optional + (112 if struct.unpack_from('<H', d, optional)[0] == 0x20b else 96)
+    table = [struct.unpack_from('<8sIIII', d, optional + optional_size + i * 40)[1:] for i in range(sections)]
+    def offset(rva):
+        return next(rva - va + raw for size, va, raw_size, raw in table if va <= rva < va + max(size, raw_size))
+    names = []
+    for index, step, field in ((1, 20, 12), (13, 32, 4)):
+        rva = struct.unpack_from('<I', d, directories + index * 8)[0]
+        if not rva:
+            continue
+        entry = offset(rva)
+        while (name := struct.unpack_from('<I', d, entry + field)[0]):
+            start = offset(name)
+            names.append(d[start:d.index(b'\0', start)].decode('ascii'))
+            entry += step
+    return names
+
+
+def ship_vc_runtime(directory):
+    """Copy the VC++ runtime DLLs that this directory's DLLs/EXEs import (transitively) beside them."""
+    pending = sorted(f for f in directory.iterdir() if f.suffix.lower() in ('.dll', '.exe'))
+    present = {f.name.lower() for f in pending}
+    redist = {f.name.lower(): f for f in a.msvc_runtime.glob('*.dll')}
+    while pending:
+        for name in pe_imports(pending.pop()):
+            if not name.lower().startswith(VC_RUNTIME) or name.lower() in present:
+                continue
+            if name.lower() not in redist:
+                p.error(f'{a.msvc_runtime} has no {name}, which {directory.name} imports')
+            shutil.copy2(redist[name.lower()], directory / redist[name.lower()].name)
+            present.add(name.lower())
+            pending.append(directory / redist[name.lower()].name)
+
+
+a.output.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(dir=a.output) as tmp:
+    stage = Path(tmp)
+    shutil.copy2(a.binary, stage / ('vork.exe' if windows else 'vork'))
+    shaders = a.shader_cache or a.binary.resolve().parent / 'shaders'
+    if not shaders.is_dir():
+        p.error('portable shaders are required: run scripts/prepare-shaders with this binary before packaging')
+    package_shaders(a.binary, shaders, stage / 'shaders')
+    for source, name, patterns in [(a.slang_toolchain, 'slang', SLANG[a.platform]), (a.oidn_toolchain, 'oidn', OIDN[a.platform])]:
+        copy_selected(source, stage / name, patterns)
+    if windows:
+        # vork.exe and Slang are static-CRT; OIDN's DLLs import MSVCP140/VCRUNTIME140.
+        # vork loads OIDN with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, so its dependencies resolve here.
+        for directory in (stage, stage / 'slang/bin', stage / 'oidn/bin'):
+            ship_vc_runtime(directory)
+    for f in ['LICENSE', 'NOTICE', 'README.md']:
+        shutil.copy2(ROOT / f, stage / f)
+    shutil.copytree(ROOT / 'dist/licenses', stage / 'licenses')
+    shutil.copytree(ROOT / 'examples', stage / 'examples')
+    copy_selected(ROOT, stage, ['libraries/blender/filmic.exr'])
+    sdk = ROOT / 'packages/ts'
+    if not (sdk / 'dist/index.js').exists():
+        p.error('Build the vendored SDK first: cd packages/ts && npm ci && npm run build')
+    shutil.copytree(sdk / 'dist', stage / 'sdk')
+    shutil.copy2(sdk / 'scene.schema.json', stage / 'sdk/scene.schema.json')
+    shutil.copy2(ROOT / 'LICENSE', stage / 'sdk/LICENSE')
+    metadata = json.loads((sdk / 'package.json').read_text(encoding='utf-8'))
+    (stage / 'sdk/package.json').write_text(json.dumps({
+        'name': metadata['name'], 'version': metadata['version'], 'type': 'module',
+        'license': metadata['license']
+    }, indent=2) + '\n', encoding='utf-8')
+    # Python SDK: a pip-installable source tree (pip install PREFIX/lib/vork/python).
+    shutil.copytree(ROOT / 'packages/python', stage / 'python',
+                    ignore=shutil.ignore_patterns('generate.py', 'test_*.py', '__pycache__', '*.egg-info', 'build'))
+    shutil.copy2(ROOT / 'LICENSE', stage / 'python/LICENSE')
+    # integrations/ (the GPL Blender bridge) is a separate component and never ships in an archive.
+    if any('integrations' in f.relative_to(stage).parts for f in stage.rglob('*')):
+        p.error('release archive must not include integrations/')
+    archive = a.output / f'vork-{cargo_version}-{a.platform}.{"zip" if windows else "tar.gz"}'
+    if windows:
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
+            for f in sorted(stage.rglob('*')):
+                z.write(f, f.relative_to(stage).as_posix())
+    else:
+        with tarfile.open(archive, 'w:gz') as tar:
+            for f in sorted(stage.iterdir()):
+                tar.add(f, arcname=f.name)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    sums = a.output / 'SHA256SUMS'
+    rows = sums.read_text(encoding='utf-8').splitlines() if sums.exists() else []
+    rows = [r for r in rows if r.split()[-1] != archive.name]
+    sums.write_text('\n'.join(sorted(rows + [f'{digest}  {archive.name}'])) + '\n', encoding='utf-8', newline='\n')
+    print(f'{archive}: {archive.stat().st_size} bytes')

@@ -1,0 +1,9 @@
+{
+  "version": 4,
+  "level": 1,
+  "settings": {
+    "seed": 0,
+    "denoise": true
+  },
+  "description": "Final quality/cost level with scene-ray lighting and OIDN denoising (default)."
+}

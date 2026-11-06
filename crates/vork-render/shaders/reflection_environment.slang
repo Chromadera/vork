@@ -1,0 +1,43 @@
+// A physical escape terminates at World. Retained directional radiance supplies
+// secondary endpoints; unsupported local data remains explicit.
+import vork_prelude;
+import vork_constants;
+import surface_medium;
+#ifdef VORK_PROBES
+import probes;
+import probe_visibility_policy;
+#endif
+struct DirectionalRadianceSample {float3 radiance;bool local;bool supported;};
+DirectionalRadianceSample directional_provider(float3 world,float3 normal,float3 view,float3 direction,float roughness,bool escaped,Frame frame,Texture2D environment,SamplerState environment_sampler,bool world_permitted=true) {
+    var terminal=world_permitted ? reflection_fallback(direction,roughness,frame,environment,environment_sampler) : float3(0.);
+#ifdef VORK_SURFACE_MEDIUM
+    if(!escaped) {terminal*=surface_medium_transmittance(world,direction,REG_FP32_MAX);}
+#endif
+#ifdef VORK_PROBES
+    if(!escaped) {
+        let sample=probe_directional_field(world,normal,view,direction,roughness,terminal);
+        if(sample.owned) {return DirectionalRadianceSample(sample.radiance,true,sample.valid);}
+    }
+#endif
+    return DirectionalRadianceSample(terminal,false,true);
+}
+float3 directional_radiance(float3 world,float3 normal,float3 view,float3 direction,float roughness,bool escaped,Frame frame,Texture2D environment,SamplerState environment_sampler,bool world_permitted=true) {
+    return directional_provider(world,normal,view,direction,roughness,escaped,frame,environment,environment_sampler,world_permitted).radiance;
+}
+DirectionalRadianceSample receiver_provider(float3 world,float3 normal,float3 view,float3 direction,float roughness,Frame frame,Texture2D environment,SamplerState environment_sampler,bool capture_endpoint=false,bool world_permitted=true) {
+#ifdef VORK_PROBES
+    if(capture_endpoint) {
+        if(!world_permitted) {return DirectionalRadianceSample(float3(0.),false,true);}
+        var terminal=reflection_fallback(direction,1.,frame,environment,environment_sampler);
+#ifdef VORK_SURFACE_MEDIUM
+        terminal*=surface_medium_transmittance(world,direction,REG_FP32_MAX);
+#endif
+        let endpoint=probe_field_sample<ProbeMomentVisibility>(world,normal,view,direction,.75,normal,float3(0.));
+        return DirectionalRadianceSample(endpoint.owned ? endpoint.radiance : terminal,endpoint.owned,!endpoint.owned || endpoint.valid);
+    }
+#endif
+    return directional_provider(world,normal,view,direction,roughness,false,frame,environment,environment_sampler,world_permitted);
+}
+float3 receiver_reflection(float3 world,float3 normal,float3 view,float3 direction,float roughness,Frame frame,Texture2D environment,SamplerState environment_sampler,bool capture_endpoint=false,bool world_permitted=true) {
+    return receiver_provider(world,normal,view,direction,roughness,frame,environment,environment_sampler,capture_endpoint,world_permitted).radiance;
+}

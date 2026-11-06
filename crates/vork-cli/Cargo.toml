@@ -1,0 +1,27 @@
+[package]
+name = "vork-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[[bin]]
+name = "vork"
+path = "src/main.rs"
+[dependencies]
+vork-render = { path = "../vork-render" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+vork-scene = { path = "../vork-scene" }
+vork-std = { path = "../vork-std" }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+blake3 = "1"
+
+[dev-dependencies.vork-scene]
+path = "../vork-scene"
+features = ["test-support"]
+
+[build-dependencies]
+vork-slang = { path = "../vork-slang" }

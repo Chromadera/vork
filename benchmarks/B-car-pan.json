@@ -1,0 +1,122 @@
+{
+  "animation": [
+    {
+      "clip": {
+        "index": 0,
+        "target": "asset"
+      }
+    },
+    {
+      "tracks": [
+        {
+          "keys": [
+            [
+              0,
+              [
+                7,
+                5,
+                9
+              ]
+            ],
+            [
+              10,
+              [
+                1,
+                2,
+                6
+              ]
+            ]
+          ],
+          "path": [
+            "nodes",
+            "camera",
+            "translation"
+          ]
+        }
+      ]
+    }
+  ],
+  "materials": {
+    "benchmark-camera": {
+      "inputs": {
+        "clip_end": 10000,
+        "clip_start": 0.01,
+        "lens": 45
+      },
+      "program": "std/camera"
+    }
+  },
+  "nodes": [
+    {
+      "file": "assets/B-car-pan.glb",
+      "name": "asset",
+      "type": "asset"
+    },
+    {
+      "material": "benchmark-camera",
+      "name": "camera",
+      "target": [
+        0,
+        1,
+        0
+      ],
+      "translation": [
+        7,
+        5,
+        9
+      ],
+      "type": "camera"
+    },
+    {
+      "color": [
+        1,
+        1,
+        1
+      ],
+      "energy": 3,
+      "name": "sun",
+      "shape": "sun",
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "translation": [
+        4,
+        8,
+        5
+      ],
+      "type": "light"
+    },
+    {
+      "color": [
+        0.05,
+        0.05,
+        0.05
+      ],
+      "energy": 1,
+      "name": "world",
+      "shape": "environment",
+      "type": "light"
+    }
+  ],
+  "render": {
+    "camera": "camera",
+    "display": {
+      "inputs": {
+        "dither_intensity": 0
+      },
+      "program": "std/agx"
+    },
+    "duration": 10.0,
+    "fps": 24,
+    "motion_blur": {
+      "shutter": 0.5
+    },
+    "resolution": [
+      1920,
+      1080
+    ]
+  },
+  "version": 2
+}

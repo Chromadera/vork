@@ -1,0 +1,137 @@
+{
+  "basisu_c_sys": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/beicause/basisu_c_sys",
+    "version": "0.9.1"
+  },
+  "basisu_wasm_libcxx": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/beicause/basisu_c_sys",
+    "version": "0.1.0"
+  },
+  "block2": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.6.2"
+  },
+  "dispatch2": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.3.1"
+  },
+  "gl_generator": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/brendanzab/gl-rs/",
+    "version": "0.14.0"
+  },
+  "gpu-descriptor": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/zakarumych/gpu-descriptor",
+    "version": "0.3.2"
+  },
+  "gpu-descriptor-types": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/zakarumych/gpu-descriptor",
+    "version": "0.2.0"
+  },
+  "hexf-parse": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/lifthrasiir/hexf",
+    "version": "0.2.1"
+  },
+  "ispc_rt": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/Twinklebear/ispc-rs",
+    "version": "2.0.4"
+  },
+  "jni-sys-macros": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/jni-rs/jni-sys",
+    "version": "0.4.1"
+  },
+  "khronos_api": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/brendanzab/gl-rs/",
+    "version": "3.1.0"
+  },
+  "lyon_geom": {
+    "note": "Upstream root licence at published crate revision db98d26a1a90076a7a894262dcb51117eef643c8; review on locked version update.",
+    "repository": "https://github.com/nical/lyon",
+    "version": "1.0.20"
+  },
+  "lyon_path": {
+    "note": "Upstream root licence at published crate revision 56219c95c658d4f39de7b190d98e57d5773ba241; review on locked version update.",
+    "repository": "https://github.com/nical/lyon",
+    "version": "1.0.19"
+  },
+  "lyon_tessellation": {
+    "note": "Upstream root licence at published crate revision db98d26a1a90076a7a894262dcb51117eef643c8; review on locked version update.",
+    "repository": "https://github.com/nical/lyon",
+    "version": "1.0.23"
+  },
+  "ndk-sys": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/rust-mobile/ndk",
+    "version": "0.6.0+11769913"
+  },
+  "objc2": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.6.5"
+  },
+  "objc2-core-foundation": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.3.2"
+  },
+  "objc2-encode": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "4.1.0"
+  },
+  "objc2-foundation": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.3.2"
+  },
+  "objc2-metal": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.3.2"
+  },
+  "objc2-quartz-core": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/madsmtm/objc2",
+    "version": "0.3.2"
+  },
+  "profiling": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/aclysma/profiling",
+    "version": "1.0.18"
+  },
+  "pulp-wasm-simd-flag": {
+    "note": "MIT text from repository LICENSE at published crate VCS commit 5eb07fd7b68edf0a5e19f71737d315f72a510295; crate omits its own copy. Review on locked version update.",
+    "repository": "https://github.com/sarah-quinones/pulp/",
+    "version": "0.1.1"
+  },
+  "r-efi": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/r-efi/r-efi",
+    "version": "6.0.0"
+  },
+  "rquickjs-core": {
+    "note": "Workspace licence copied from the published rquickjs 0.12.2 crate; rquickjs-core publication omits it. Review on version update.",
+    "repository": "https://github.com/DelSkayn/rquickjs",
+    "version": "0.12.2"
+  },
+  "spirv": {
+    "note": "Upstream repository licence; review on each locked version update. r-efi uses published AUTHORS.",
+    "repository": "https://github.com/gfx-rs/rspirv",
+    "version": "0.4.0+sdk-1.4.341.0"
+  },
+  "zune-inflate": {
+    "note": "Zlib alternative from repository LICENSE-ZLIB at published crate VCS commit 69502ce83fdfecdd0beefd677e2abb3781b29d98. Review on locked version update.",
+    "repository": "https://github.com/etemesi254/zune-image",
+    "version": "0.2.54"
+  }
+}

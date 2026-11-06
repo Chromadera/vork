@@ -1,0 +1,267 @@
+// PCA and least-squares endpoint fitting, following ISPCTextureCompressor's
+// mode-5/6 approach. Intel MIT notice: third_party/ispc_refine/LICENSE.
+import vork_constants;
+
+uint4 refine_quantize_endpoint(float4 endpoint)
+{
+    endpoint = clamp(endpoint, 0.0, 255.0);
+    uint4 even = uint4(clamp(floor(endpoint * 0.5 + 0.5), 0.0, 127.0)) * 2;
+    uint4 odd = uint4(clamp(floor((endpoint - 1.0) * 0.5 + 0.5), 0.0, 127.0)) * 2 + 1;
+    float4 a = float4(even) - endpoint, b = float4(odd) - endpoint;
+    float ea=dot(a.rgb,a.rgb)+g_alpha_weight*a.a*a.a;
+    float eb=dot(b.rgb,b.rgb)+g_alpha_weight*b.a*b.a;
+    return ea < eb ? even : odd;
+}
+
+uint refine_indices(float4 pixels[16], uint4 low, uint4 high, out uint2 indices)
+{
+    float4 span = float4(high) - float4(low);
+    span.a*=g_alpha_weight;
+    float inverse = 1.0 / max(dot(span,span), REG_POSITIVE_EPSILON);
+    indices = 0;
+    uint error = 0;
+    [unroll] for (uint i=0; i<16; ++i)
+    {
+        float t = dot(pixels[i]-float4(low),span)*inverse;
+        uint upper = uint(clamp(int(t*16.0+0.5),1,15));
+        uint wa = aWeight[0][upper-1], wb = aWeight[0][upper];
+        uint4 a = ((64-wa)*low+wa*high+32)>>6;
+        uint4 b = ((64-wb)*low+wb*high+32)>>6;
+        float4 da=float4(a)-pixels[i], db=float4(b)-pixels[i];
+        uint ea=uint(dot(da.rgb,da.rgb)+g_alpha_weight*da.a*da.a);
+        uint eb=uint(dot(db.rgb,db.rgb)+g_alpha_weight*db.a*db.a);
+        uint index = ea < eb ? upper-1 : upper;
+        error += min(ea,eb);
+        indices[i/8] |= index << ((i%8)*4);
+    }
+    return error;
+}
+
+uint4 refine_pack_mode6(uint4 low, uint4 high, uint2 indices)
+{
+    if ((indices.x & 15) >= 8)
+    {
+        uint4 temp=low; low=high; high=temp;
+        indices=~indices;
+    }
+    uint4 block;
+    block.x=0x40 | ((low.r&0xFE)<<6) | ((high.r&0xFE)<<13)
+        | ((low.g&0xFE)<<20) | ((high.g&0xFE)<<27);
+    block.y=((high.g&0xFE)>>5) | ((low.b&0xFE)<<2) | ((high.b&0xFE)<<9)
+        | ((low.a&0xFE)<<16) | ((high.a&0xFE)<<23) | ((low.r&1)<<31);
+    block.z=(high.r&1) | ((indices.x&7)<<1) | (indices.x&0xFFFFFFF0);
+    block.w=indices.y;
+    return block;
+}
+
+float4 refine_rotate(float4 v,uint rotation)
+{
+    if (rotation==1) return v.agbr;
+    if (rotation==2) return v.rabg;
+    if (rotation==3) return v.rgab;
+    return v;
+}
+void refine_bits(inout uint4 block,inout uint at,uint value,uint count)
+{
+    value&=(1u<<count)-1u;
+    uint word=at/32,shift=at%32;
+    block[word]|=value<<shift;
+    if (shift+count>32) block[word+1]|=value>>(32-shift);
+    at+=count;
+}
+uint4 refine_pack_mode5(uint4 low,uint4 high,uint rgb_indices,uint alpha_indices,uint rotation)
+{
+    if ((rgb_indices&3)>=2)
+    {
+        uint3 t=low.rgb;low.rgb=high.rgb;high.rgb=t;rgb_indices=~rgb_indices;
+    }
+    if ((alpha_indices&3)>=2)
+    {
+        uint t=low.a;low.a=high.a;high.a=t;alpha_indices=~alpha_indices;
+    }
+    uint4 block=0;uint at=0;
+    refine_bits(block,at,32,6);refine_bits(block,at,rotation,2);
+    [unroll] for(uint c=0;c<3;++c)
+    {
+        refine_bits(block,at,low[c],7);refine_bits(block,at,high[c],7);
+    }
+    refine_bits(block,at,low.a,8);refine_bits(block,at,high.a,8);
+    refine_bits(block,at,rgb_indices&1,1);
+    [unroll] for(uint i=1;i<16;++i) refine_bits(block,at,(rgb_indices>>(i*2))&3,2);
+    refine_bits(block,at,alpha_indices&1,1);
+    [unroll] for(uint i=1;i<16;++i) refine_bits(block,at,(alpha_indices>>(i*2))&3,2);
+    return block;
+}
+void refine_mode5(float4 pixels[16],float4 original_mean,uint rotation,inout uint best_error,inout uint4 best_block)
+{
+    float4 mean=refine_rotate(original_mean,rotation);
+    float4 importance=refine_rotate(float4(1,1,1,g_alpha_weight),rotation);
+    float3 covariance[3];
+    [unroll] for(uint row=0;row<3;++row) covariance[row]=0;
+    float min_alpha=255,max_alpha=0;
+    [unroll] for(uint i=0;i<16;++i)
+    {
+        float4 p=refine_rotate(pixels[i],rotation);
+        float3 d=p.rgb-mean.rgb;
+        [unroll] for(uint row=0;row<3;++row) covariance[row]+=d[row]*d;
+        min_alpha=min(min_alpha,p.a);max_alpha=max(max_alpha,p.a);
+    }
+    float3 axis=covariance[0];float variance=covariance[0].x;
+    [unroll] for(uint row=1;row<3;++row)
+        if(covariance[row][row]>variance){variance=covariance[row][row];axis=covariance[row];}
+    for(uint iteration=0;iteration<REG_BC7_PCA_ITERATIONS;++iteration)
+    {
+        float3 next=float3(dot(covariance[0],axis),dot(covariance[1],axis),dot(covariance[2],axis));
+        axis=next*rsqrt(max(dot(next,next),REG_POSITIVE_EPSILON));
+    }
+    float minimum=0,maximum=0;
+    [unroll] for(uint i=0;i<16;++i)
+    {
+        float t=dot(refine_rotate(pixels[i],rotation).rgb-mean.rgb,axis);
+        minimum=min(minimum,t);maximum=max(maximum,t);
+    }
+    float4 low_endpoint=float4(mean.rgb+minimum*axis,min_alpha);
+    float4 high_endpoint=float4(mean.rgb+maximum*axis,max_alpha);
+    for(uint iteration=0;iteration<=REG_BC7_ENDPOINT_REFINEMENTS;++iteration)
+    {
+        uint4 low,high;
+        low.rgb=uint3(clamp(floor(low_endpoint.rgb*(127.0/255.0)+0.5),0.0,127.0));
+        high.rgb=uint3(clamp(floor(high_endpoint.rgb*(127.0/255.0)+0.5),0.0,127.0));
+        low.a=uint(clamp(floor(low_endpoint.a+0.5),0.0,255.0));
+        high.a=uint(clamp(floor(high_endpoint.a+0.5),0.0,255.0));
+        uint4 dl=uint4((low.rgb<<1)|(low.rgb>>6),low.a);
+        uint4 dh=uint4((high.rgb<<1)|(high.rgb>>6),high.a);
+        float4 span=float4(dh)-float4(dl);
+        float inverse_rgb=1.0/max(dot(span.rgb*importance.rgb,span.rgb),REG_POSITIVE_EPSILON);
+        float inverse_alpha=1.0/max(span.a*span.a,REG_POSITIVE_EPSILON);
+        uint rgb_indices=0,alpha_indices=0,error=0;
+        float2 aa=0,ab=0,bb=0;float4 at=0,bt=0;
+        [unroll] for(uint i=0;i<16;++i)
+        {
+            float4 p=refine_rotate(pixels[i],rotation);
+            float tr=dot((p.rgb-float3(dl.rgb))*importance.rgb,span.rgb)*inverse_rgb;
+            float ta=(p.a-float(dl.a))*span.a*inverse_alpha;
+            uint ir=uint(clamp(int(tr*4.0+0.5),1,3));
+            uint ia=uint(clamp(int(ta*4.0+0.5),1,3));
+            uint wr0=aWeight[2][ir-1],wr1=aWeight[2][ir];
+            uint wa0=aWeight[2][ia-1],wa1=aWeight[2][ia];
+            float3 dr0=float3(((64-wr0)*dl.rgb+wr0*dh.rgb+32)>>6)-p.rgb;
+            float3 dr1=float3(((64-wr1)*dl.rgb+wr1*dh.rgb+32)>>6)-p.rgb;
+            float da0=float(((64-wa0)*dl.a+wa0*dh.a+32)>>6)-p.a;
+            float da1=float(((64-wa1)*dl.a+wa1*dh.a+32)>>6)-p.a;
+            uint er0=uint(dot(dr0*importance.rgb,dr0)),er1=uint(dot(dr1*importance.rgb,dr1));
+            uint ea0=uint(importance.a*da0*da0),ea1=uint(importance.a*da1*da1);
+            ir=er0<er1?ir-1:ir;ia=ea0<ea1?ia-1:ia;
+            error+=min(er0,er1)+min(ea0,ea1);
+            rgb_indices|=ir<<(i*2);alpha_indices|=ia<<(i*2);
+            float2 b=float2(aWeight[2][ir],aWeight[2][ia])*(1.0/64.0),a=1.0-b;
+            aa+=a*a;ab+=a*b;bb+=b*b;
+            at+=float4(a.xxx,a.y)*p;bt+=float4(b.xxx,b.y)*p;
+        }
+        if(error<best_error){best_error=error;best_block=refine_pack_mode5(low,high,rgb_indices,alpha_indices,rotation);}
+        if(best_error==0 || iteration==REG_BC7_ENDPOINT_REFINEMENTS) break;
+        float2 determinant=aa*bb-ab*ab;
+        low_endpoint.rgb=determinant.x>REG_POSITIVE_EPSILON?(at.rgb*bb.x-bt.rgb*ab.x)/determinant.x:mean.rgb;
+        high_endpoint.rgb=determinant.x>REG_POSITIVE_EPSILON?(bt.rgb*aa.x-at.rgb*ab.x)/determinant.x:mean.rgb;
+        low_endpoint.a=determinant.y>REG_POSITIVE_EPSILON?(at.a*bb.y-bt.a*ab.y)/determinant.y:mean.a;
+        high_endpoint.a=determinant.y>REG_POSITIVE_EPSILON?(bt.a*aa.y-at.a*ab.y)/determinant.y:mean.a;
+    }
+}
+float refine_pair_residual(float a,float b,float c)
+{
+    return 0.5*(a+b-sqrt(max((a-b)*(a-b)+4*c*c,0.0)));
+}
+
+[numthreads(THREAD_GROUP_SIZE,1,1)]
+void RefineMode56CS(uint3 id:SV_DispatchThreadID)
+{
+    uint blockID=g_start_block_id+id.x;
+    if (blockID>=g_num_total_blocks) return;
+    uint original_error=g_InBuff[blockID].x;
+    if (original_error==0) return;
+    uint2 base=uint2(blockID%g_num_block_x,blockID/g_num_block_x)*4;
+    float4 pixels[16];
+    float4 mean=0;
+    float min_alpha=255,max_alpha=0;
+    [unroll] for (uint i=0;i<16;++i)
+    {
+        pixels[i]=load_pixel(base+uint2(i%4,i/4));
+        mean+=pixels[i];
+        min_alpha=min(min_alpha,pixels[i].a);
+        max_alpha=max(max_alpha,pixels[i].a);
+    }
+    // SIMD handles these blocks after readback, including their alpha edges.
+    if (g_preserve_alpha!=0 && min_alpha!=max_alpha) return;
+    mean*=1.0/16.0;
+    float4 covariance[4];
+    [unroll] for (uint row=0;row<4;++row) covariance[row]=0;
+    [unroll] for (uint i=0;i<16;++i)
+        [unroll] for (uint row=0;row<4;++row) covariance[row]+=pixels[i][row]*pixels[i];
+    float variance=0;
+    [unroll] for (uint row=0;row<4;++row)
+    {
+        covariance[row]-=16.0*mean[row]*mean;
+        variance+=covariance[row][row];
+        covariance[row]*=1.0/(256.0*256.0);
+        covariance[row][row]+=REG_BC7_PCA_EPSILON;
+    }
+    // A collapsed block cannot improve the existing endpoint p-bit search.
+    if (variance==0.0) return;
+    float4 axis=1.0;
+    for (uint iteration=0;iteration<REG_BC7_PCA_ITERATIONS;++iteration)
+    {
+        float4 next=float4(dot(covariance[0],axis),dot(covariance[1],axis),
+            dot(covariance[2],axis),dot(covariance[3],axis));
+        axis=next;
+        if ((iteration&1)!=0)
+            axis*=rsqrt(max(dot(axis,axis),REG_POSITIVE_EPSILON));
+    }
+    float lower=dot(pixels[0]-mean,axis),upper=lower;
+    [unroll] for (uint i=1;i<16;++i)
+    {
+        float projection=dot(pixels[i]-mean,axis);
+        lower=min(lower,projection); upper=max(upper,projection);
+    }
+    if (upper-lower<1.0) { lower-=0.5; upper+=0.5; }
+    float4 low_endpoint=mean+lower*axis,high_endpoint=mean+upper*axis;
+    uint best_error=original_error;
+    uint4 best_low=0,best_high=0;
+    uint2 best_indices=0;
+    for (uint iteration=0;iteration<=REG_BC7_ENDPOINT_REFINEMENTS;++iteration)
+    {
+        uint4 low=refine_quantize_endpoint(low_endpoint);
+        uint4 high=refine_quantize_endpoint(high_endpoint);
+        uint2 indices;
+        uint error=refine_indices(pixels,low,high,indices);
+        if (error<best_error)
+        {
+            best_error=error; best_low=low; best_high=high; best_indices=indices;
+        }
+        if (best_error==0 || iteration==REG_BC7_ENDPOINT_REFINEMENTS) break;
+        float aa=0,ab=0,bb=0;
+        float4 at=0,bt=0;
+        [unroll] for (uint i=0;i<16;++i)
+        {
+            uint index=(indices[i/8]>>((i%8)*4))&15;
+            float b=float(aWeight[0][index])*(1.0/64.0),a=1.0-b;
+            aa+=a*a; ab+=a*b; bb+=b*b;
+            at+=a*pixels[i]; bt+=b*pixels[i];
+        }
+        float determinant=aa*bb-ab*ab;
+        if (determinant<=REG_POSITIVE_EPSILON) break;
+        low_endpoint=(at*bb-bt*ab)/determinant;
+        high_endpoint=(bt*aa-at*ab)/determinant;
+    }
+    uint4 best_block=g_OutBuff[blockID];
+    if (best_error<original_error) best_block=refine_pack_mode6(best_low,best_high,best_indices);
+    if (best_error!=0)
+    {
+        refine_mode5(pixels,mean,0,best_error,best_block);
+        float gb=refine_pair_residual(covariance[1].y,covariance[2].z,covariance[1].z);
+        float rb=refine_pair_residual(covariance[0].x,covariance[2].z,covariance[0].z);
+        float rg=refine_pair_residual(covariance[0].x,covariance[1].y,covariance[0].y);
+        uint rotation=gb<=rb && gb<=rg?1:(rb<=rg?2:3);
+        refine_mode5(pixels,mean,rotation,best_error,best_block);
+    }
+    if (best_error<original_error) g_OutBuff[blockID]=best_block;
+}

@@ -1,0 +1,339 @@
+import { unit, cross } from './math.js';
+import { checkName, checkOptions, clampRadii } from './validate.js';
+import type { Scene, Geometry } from '../schema.js';
+import { SHAPE_LONGITUDES, SHAPE_LATITUDES, ROUNDED_BOX_SEGMENTS, SMOOTH_ANGLE_DEGREES } from './constants.js';
+
+/** Valid options for each shape constructor. */
+const shapeOptionNames = {
+  box: ['size'],
+  sphere: ['radius', 'segments', 'rings'],
+  cylinder: ['radius', 'height', 'segments'],
+  cone: ['radius', 'height', 'segments'],
+  torus: ['radius', 'tube', 'segments', 'rings'],
+  capsule: ['radius', 'height', 'segments', 'rings'],
+  rounded_box: ['size', 'radius', 'segments'],
+  grid: ['size', 'segments'],
+  revolve: ['profile', 'segments'],
+} as const;
+
+type V3 = [number, number, number];
+type V2 = [number, number];
+export type GeometryFragment = Required<Pick<Scene, 'buffers'>> & {geometry: {[k: string]: Geometry}};
+
+// Round surfaces keep their +X seam; u increases toward -Z (rightward at the +Z front).
+const TAU = 2 * Math.PI;
+// Evaluate both seam vertices at the first azimuth exactly; attributes stay split.
+function azimuth(index: number, count: number): V2 {
+  const a = (index === count ? 0 : index) * TAU / count;
+  return [Math.cos(a), Math.sin(a)];
+}
+function positive(value: number, field: string): number {
+  if (!(Number.isFinite(value) && value > 0)) throw new RangeError(`${field} must be finite and positive`);
+  return value;
+}
+function nonnegative(value: number, field: string): number {
+  if (!(Number.isFinite(value) && value >= 0)) throw new RangeError(`${field} must be finite and >= 0`);
+  return value;
+}
+function segments(value: number, minimum: number): number {
+  if (!Number.isSafeInteger(value) || value < minimum) throw new RangeError(`segments must be an integer >= ${minimum}`);
+  return value;
+}
+class Mesh {
+  POSITION: V3[] = []; NORMAL: V3[] = []; TEXCOORD_0: V2[] = []; indices: number[] = [];
+  vertex(p: V3, n: V3, uv: V2): number {
+    this.POSITION.push(p); this.NORMAL.push(n); this.TEXCOORD_0.push(uv);
+    return this.POSITION.length - 1;
+  }
+  tri(a: number, b: number, c: number): void { this.indices.push(a, b, c); }
+  finish(name: string): GeometryFragment {
+    checkName(name, 'shape name');
+    const p = `${name}_position`, n = `${name}_normal`, uv = `${name}_TEXCOORD_0`, i = `${name}_indices`;
+    return {buffers: {
+      [p]: {type: 'vec3', data: this.POSITION}, [n]: {type: 'vec3', data: this.NORMAL},
+      [uv]: {type: 'vec2', data: this.TEXCOORD_0}, [i]: {type: 'u32', data: this.indices},
+    }, geometry: {[name]: {attributes: {POSITION: p, NORMAL: n, TEXCOORD_0: uv}, indices: i}}};
+  }
+}
+
+/** Centred box; size is full XYZ extent in metres. UVs span each face. */
+export function box(name: string = "box", {size = [2, 2, 2], ...unknown}: {size?: V3} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.box);
+  if (!Array.isArray(size) || size.length !== 3) throw new RangeError('size must be a vec3');
+  size.forEach(v => nonnegative(v, 'size'));
+  const mesh = new Mesh();
+  const faces: [V3, V3, V3][] = [
+    [[1,0,0],[0,0,-1],[0,1,0]], [[-1,0,0],[0,0,1],[0,1,0]],
+    [[0,1,0],[1,0,0],[0,0,-1]], [[0,-1,0],[1,0,0],[0,0,1]],
+    [[0,0,1],[1,0,0],[0,1,0]], [[0,0,-1],[-1,0,0],[0,1,0]],
+  ];
+  for (const [n,u,v] of faces) {
+    const ids = ([-1,1] as const).flatMap(y => ([-1,1] as const).map(x => {
+      const p = n.map((c,k) => (c + u[k]! * x + v[k]! * y) * size[k]! / 2) as V3;
+      return mesh.vertex(p, n, [(x+1)/2, (1-y)/2]);
+    }));
+    mesh.tri(ids[0]!, ids[1]!, ids[3]!); mesh.tri(ids[0]!, ids[3]!, ids[2]!);
+  }
+  return mesh.finish(name);
+}
+
+/** Y-up UV sphere; radius is in metres. Seam and poles have separate UV vertices. */
+export function sphere(name: string = "sphere", {radius = 1, segments: longitude = SHAPE_LONGITUDES, rings = 16, ...unknown}:
+  {radius?: number; segments?: number; rings?: number} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.sphere);
+  positive(radius, 'radius'); segments(longitude, 3); segments(rings, 2);
+  const mesh = new Mesh();
+  for (let y=0; y<=rings; y++) for (let x=0; x<=longitude; x++) {
+    const a=y*Math.PI/rings, [c,s]=azimuth(x,longitude);
+    const n: V3 = y===0 ? [0,1,0] : y===rings ? [0,-1,0]
+      : [Math.sin(a)*c, Math.cos(a), Math.sin(a)*s];
+    mesh.vertex(n.map(v => v*radius) as V3, n, [1-x/longitude,y/rings]);
+  }
+  for (let y=0; y<rings; y++) for (let x=0; x<longitude; x++) {
+    const a=y*(longitude+1)+x, b=a+longitude+1;
+    if (y<rings-1) mesh.tri(a,b+1,b);
+    if (y>0) mesh.tri(a,a+1,b+1);
+  }
+  return mesh.finish(name);
+}
+
+function frustum(name: string, bottom: number, top: number, height: number, count: number): GeometryFragment {
+  positive(height,'height'); segments(count,3);
+  const mesh = new Mesh();
+  const slope=(bottom-top)/height;
+  for (let x=0; x<=count; x++) {
+    const [c,s]=azimuth(x,count), n=unit([c,slope,s]);
+    mesh.vertex([bottom*c,-height/2,bottom*s],n,[1-x/count,1]);
+    mesh.vertex(top===0 ? [0,height/2,0] : [top*c,height/2,top*s],n,[1-x/count,0]);
+  }
+  for (let x=0; x<count; x++) {
+    const a=2*x;
+    if (top>0) mesh.tri(a,a+1,a+3);
+    mesh.tri(a,a+3,a+2);
+  }
+  for (const [r,y,sign] of [[bottom,-height/2,-1],[top,height/2,1]]) {
+    if (r === 0) continue;
+    const centre=mesh.vertex([0,y!,0],[0,sign!,0],[0.5,0.5]);
+    const first=mesh.POSITION.length;
+    for (let x=0; x<=count; x++) {
+      const [c,s]=azimuth(x,count);
+      mesh.vertex([r!*c,y!,r!*s],[0,sign!,0],[c/2+0.5,s/2+0.5]);
+    }
+    for (let x=0; x<count; x++) {
+      if (sign!>0) mesh.tri(centre,first+x+1,first+x);
+      else mesh.tri(centre,first+x,first+x+1);
+    }
+  }
+  return mesh.finish(name);
+}
+/** Closed Y-axis cylinder; radius and full height are in metres. */
+export function cylinder(name: string = "cylinder", {radius = 1, height = 2, segments: count = SHAPE_LONGITUDES, ...unknown}:
+  {radius?: number; height?: number; segments?: number} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.cylinder);
+  return frustum(name,positive(radius,'radius'),radius,height,count);
+}
+/** Closed Y-axis cone, apex at +height/2. */
+export function cone(name: string = "cone", {radius = 1, height = 2, segments: count = SHAPE_LONGITUDES, ...unknown}:
+  {radius?: number; height?: number; segments?: number} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.cone);
+  return frustum(name,positive(radius,'radius'),0,height,count);
+}
+/** Torus around Y; radius is the distance to the tube centre, tube is its radius. */
+export function torus(name: string = "torus", {radius = 1, tube = 0.25, segments: count = 48, rings = 12, ...unknown}:
+  {radius?: number; tube?: number; segments?: number; rings?: number} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.torus);
+  positive(radius,'radius'); positive(tube,'tube'); segments(count,3); segments(rings,3);
+  tube = clampRadii([tube], [[radius, [0]]])[0]!;
+  const mesh=new Mesh();
+  for (let x=0;x<=count;x++) for (let y=0;y<=rings;y++) {
+    const [c,s]=azimuth(x,count),[v,w]=azimuth(y,rings);
+    mesh.vertex([(radius+tube*v)*c,tube*w,(radius+tube*v)*s],[v*c,w,v*s],[1-x/count,y/rings]);
+  }
+  for (let x=0;x<count;x++) for (let y=0;y<rings;y++) {
+    const a=x*(rings+1)+y,b=a+rings+1;
+    mesh.tri(a,a+1,b+1); mesh.tri(a,b+1,b);
+  }
+  return mesh.finish(name);
+}
+
+/** Y-axis capsule; height is total extent including hemispheres; rings is subdivisions per hemisphere. */
+export function capsule(name: string = "capsule", {radius = 0.5, height = 2, segments: count = SHAPE_LONGITUDES, rings = SHAPE_LATITUDES, ...unknown}:
+  {radius?: number; height?: number; segments?: number; rings?: number} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.capsule);
+  positive(radius,'radius'); positive(height,'height'); segments(count,3); segments(rings,2);
+  radius = clampRadii([radius], [[height, [0, 0]]])[0]!;
+  const fragment=sphere(name,{radius,segments:count,rings:2*rings});
+  if (height===2*radius) return fragment;
+  const buffer=fragment.buffers[`${name}_position`]!;
+  const positions=buffer.data as number[][];
+  // Insert a second equator only when there is a straight section between caps.
+  const equators=height>2*radius?1:0, rows=2*rings+equators;
+  const mesh=new Mesh();
+  for (let y=0;y<=rows;y++) for (let x=0;x<=count;x++) {
+    const row=y<=rings?y:y-equators, index=row*(count+1)+x;
+    const p=[...positions[index]!] as V3;
+    p[1]+=(y<=rings?1:-1)*(height/2-radius);
+    const n=(fragment.buffers[`${name}_normal`]!.data as number[][])[index]! as V3;
+    mesh.vertex(p,n,[1-x/count,y/rows]);
+  }
+  for (let y=0;y<rows;y++) for (let x=0;x<count;x++) {
+    const a=y*(count+1)+x,b=a+count+1;
+    if(y<rows-1) mesh.tri(a,b+1,b);
+    if(y>0) mesh.tri(a,a+1,b+1);
+  }
+  return mesh.finish(name);
+}
+
+/** Box with a spherical edge radius, centred at the origin; size is full XYZ extent.
+ * Segments controls bevel subdivisions (rounded up to an even count); flat faces stay planar.
+ */
+export function roundedBox(name: string = "rounded_box", {size = [1,1,1], radius = 0.1, segments: count = ROUNDED_BOX_SEGMENTS, ...unknown}:
+  {size?: V3; radius?: number; segments?: number} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.rounded_box);
+  if (!Array.isArray(size) || size.length !== 3) throw new RangeError('size must be a vec3');
+  size.forEach(v=>nonnegative(v,'size')); segments(count,2);
+  radius = clampRadii([radius], size.map(s => [s, [0, 0]]))[0]!;
+  if (radius === 0) return box(name, {size});
+  const mesh=new Mesh();
+  // Split each parameter axis at the tangent boundaries. A face contains one
+  // planar rectangle, cylindrical edge strips and spherical corner patches;
+  // no triangle spans two regions. Adjacent cube charts share analytic positions
+  // and normals, with duplicate vertices only for their face UV seams.
+  const half = Math.ceil(count/2);
+  const inner = size.map(s => s/2-radius);
+  // Measure chart coordinates from the nearest edge. Reconstructing the full
+  // extent as (size/2-radius)+radius can round past it and put UVs outside [0,1].
+  const uv = (q: number, n: number, extent: number) => q<0 || n<0
+    ? radius/extent*(1+n) : 1-radius/extent*(1-n);
+  const coordinates = inner.map(h => {
+    const values: [number, number][] = [];
+    for (let i=0;i<=half;i++) values.push([-h, -1+i/half]);
+    if (h>0) values.push([h, 0]);
+    for (let i=1;i<=half;i++) values.push([h, i/half]);
+    return values;
+  });
+  for (let axis=0;axis<3;axis++) for (const sign of [-1,1]) {
+    const u=(axis+1)%3,v=(axis+2)%3,first=mesh.POSITION.length;
+    const us=coordinates[u]!, vs=coordinates[v]!;
+    for (const [qv,nv] of vs) for (const [qu,nu] of us) {
+      const q: V3=[0,0,0], direction: V3=[0,0,0];
+      q[axis]=sign*inner[axis]!; q[u]=qu; q[v]=qv;
+      direction[axis]=sign; direction[u]=nu; direction[v]=nv;
+      const n=unit(direction);
+      const p=q.map((c,k)=>c+radius*n[k]!) as V3;
+      mesh.vertex(p,n,[uv(qu,nu,size[u]!),1-uv(qv,nv,size[v]!)]);
+    }
+    for(let y=0;y<vs.length-1;y++) for(let x=0;x<us.length-1;x++) {
+      const a=first+y*us.length+x,b=a+us.length;
+      if(sign>0) {mesh.tri(a,a+1,b+1);mesh.tri(a,b+1,b);}
+      else {mesh.tri(a,b+1,a+1);mesh.tri(a,b,b+1);}
+    }
+  }
+  return mesh.finish(name);
+}
+
+/** Flat XZ grid facing +Y, centred; size is the full [x, z] extent in metres, segments the [x, z]
+ * cell counts. UV u runs 0→1 along +X, v 0→1 along +Z.
+ * @help XZ plane facing +Y; size,segments:[x,z]; u along +X, v along +Z
+ */
+export function grid(name: string = "grid", {size = [2, 2], segments: count = [1, 1], ...unknown}: {size?: V2, segments?: V2} = {}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.grid);
+  if (!Array.isArray(size) || size.length !== 2) throw new RangeError('size must be [x, z]');
+  size.forEach(v => positive(v, 'size'));
+  if (!Array.isArray(count) || count.length !== 2) throw new RangeError('segments must be [x, z] integers >= 1');
+  const nx = segments(count[0], 1), nz = segments(count[1], 1);
+  const mesh = new Mesh();
+  for (let z = 0; z <= nz; z++)
+    for (let x = 0; x <= nx; x++)
+      mesh.vertex([(x / nx - 0.5) * size[0], 0, (z / nz - 0.5) * size[1]], [0, 1, 0], [x / nx, z / nz]);
+  for (let z = 0; z < nz; z++)
+    for (let x = 0; x < nx; x++) {
+      const a = z * (nx + 1) + x, c = a + nx + 1;
+      mesh.tri(a, c, a + 1);
+      mesh.tri(a + 1, c, c + 1);
+    }
+  return mesh.finish(name);
+}
+
+const SMOOTH_COSINE = Math.cos(SMOOTH_ANGLE_DEGREES * Math.PI / 180);
+/** A profile corner's normals: one shared normal when it turns by at most the smooth angle, else
+ * the incoming and outgoing edge normals. */
+function corner(incoming: V2, outgoing: V2): [V2, V2] {
+  if (incoming[0] * outgoing[0] + incoming[1] * outgoing[1] < SMOOTH_COSINE) return [incoming, outgoing];
+  const r = incoming[0] + outgoing[0], y = incoming[1] + outgoing[1], length = Math.hypot(r, y);
+  const shared: V2 = [r / length, y / length];
+  return [shared, shared];
+}
+/** Lathe: turn a [radius, height] profile once around +Y. Faces point away from the region the
+ * profile encloses with the axis (a profile enclosing none faces right of its direction of travel).
+ * Consecutive repeated points are ignored. Ends at radius 0 close the surface; other ends stay open rims. A profile whose last point repeats
+ * its first is a closed loop (a ring). Corners turning more than 30° are sharp. UV u runs around
+ * from +X towards -Z, v along the profile by length from its first point.
+ * @help profile:[radius,height][] around +Y; consecutive duplicates ignored; radius-0 ends close; other ends open; last=first closes loop; corners >30° sharp; u from +X toward -Z, v along profile
+ */
+export function revolve(name: string = "revolve", {profile, segments: count = SHAPE_LONGITUDES, ...unknown}: {profile: V2[], segments?: number}): GeometryFragment {
+  checkOptions(unknown, shapeOptionNames.revolve);
+  segments(count, 3);
+  if (!Array.isArray(profile) || profile.length < 2) throw new RangeError('profile must be at least two [radius, height] points');
+  for (const p of profile) {
+    if (!Array.isArray(p) || p.length !== 2 || !p.every(Number.isFinite)) throw new RangeError('profile points must be finite [radius, height]');
+    if (p[0] < 0) throw new RangeError('profile radius must be >= 0');
+  }
+  const same = (a: V2, b: V2) => a[0] === b[0] && a[1] === b[1];
+  profile = profile.filter((p, i) => i === 0 || !same(p, profile[i - 1]!));
+  if (profile.length < 2) throw new RangeError('profile needs at least two distinct points');
+  const loop = profile.length > 2 && same(profile[0]!, profile[profile.length - 1]!);
+  const points = loop ? profile.slice(0, -1) : profile, n = points.length;
+  if (loop && n < 3) throw new RangeError('a closed profile needs three distinct points');
+  points.forEach(([r], i) => {
+    if (r === 0 && !loop && i > 0 && i < n - 1) throw new RangeError('only the first and last points of an open profile may lie on the axis');
+  });
+  if (points.every(([r]) => r === 0)) throw new RangeError('profile must leave the axis');
+  // Signed area of the profile closed through the axis: positive = counter-clockwise in (radius, height).
+  const ring: V2[] = loop ? points : [[0, points[0]![1]], ...points, [0, points[n - 1]![1]]];
+  let area = 0;
+  ring.forEach(([x0, y0], i) => {
+    const [x1, y1] = ring[(i + 1) % ring.length]!;
+    area += x0 * y1 - x1 * y0;
+  });
+  if (loop && area === 0) throw new RangeError('a closed profile must enclose an area');
+  // Counter-clockwise profiles enclose their region on the left, so outward is right of travel.
+  const sign = area < 0 ? -1 : 1;
+  const path = loop ? [...points, points[0]!] : points, edges = path.length - 1;
+  const normal: V2[] = [], length = [0];
+  for (let e = 0; e < edges; e++) {
+    const [r0, y0] = path[e]!, [r1, y1] = path[e + 1]!, l = Math.hypot(r1 - r0, y1 - y0);
+    normal.push([sign * (y1 - y0) / l, -sign * (r1 - r0) / l]);
+    length.push(length[e]! + l);
+  }
+  const mesh = new Mesh();
+  const row = ([r, y]: V2, [nr, ny]: V2, v: number): number => {
+    const first = mesh.POSITION.length;
+    for (let x = 0; x <= count; x++) {
+      const [c, s] = azimuth(x, count);
+      mesh.vertex(r === 0 ? [0, y, 0] : [r * c, y, r * s], [nr * c, ny, nr * s], [1 - x / count, v]);
+    }
+    return first;
+  };
+  // An end on the axis meets its mirror image across the axis; an open rim keeps its edge normal.
+  const end = (edge: V2, [r]: V2): V2 => r === 0 ? [-edge[0], edge[1]] : edge;
+  const starts: number[] = [], ends: number[] = [];
+  for (let i = 0; i <= edges; i++) {
+    const p = path[i]!, v = length[i]! / length[edges]!;
+    const incoming = i > 0 ? normal[i - 1]! : loop ? normal[edges - 1]! : end(normal[0]!, p);
+    const outgoing = i < edges ? normal[i]! : loop ? normal[0]! : end(normal[edges - 1]!, p);
+    const [a, b] = corner(incoming, outgoing);
+    if (i > 0) ends.push(row(p, a, v));
+    if (i < edges) starts.push(a === b && i > 0 ? ends[i - 1]! : row(p, b, v));
+  }
+  for (let e = 0; e < edges; e++) {
+    const startPole = path[e]![0] === 0, endPole = path[e + 1]![0] === 0;
+    for (let x = 0; x < count; x++) {
+      const a = starts[e]! + x, b = ends[e]! + x;
+      // Clockwise profiles (sign -1) face left of travel: the UV sphere's winding.
+      if (!endPole) { if (sign < 0) mesh.tri(a, b + 1, b); else mesh.tri(a, b, b + 1); }
+      if (!startPole) { if (sign < 0) mesh.tri(a, a + 1, b + 1); else mesh.tri(a, b + 1, a + 1); }
+    }
+  }
+  return mesh.finish(name);
+}

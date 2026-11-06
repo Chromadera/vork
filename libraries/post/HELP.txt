@@ -1,0 +1,12 @@
+post: optional compositor looks: post/glare (streaks, ghosts, fog_glow, simple_star),
+post/vignette, post/lens_distortion, post/white_balance. Inputs: post --all.
+<!-- all -->
+Program: "program":"post/<module>" in render.compositor   Slang import: import post.<module>;
+Bloom is std/bloom.
+
+PROGRAMS
+post/glare: Blender Glare node looks: type streaks|ghosts|fog_glow|simple_star; threshold, smoothness, clamp, maximum, strength, saturation, tint, size, streaks, streaks_angle, iterations, fade, color_modulation, diagonal, quality high|medium|low
+post/vignette: darkens edges: position, size, rotation, blur_size, factor
+post/lens_distortion: Lens Distortion dispersion only: dispersion [0,1]
+
+post/white_balance: source white to D65; temperature 6500 K (1800..100000), tint 10 (-500..500); preserves alpha, affects linear outputs

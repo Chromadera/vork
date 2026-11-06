@@ -1,0 +1,23 @@
+[
+  {
+    "asset_id": "pexels_18972999",
+    "kind": "footage",
+    "description": "Ally: forward camera travel through a wet, empty alley at night",
+    "source": "https://www.pexels.com/video/ally-18972999/",
+    "url": "https://videos.pexels.com/video-files/18972999/18972999-uhd_3840_1650_24fps.mp4",
+    "license": "Pexels Licence",
+    "license_url": "https://www.pexels.com/license/",
+    "commercial_use": true,
+    "path": "source.mp4",
+    "sha256": "37ef70de03e8ed38a2c9b45bd0cb66a32f42eb9981495d8faa04db0d20c0c7ce",
+    "author": "Rafael Fernanz",
+    "license_checked": "2026-11-04"
+  },
+  {
+    "asset_id": "after_rain",
+    "kind": "original_procedural_geometry",
+    "generator": "beacon.py",
+    "license": "CC0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+]

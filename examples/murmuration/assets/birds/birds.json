@@ -1,0 +1,136 @@
+{
+  "buffers": {
+    "flight_p": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 0,
+      "count": 1500
+    },
+    "flight_n": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 18000,
+      "count": 1500
+    },
+    "flight_uv": {
+      "type": "vec2",
+      "file": "assets/birds/birds.bin",
+      "offset": 36000,
+      "count": 1500
+    },
+    "flight_i": {
+      "type": "u32",
+      "file": "assets/birds/birds.bin",
+      "offset": 48000,
+      "count": 6624
+    },
+    "wings_p": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 74496,
+      "count": 58
+    },
+    "wings_n": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 75192,
+      "count": 58
+    },
+    "wings_uv": {
+      "type": "vec2",
+      "file": "assets/birds/birds.bin",
+      "offset": 75888,
+      "count": 58
+    },
+    "wings_i": {
+      "type": "u32",
+      "file": "assets/birds/birds.bin",
+      "offset": 76352,
+      "count": 228
+    },
+    "wings_upstroke": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 77264,
+      "count": 58
+    },
+    "wings_upstroke_n": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 77960,
+      "count": 58
+    },
+    "wings_downstroke": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 78656,
+      "count": 58
+    },
+    "wings_downstroke_n": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 79352,
+      "count": 58
+    },
+    "hero_p": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 80048,
+      "count": 10415
+    },
+    "hero_n": {
+      "type": "vec3",
+      "file": "assets/birds/birds.bin",
+      "offset": 205028,
+      "count": 10415
+    },
+    "hero_uv": {
+      "type": "vec2",
+      "file": "assets/birds/birds.bin",
+      "offset": 330008,
+      "count": 10415
+    },
+    "hero_i": {
+      "type": "u32",
+      "file": "assets/birds/birds.bin",
+      "offset": 413328,
+      "count": 15765
+    }
+  },
+  "geometry": {
+    "flight": {
+      "attributes": {
+        "POSITION": "flight_p",
+        "NORMAL": "flight_n",
+        "TEXCOORD_0": "flight_uv"
+      },
+      "indices": "flight_i"
+    },
+    "wings": {
+      "attributes": {
+        "POSITION": "wings_p",
+        "NORMAL": "wings_n",
+        "TEXCOORD_0": "wings_uv"
+      },
+      "indices": "wings_i",
+      "morphs": {
+        "upstroke": {
+          "POSITION": "wings_upstroke",
+          "NORMAL": "wings_upstroke_n"
+        },
+        "downstroke": {
+          "POSITION": "wings_downstroke",
+          "NORMAL": "wings_downstroke_n"
+        }
+      }
+    },
+    "hero": {
+      "attributes": {
+        "POSITION": "hero_p",
+        "NORMAL": "hero_n",
+        "TEXCOORD_0": "hero_uv"
+      },
+      "indices": "hero_i"
+    }
+  }
+}

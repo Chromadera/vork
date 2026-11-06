@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Install the pinned Slang toolchain to an explicit directory (Mac, Linux or Windows)."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import platform
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+PIN = json.loads((ROOT / 'dist/slang.json').read_text())
+VERSION = PIN['version']
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('destination', type=Path)
+a = p.parse_args()
+if a.destination.exists():
+    p.error('destination already exists')
+if not hasattr(tarfile, 'data_filter'):
+    p.error('Python with tarfile extraction filters required. On macOS run: '
+            'brew install python@3.12; then invoke this script with '
+            '"$(brew --prefix python@3.12)/bin/python3.12". See docs/help/build.md')
+key = f'{platform.system()}-{platform.machine()}'
+if key not in PIN['archives']:
+    p.error(f'unsupported platform: {key}')
+name, digest = PIN['archives'][key]['name'], PIN['archives'][key]['sha256']
+url = f'https://github.com/shader-slang/slang/releases/download/v{VERSION}/slang-{VERSION}-{name}.tar.gz'
+a.destination.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(dir=a.destination.parent) as tmp:
+    archive = Path(tmp) / 'slang.tar.gz'
+    urllib.request.urlretrieve(url, archive)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
+        raise SystemExit('Slang archive SHA256 mismatch')
+    extracted = Path(tmp) / 'toolchain'
+    extracted.mkdir()
+    with tarfile.open(archive) as tar:
+        tar.extractall(extracted, filter='data')
+    # Keep compiler libraries, modules, and all upstream third-party notices together.
+    shutil.move(str(extracted), a.destination)
+print(a.destination / ('bin/slangc.exe' if platform.system() == 'Windows' else 'bin/slangc'))

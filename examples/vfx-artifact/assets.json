@@ -1,0 +1,35 @@
+[
+  {
+    "asset_id": "pexels_7983323",
+    "kind": "footage",
+    "title": "Tired Woman Sleeping on the Table",
+    "author": "Ron Lach",
+    "source": "https://www.pexels.com/video/tired-woman-sleeping-on-the-table-7983323/",
+    "url": "https://videos.pexels.com/video-files/7983323/7983323-uhd_4096_2160_25fps.mp4",
+    "license": "Pexels Licence",
+    "license_url": "https://www.pexels.com/license/",
+    "commercial_use": true,
+    "sha256": "27308c4187f40df8bec226bc60210b41c463a75fa0020a978dc781a23cf43219"
+  },
+  {
+    "asset_id": "split_seed",
+    "kind": "original_procedural_geometry",
+    "generator": "build.py",
+    "license": "CC0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  {
+    "asset_id": "sam2.1_hiera_small",
+    "kind": "external_plate_tool",
+    "source": "https://github.com/facebookresearch/sam2",
+    "revision": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+    "checkpoint": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt",
+    "license": "Apache-2.0"
+  },
+  {
+    "asset_id": "depth_anything_v2_small",
+    "kind": "external_plate_tool",
+    "source": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf",
+    "license": "Apache-2.0"
+  }
+]

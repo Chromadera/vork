@@ -1,0 +1,7 @@
+main_vs vertex
+opaque_depth_vs vertex
+opaque_single_depth_vs vertex
+opaque_single_depth_fs fragment
+depth_fs fragment
+hashed_depth_fs fragment
+shadow_vs vertex

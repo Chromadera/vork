@@ -1,0 +1,26 @@
+{
+  "SUN": {
+    "energy": 1.0,
+    "angle": 0.009180432185530663,
+    "shadow_soft_size": 0.0,
+    "use_shadow": true
+  },
+  "POINT": {
+    "energy": 10.0,
+    "shadow_soft_size": 0.0,
+    "use_shadow": true
+  },
+  "SPOT": {
+    "energy": 10.0,
+    "shadow_soft_size": 0.0,
+    "use_shadow": true
+  },
+  "AREA": {
+    "energy": 10.0,
+    "shadow_soft_size": 0.0,
+    "size": 1.0,
+    "size_y": 1.0,
+    "use_shadow": true,
+    "shape": "SQUARE"
+  }
+}

@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vendored zstd SIMD lane extraction is not an API credential"
+condition = "AND"
+paths = ['''(^|/)vendor/basisu_c_sys/vendored/basis_universal/zstd/zstd(?:declib)?\.c$''']
+regexTarget = "line"
+regexes = ['''__m512i const data_key_(lo|hi) = _mm512_srli_epi64 \(data_key, 32\);''']

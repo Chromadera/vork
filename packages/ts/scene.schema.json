@@ -1,0 +1,3574 @@
+{
+  "$defs": {
+    "AimTarget": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      ],
+      "description": "Aiming references a node origin or a fixed point in world coordinates."
+    },
+    "Aov": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-help": "name; EXR channels <name>.X or <name>.R/G/B",
+          "x-help-path": "render.aovs.name",
+          "x-source": "Blender ViewLayer AOV.name"
+        },
+        "type": {
+          "$ref": "#/$defs/AovType",
+          "x-help": "value|color",
+          "x-help-path": "render.aovs.type",
+          "x-source": "Blender ViewLayer AOV.type"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "type": "object"
+    },
+    "AovBinding": {
+      "additionalProperties": false,
+      "description": "A render.aovs entry: an Aov handle for surface programs, or the AOV image in compositor programs.",
+      "properties": {
+        "aov": {
+          "type": "string",
+          "x-help": "render.aovs name",
+          "x-help-path": "material.aov.aov",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "aov"
+      ],
+      "type": "object"
+    },
+    "AovType": {
+      "enum": [
+        "value",
+        "color"
+      ],
+      "type": "string"
+    },
+    "AssetNodeOverrides": {
+      "additionalProperties": false,
+      "description": "Visibility is ANDed with ancestors. Reflections and diffuse transport query\nscene geometry independently of camera visibility. Diffuse visibility controls AO\nand indirect occlusion; specular visibility controls reflected appearance.",
+      "properties": {
+        "light_link_tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-help": "string[]|null; replaces inherited tags",
+          "x-help-path": "node.asset.nodes.<name>.light_link_tags",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "pass_index": {
+          "format": "uint32",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-help": "u32|null; 1..65535; object ID",
+          "x-help-path": "node.asset.nodes.<name>.pass_index",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "visible": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool; false hides the subtree and disables its lights; animatable (step)",
+          "x-help-path": "node.visible",
+          "x-source": "vork visibility primitive"
+        },
+        "visible_camera": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool",
+          "x-help-path": "node.visible_camera",
+          "x-source": "Blender Object.visible_camera"
+        },
+        "visible_diffuse": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool",
+          "x-help-path": "node.visible_diffuse",
+          "x-source": "Blender Object.visible_diffuse"
+        },
+        "visible_glossy": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool",
+          "x-help-path": "node.visible_glossy",
+          "x-source": "Blender Object.visible_glossy"
+        },
+        "visible_shadow": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool; lights must stay true (a light without shadows: shadowed_by [])",
+          "x-help-path": "node.visible_shadow",
+          "x-source": "Blender Object.visible_shadow"
+        },
+        "visible_transmission": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool; object visibility to transmission rays; lights must stay true",
+          "x-help-path": "node.visible_transmission",
+          "x-source": "Blender Object.visible_transmission"
+        }
+      },
+      "type": "object",
+      "x-help-extra": "node.asset.nodes.<name>.visible: bool; default true\nnode.asset.nodes.<name>.visible_camera: bool; default true\nnode.asset.nodes.<name>.visible_shadow: bool; default true\nnode.asset.nodes.<name>.visible_diffuse: bool; default true\nnode.asset.nodes.<name>.visible_glossy: bool; default true\nnode.asset.nodes.<name>.visible_transmission: bool; default true"
+    },
+    "AttributeBinding": {
+      "additionalProperties": false,
+      "description": "Install-resolved named float vertex data. Custom programs declare Attribute<float>\nthrough Attribute<float4>; read_attribute returns value, dx and dy. Missing or\nincompatible streams on any bound geometry fail install.",
+      "properties": {
+        "attribute": {
+          "type": "string",
+          "x-help": "string; geometry or instance attribute name; colour values are linear Rec.709 (no sRGB decoding)",
+          "x-help-path": "material.attribute.attribute",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Channel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-help": "r|g|b|a|rgb; omitted: r scalar, rgb colour, exact for vectors",
+          "x-help-path": "material.attribute.channel",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "factor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Factor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-help": "number|vector; omitted = 1",
+          "x-help-path": "material.attribute.factor",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "attribute"
+      ],
+      "type": "object",
+      "x-help-extra": "material.attribute: binds geometry or instance columns to numeric inputs; custom programs read_attribute(handle,ctx) gives value, dx, dy"
+    },
+    "Background": {
+      "anyOf": [
+        {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/BackgroundMode"
+        }
+      ]
+    },
+    "BackgroundMode": {
+      "enum": [
+        "environment",
+        "transparent"
+      ],
+      "type": "string"
+    },
+    "Blend": {
+      "enum": [
+        "replace",
+        "add"
+      ],
+      "type": "string"
+    },
+    "Buffer": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; file only",
+              "x-help-path": "buffer.count",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "data": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InlineDataSchema"
+                }
+              ],
+              "x-help": "number[]|number[][]; XOR file; mat4 column-major",
+              "x-help-path": "buffer.data",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "dims": {
+              "type": "null"
+            },
+            "file": {
+              "type": "null"
+            },
+            "grid": {
+              "description": "OpenVDB/NanoVDB field name; buffer.type describes voxel values.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-help": "name|null; .vdb/.nvdb only; f32 or vec3 voxels",
+              "x-help-path": "buffer.grid",
+              "x-source": "OpenVDB/NanoVDB; USD OpenVDBAsset fieldName"
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer",
+              "x-help": "u64; bytes, multiple of 4",
+              "x-help-path": "buffer.offset",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "type": {
+              "$ref": "#/$defs/BufferType",
+              "x-help": "f32|i32|u32|vec2|vec3|vec4|uvec4|mat4",
+              "x-help-path": "buffer.type",
+              "x-source": "vork (explicit contract/technique choice)"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "title": "InlineBuffer",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; file only",
+              "x-help-path": "buffer.count",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "data": {
+              "type": "null"
+            },
+            "dims": {
+              "type": "null"
+            },
+            "file": {
+              "type": [
+                "string"
+              ],
+              "x-help": "file-path; little-endian, or .vdb/.nvdb with grid; XOR data",
+              "x-help-path": "buffer.file",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "grid": {
+              "description": "OpenVDB/NanoVDB field name; buffer.type describes voxel values.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-help": "name|null; .vdb/.nvdb only; f32 or vec3 voxels",
+              "x-help-path": "buffer.grid",
+              "x-source": "OpenVDB/NanoVDB; USD OpenVDBAsset fieldName"
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer",
+              "x-help": "u64; bytes, multiple of 4",
+              "x-help-path": "buffer.offset",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "type": {
+              "$ref": "#/$defs/BufferType",
+              "x-help": "f32|i32|u32|vec2|vec3|vec4|uvec4|mat4",
+              "x-help-path": "buffer.type",
+              "x-source": "vork (explicit contract/technique choice)"
+            }
+          },
+          "required": [
+            "type",
+            "file"
+          ],
+          "title": "FileBuffer",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "null"
+            },
+            "data": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InlineDataSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "number[]|number[][]; XOR file; mat4 column-major",
+              "x-help-path": "buffer.data",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "dims": {
+              "description": "Dense typed array, x contiguous. Initially zero unless data is supplied.\nField consumers interpret cell centres in local [-1,1]³.",
+              "items": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[u32,u32,u32]|null; positive dense typed array dimensions; non-file; x contiguous; field cell centres span local [-1,1]³",
+              "x-help-path": "buffer.dims",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "file": {
+              "type": "null"
+            },
+            "grid": {
+              "type": "null"
+            },
+            "offset": {
+              "maximum": 0,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "f32",
+                "vec3"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "dims"
+          ],
+          "title": "DenseBuffer",
+          "type": "object"
+        }
+      ]
+    },
+    "BufferType": {
+      "enum": [
+        "f32",
+        "i32",
+        "u32",
+        "vec2",
+        "vec3",
+        "vec4",
+        "uvec4",
+        "mat4"
+      ],
+      "type": "string"
+    },
+    "Channel": {
+      "enum": [
+        "r",
+        "g",
+        "b",
+        "a",
+        "rgb"
+      ],
+      "type": "string"
+    },
+    "ChannelBinding": {
+      "additionalProperties": false,
+      "description": "A kernel image channel read by a compositor program.",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/KernelChannel",
+          "x-help": "color|depth|view_normal|object_index|motion|shadow_catcher; compositor programs",
+          "x-help-path": "material.channel.channel",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    },
+    "Clip": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "file-path|null; null = the target asset's clips; else a glTF file retargeted by node name",
+          "x-help-path": "animation.clip.file",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-help": "u32|null; XOR name",
+          "x-help-path": "animation.clip.index",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "string|null; XOR index",
+          "x-help-path": "animation.clip.name",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "target": {
+          "type": "string",
+          "x-help": "asset-node-name",
+          "x-help-path": "animation.clip.target",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "ColorSpace": {
+      "description": "Blender colour space names, verbatim.",
+      "enum": [
+        "sRGB",
+        "Linear Rec.709",
+        "Non-Color"
+      ],
+      "type": "string"
+    },
+    "CompositeEntry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NameOr"
+        },
+        {
+          "$ref": "#/$defs/CompositeNode"
+        }
+      ],
+      "description": "An ordered image-graph node. Resource names remain shorthand for an unnamed node."
+    },
+    "CompositeNode": {
+      "additionalProperties": false,
+      "properties": {
+        "material": {
+          "$ref": "#/$defs/NameOr"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompositeResolution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-help": "[width,height] pixels or positive output scale; floor, minimum 1; null = output; last image resampled to output",
+          "x-help-path": "compositor.resolution",
+          "x-source": "vork"
+        }
+      },
+      "required": [
+        "material"
+      ],
+      "type": "object"
+    },
+    "CompositeResolution": {
+      "anyOf": [
+        {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        {
+          "format": "double",
+          "type": "number"
+        }
+      ]
+    },
+    "ComputeDispatch": {
+      "anyOf": [
+        {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      ],
+      "description": "Number of threads, independent of the internal workgroup size."
+    },
+    "ComputeSchedule": {
+      "oneOf": [
+        {
+          "enum": [
+            "frame",
+            "install"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "simulation",
+          "description": "Invoked only by the scene simulation schedule.",
+          "type": "string"
+        }
+      ]
+    },
+    "EdgeCrease": {
+      "additionalProperties": false,
+      "description": "An undirected cage edge. Crease is OpenSubdiv sharpness: 0 is smooth; 10 or greater is infinitely sharp.",
+      "properties": {
+        "crease": {
+          "format": "float",
+          "type": "number",
+          "x-help": "number; ≥0",
+          "x-help-path": "geometry.crease_edge.crease",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "vertices": {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "x-help": "[u32,u32]",
+          "x-help-path": "geometry.crease_edge.vertices",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "vertices",
+        "crease"
+      ],
+      "type": "object"
+    },
+    "Factor": {
+      "anyOf": [
+        {
+          "format": "float",
+          "type": "number"
+        },
+        {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "Geometry": {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/NameOr3"
+          },
+          "type": "object",
+          "x-help": "{name: buffer-name|inline buffer}; POSITION required (glTF names and types; COLOR_n: linear vec3/vec4, alpha defaults to 1); implicit: exactly one f32 dense grid, zero threshold; custom f32/vec2/vec3/vec4 bind to material inputs",
+          "x-help-path": "geometry.attributes",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Live point prefix within the installed POSITION/width capacity.",
+          "x-help": "one-element u32 buffer|null; points only; overflow rejects the exposure",
+          "x-help-path": "geometry.count",
+          "x-source": "vork"
+        },
+        "crease_edge": {
+          "description": "Endpoint vertex indices and OpenSubdiv/USD edge sharpness. Used by std subdivision.",
+          "items": {
+            "$ref": "#/$defs/EdgeCrease"
+          },
+          "type": "array",
+          "x-help": "{vertices:[u32,u32],crease:number}[]; OpenSubdiv sharpness, 0 smooth, ≥10 sharp",
+          "x-help-path": "geometry.crease_edge",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "curve_vertex_counts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "USD-style point counts, one u32 per polyline curve.",
+          "x-help": "u32 buffer; points per curve, ≥2; curves only",
+          "x-help-path": "geometry.curve_vertex_counts",
+          "x-source": "USD (polyline subset)"
+        },
+        "face_vertex_counts": {
+          "description": "Corners per polygon in the index buffer (USD/OpenSubdiv cage); absent means triangles.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-help": "u32[]|null; polygon corner counts; absent = triangles",
+          "x-help-path": "geometry.face_vertex_counts",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "ids": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Temporal point identities; a changed identity is a birth, even when a row is reused.",
+          "x-help": "u32 buffer|null; points only; one unique identity per live point; matches previous poses across compact rows; births use current-pose motion placeholders",
+          "x-help-path": "geometry.ids",
+          "x-source": "vork"
+        },
+        "indices": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-help": "u32-buffer-name|inline buffer|null",
+          "x-help-path": "geometry.indices",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "material_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MaterialRange"
+          },
+          "type": "array",
+          "x-help": "{start,count,material_index}[]; partition indices into node.materials slots; empty = one material",
+          "x-help-path": "geometry.material_ranges",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "morphs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Morph"
+          },
+          "default": {},
+          "type": "object",
+          "x-help": "{name:{POSITION,NORMAL?}}",
+          "x-help-path": "geometry.morphs",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "subdivision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubdivisionSurface"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Blender Subdivision Surface, evaluated after deformation and before displacement.",
+          "x-help": "{subdivision_type?,render_levels?,use_limit_surface?}|null; Blender Subdivision Surface; one material range",
+          "x-help-path": "geometry.subdivision",
+          "x-source": "Blender 5.2.1 (offline render subset)"
+        },
+        "topology": {
+          "$ref": "#/$defs/Topology",
+          "default": "triangles",
+          "x-help": "triangles|points|curves|implicit; points render as spheres",
+          "x-help-path": "geometry.topology",
+          "x-source": "glTF 2.0"
+        },
+        "widths": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "USD-style diameter in metres, one f32 per control point.",
+          "x-help": "f32 buffer; diameter per point; curves and points; required",
+          "x-help-path": "geometry.widths",
+          "x-source": "USD Points / BasisCurves"
+        }
+      },
+      "required": [
+        "attributes"
+      ],
+      "type": "object"
+    },
+    "GridBinding": {
+      "additionalProperties": false,
+      "description": "A volume grid buffer for a FloatGrid or VectorGrid program input.",
+      "properties": {
+        "grid": {
+          "$ref": "#/$defs/NameOr3",
+          "x-help": "buffer-name|inline buffer; buffer with a grid",
+          "x-help-path": "material.grid.grid",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "grid"
+      ],
+      "type": "object"
+    },
+    "Image": {
+      "additionalProperties": false,
+      "properties": {
+        "color_space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColorSpace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Blender `Image.colorspace_settings.name`. Omitted follows Blender's file default.",
+          "x-help": "sRGB|Linear Rec.709|Non-Color|null; null: hdr/exr/ies linear, others sRGB",
+          "x-help-path": "image.color_space",
+          "x-source": "Blender 5.2.1 Image.colorspace_settings.name"
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C",
+          "x-help-path": "image.file",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "mag_filter": {
+          "$ref": "#/$defs/MagFilter",
+          "default": "linear",
+          "x-help": "nearest|linear",
+          "x-help-path": "image.mag_filter",
+          "x-source": "glTF 2.0 sampler.magFilter (undefined default: vork linear)"
+        },
+        "min_filter": {
+          "$ref": "#/$defs/MinFilter",
+          "default": "linear_mipmap_linear",
+          "x-help": "nearest|linear|nearest_mipmap_nearest|linear_mipmap_nearest|nearest_mipmap_linear|linear_mipmap_linear",
+          "x-help-path": "image.min_filter",
+          "x-source": "glTF 2.0 sampler.minFilter (undefined default: vork linear_mipmap_linear, anisotropic)"
+        },
+        "render": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageRender"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-help": "ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA",
+          "x-help-extra": "image.render restrictions: first shared pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported",
+          "x-help-path": "image.render",
+          "x-source": "vork (nested scene-linear render)"
+        },
+        "time": {
+          "default": null,
+          "description": "Seconds into media; omitted follows scene time. EXR sequences honor\nframesPerSecond metadata; other sequences use render.fps.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-help": "number|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends",
+          "x-help-path": "image.time",
+          "x-source": "vork (footage clock)"
+        },
+        "wrap_s": {
+          "$ref": "#/$defs/Wrap",
+          "default": "repeat",
+          "x-help": "repeat|clamp_to_edge|mirrored_repeat",
+          "x-help-path": "image.wrap_s",
+          "x-source": "glTF 2.0 sampler.wrapS"
+        },
+        "wrap_t": {
+          "$ref": "#/$defs/Wrap",
+          "default": "repeat",
+          "x-help": "repeat|clamp_to_edge|mirrored_repeat",
+          "x-help-path": "image.wrap_t",
+          "x-source": "glTF 2.0 sampler.wrapT"
+        }
+      },
+      "type": "object"
+    },
+    "ImageRender": {
+      "additionalProperties": false,
+      "description": "Settings that a nested image may author. The parent owns transport and time;\na capture has a closed shutter and runs the automatic per-step compositor.",
+      "properties": {
+        "background": {
+          "$ref": "#/$defs/Background",
+          "default": "environment",
+          "x-help": "environment|transparent|RGB",
+          "x-help-path": "image.render.background",
+          "x-source": "vork (Blender RenderSettings.film_transparent plus a constant RGB)"
+        },
+        "camera": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "camera-node-name|null; null = the only authored camera, else first imported",
+          "x-help-path": "image.render.camera",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "compositor": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CompositeEntry"
+          },
+          "type": "array",
+          "x-help": "same image graph as render.compositor; names local to this capture",
+          "x-help-path": "image.render.compositor",
+          "x-source": "vork"
+        },
+        "resolution": {
+          "default": [
+            1920,
+            1080
+          ],
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "x-help": "uvec2",
+          "x-help-path": "image.render.resolution",
+          "x-source": "Blender 5.2.1 RenderSettings.resolution_x/resolution_y"
+        },
+        "root": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "node-name|null; only this subtree draws and is lit; objects outside still cast shadows; null = whole scene",
+          "x-help-path": "image.render.root",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "type": "object"
+    },
+    "InlineDataSchema": {
+      "anyOf": [
+        {
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "items": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Inline numeric elements. Matrices contain 16 column-major components."
+    },
+    "Input": {
+      "anyOf": [
+        {
+          "format": "float",
+          "type": "number"
+        },
+        {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/TextureBinding"
+        },
+        {
+          "$ref": "#/$defs/AttributeBinding"
+        },
+        {
+          "$ref": "#/$defs/GridBinding"
+        },
+        {
+          "$ref": "#/$defs/AovBinding"
+        },
+        {
+          "$ref": "#/$defs/ChannelBinding"
+        },
+        {
+          "$ref": "#/$defs/NodeBinding"
+        },
+        {
+          "description": "An enum token of the program's reflected input type.",
+          "type": "string"
+        }
+      ],
+      "description": "A material input value. Resources are explicit tagged objects; a plain string is\nonly ever an enum token of the program's reflected input type."
+    },
+    "Instances": {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/NameOr3"
+          },
+          "type": "object",
+          "x-help": "equal-length buffers: TRANSLATION vec3, ROTATION vec4 (xyzw), SCALE vec3 (omitted = identity; any zero world-scale component hides the instance), time_offset f32, pass_index u32, custom columns bind to material inputs",
+          "x-help-path": "node.mesh.instances.attributes",
+          "x-source": "glTF EXT_mesh_gpu_instancing; vork time_offset/pass_index"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-help": "one-element u32 compute buffer; zero to attribute capacity; overflow rejects the exposure",
+          "x-help-path": "node.mesh.instances.count",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "attributes"
+      ],
+      "type": "object"
+    },
+    "Interpolation": {
+      "enum": [
+        "STEP",
+        "LINEAR",
+        "CUBICSPLINE"
+      ],
+      "type": "string"
+    },
+    "KernelChannel": {
+      "enum": [
+        "color",
+        "depth",
+        "view_normal",
+        "object_index",
+        "motion",
+        "shadow_catcher"
+      ],
+      "type": "string"
+    },
+    "Keys": {
+      "anyOf": [
+        {
+          "items": {
+            "items": true,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "times": {
+              "$ref": "#/$defs/NameOr3"
+            },
+            "values": {
+              "$ref": "#/$defs/NameOr3"
+            }
+          },
+          "required": [
+            "times",
+            "values"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Keyframes inline as `[time, value]` pairs, or two buffers for bulk data."
+    },
+    "Layer": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blend": {
+              "$ref": "#/$defs/Blend",
+              "default": "replace",
+              "x-help": "replace|add",
+              "x-help-path": "animation.layer.blend",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "clip": {
+              "type": "null"
+            },
+            "loop": {
+              "default": false,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "animation.layer.loop",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-help": "string|null",
+              "x-help-path": "animation.layer.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "offset": {
+              "default": 0.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; source time = offset + time*speed",
+              "x-help-path": "animation.layer.offset",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "speed": {
+              "default": 1.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number",
+              "x-help-path": "animation.layer.speed",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "tracks": {
+              "items": {
+                "$ref": "#/$defs/Track"
+              },
+              "type": [
+                "array"
+              ],
+              "x-help": "track[]|null; XOR clip",
+              "x-help-path": "animation.layer.tracks",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "weight": {
+              "default": 1.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number",
+              "x-help-path": "animation.layer.weight",
+              "x-source": "vork (explicit contract/technique choice)"
+            }
+          },
+          "required": [
+            "tracks"
+          ],
+          "title": "TrackLayer",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blend": {
+              "$ref": "#/$defs/Blend",
+              "default": "replace",
+              "x-help": "replace|add",
+              "x-help-path": "animation.layer.blend",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "clip": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Clip"
+                }
+              ],
+              "x-help": "clip|null; XOR tracks",
+              "x-help-path": "animation.layer.clip",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "loop": {
+              "default": false,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "animation.layer.loop",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-help": "string|null",
+              "x-help-path": "animation.layer.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "offset": {
+              "default": 0.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; source time = offset + time*speed",
+              "x-help-path": "animation.layer.offset",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "speed": {
+              "default": 1.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number",
+              "x-help-path": "animation.layer.speed",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "tracks": {
+              "type": "null"
+            },
+            "weight": {
+              "default": 1.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number",
+              "x-help-path": "animation.layer.weight",
+              "x-source": "vork (explicit contract/technique choice)"
+            }
+          },
+          "required": [
+            "clip"
+          ],
+          "title": "ClipLayer",
+          "type": "object"
+        }
+      ]
+    },
+    "LightShape": {
+      "enum": [
+        "sun",
+        "point",
+        "spot",
+        "rectangle",
+        "ellipse",
+        "environment"
+      ],
+      "type": "string",
+      "x-help-extra": "lights: with no environment light the world is RGB [0.05,0.05,0.05]"
+    },
+    "MagFilter": {
+      "enum": [
+        "nearest",
+        "linear"
+      ],
+      "type": "string"
+    },
+    "Material": {
+      "additionalProperties": false,
+      "description": "A program instance. Its surface entry shades the assigned geometry.",
+      "properties": {
+        "double_sided": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool; false culls back faces",
+          "x-help-path": "material.double_sided",
+          "x-source": "Blender renders both sides; imported glTF retains doubleSided"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Input"
+          },
+          "default": {},
+          "type": "object",
+          "x-help": "{name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}}",
+          "x-help-extra": "material.inputs (transmission): transmission_depth 0 = sqrt(tint) per solid interface; thin sheets = full tint; positive-depth solids = Beer absorption\nmaterial.inputs (animation): numeric scalar/vector/colour inputs on surface/environment/compute/compositor/display programs use ordinary tracks; geometry_thin_walled is structural; an omitted animated program input has a zero blend baseline (author inputs for another baseline)\nmaterial.inputs.subsurface: thick: radius × radius_scale; thin: diffuse reflection/transmission split by scatter_anisotropy",
+          "x-help-path": "material.inputs",
+          "x-source": "OpenPBR Surface 1.1.1 defaults (spec table)"
+        },
+        "opacity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Opacity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Meaning of geometry_opacity; the renderer owns its integration method.",
+          "x-help": "coverage|transmittance|null; null = coverage, transmittance for transmitting surfaces; coverage = occupied area fraction; transmittance = continuous attenuation by 1 - geometry_opacity; renderer chooses integration",
+          "x-help-path": "material.opacity",
+          "x-source": "vork surface presence semantics"
+        },
+        "program": {
+          "$ref": "#/$defs/NameOr2",
+          "default": "std/openpbr",
+          "x-help": "program-name|inline program|<library>/<module>; std/openpbr, std/hair (curves only), or custom",
+          "x-help-extra": "program.surface emission: authoritative radiance for hits and light samples; lit output is authored shading\nprogram.surface: Closure|Blend|Hair surface(ShadingContext,Inputs); Hair needs curves",
+          "x-help-path": "material.program",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "type": "object",
+      "x-help-extra": "material (glTF import): mapped to OpenPBR; coat_ior 1.5; occlusion affects indirect only"
+    },
+    "MaterialRange": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32; whole triangles",
+          "x-help-path": "geometry.material_ranges.count",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "material_index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32; node.materials slot",
+          "x-help-path": "geometry.material_ranges.material_index",
+          "x-source": "Blender MeshPolygon.material_index"
+        },
+        "start": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32; first index",
+          "x-help-path": "geometry.material_ranges.start",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "start",
+        "count",
+        "material_index"
+      ],
+      "type": "object"
+    },
+    "MinFilter": {
+      "enum": [
+        "nearest",
+        "linear",
+        "nearest_mipmap_nearest",
+        "linear_mipmap_nearest",
+        "nearest_mipmap_linear",
+        "linear_mipmap_linear"
+      ],
+      "type": "string"
+    },
+    "Morph": {
+      "additionalProperties": false,
+      "properties": {
+        "NORMAL": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameOr3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-help": "buffer-name|inline buffer|null",
+          "x-help-path": "geometry.morphs.NORMAL",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "POSITION": {
+          "$ref": "#/$defs/NameOr3",
+          "x-help": "vec3-buffer-name|inline buffer",
+          "x-help-path": "geometry.morphs.POSITION",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "POSITION"
+      ],
+      "type": "object"
+    },
+    "MotionBlur": {
+      "additionalProperties": false,
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/MotionBlurPosition",
+          "default": "center",
+          "x-help": "start|center|end",
+          "x-help-path": "render.motion_blur.position",
+          "x-source": "Blender 5.2.1 motion_blur_position"
+        },
+        "shutter": {
+          "default": 0.5,
+          "format": "float",
+          "type": "number",
+          "x-help": "number; frames",
+          "x-help-path": "render.motion_blur.shutter",
+          "x-source": "Blender 5.2.1 motion_blur_shutter"
+        }
+      },
+      "type": "object"
+    },
+    "MotionBlurPosition": {
+      "enum": [
+        "start",
+        "center",
+        "end"
+      ],
+      "type": "string"
+    },
+    "NameOr": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Material"
+        }
+      ],
+      "description": "A resource name or inline definition."
+    },
+    "NameOr2": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Program"
+        }
+      ],
+      "description": "A resource name or inline definition."
+    },
+    "NameOr3": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Buffer"
+        }
+      ],
+      "description": "A resource name or inline definition."
+    },
+    "NameOr4": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Image"
+        }
+      ],
+      "description": "A resource name or inline definition."
+    },
+    "NameOr5": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Geometry"
+        }
+      ],
+      "description": "A resource name or inline definition."
+    },
+    "Node": {
+      "description": "Translation, rotation and scale (glTF node TRS), flat on the node. Rotation is\nstored as a quaternion; an authored `{\"euler\": [x,y,z]}` converts losslessly.",
+      "oneOf": [
+        {
+          "properties": {
+            "children": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Node"
+              },
+              "type": "array",
+              "x-help": "node[]",
+              "x-help-path": "node.children",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "is_holdout": {
+              "default": false,
+              "description": "Cycles holdout: transparent black on transparent film; opaque black otherwise.",
+              "type": "boolean",
+              "x-help": "bool; RGB 0; alpha 0 on transparent background, 1 on opaque background",
+              "x-help-path": "node.is_holdout",
+              "x-source": "Blender Cycles Object.is_holdout"
+            },
+            "is_shadow_catcher": {
+              "default": false,
+              "description": "Cycles shadow catcher. Combined treats this surface as a holdout.",
+              "type": "boolean",
+              "x-help": "bool; shadow_catcher channel is material light with CG / without CG, unclamped; zero baseline gives neutral 1; CG light on an otherwise unlit catcher cannot be represented",
+              "x-help-path": "node.is_shadow_catcher",
+              "x-source": "Blender Cycles Object.is_shadow_catcher"
+            },
+            "light_link_tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-help": "string[]; matched by light illuminates/shadowed_by; inherited",
+              "x-help-path": "node.light_link_tags",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "name": {
+              "default": "",
+              "type": "string",
+              "x-help": "string; globally unique, including imported nodes",
+              "x-help-path": "node.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "pass_index": {
+              "format": "uint32",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; 1..65535; object ID",
+              "x-help-path": "node.pass_index",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "rotation": {
+              "$ref": "#/$defs/Rotation",
+              "default": [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "x-help": "[x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ)",
+              "x-help-path": "node.rotation",
+              "x-source": "glTF 2.0 (quaternion); Blender XYZ Euler"
+            },
+            "scale": {
+              "default": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; any zero world-scale component hides geometry, including children",
+              "x-help-path": "node.scale",
+              "x-source": "glTF 2.0"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AimTarget"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help-path": "node.target",
+              "x-source": "Blender Track To constraint (vork target shorthand)"
+            },
+            "translation": {
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; parent frame",
+              "x-help-path": "node.translation",
+              "x-source": "glTF 2.0"
+            },
+            "type": {
+              "const": "node",
+              "default": "node",
+              "type": "string"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; false hides the subtree and disables its lights; animatable (step)",
+              "x-help-path": "node.visible",
+              "x-source": "vork visibility primitive"
+            },
+            "visible_camera": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_camera",
+              "x-source": "Blender Object.visible_camera"
+            },
+            "visible_diffuse": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_diffuse",
+              "x-source": "Blender Object.visible_diffuse"
+            },
+            "visible_glossy": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_glossy",
+              "x-source": "Blender Object.visible_glossy"
+            },
+            "visible_shadow": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; lights must stay true (a light without shadows: shadowed_by [])",
+              "x-help-path": "node.visible_shadow",
+              "x-source": "Blender Object.visible_shadow"
+            },
+            "visible_transmission": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; object visibility to transmission rays; lights must stay true",
+              "x-help-path": "node.visible_transmission",
+              "x-source": "Blender Object.visible_transmission"
+            }
+          },
+          "required": [],
+          "title": "TransformNode",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "children": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Node"
+              },
+              "type": "array",
+              "x-help": "node[]",
+              "x-help-path": "node.children",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "geometry": {
+              "$ref": "#/$defs/NameOr5",
+              "x-help": "geometry-name|inline geometry",
+              "x-help-path": "node.mesh.geometry",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "instances": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Instances"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "instances|null",
+              "x-help-path": "node.mesh.instances",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "is_holdout": {
+              "default": false,
+              "description": "Cycles holdout: transparent black on transparent film; opaque black otherwise.",
+              "type": "boolean",
+              "x-help": "bool; RGB 0; alpha 0 on transparent background, 1 on opaque background",
+              "x-help-path": "node.is_holdout",
+              "x-source": "Blender Cycles Object.is_holdout"
+            },
+            "is_shadow_catcher": {
+              "default": false,
+              "description": "Cycles shadow catcher. Combined treats this surface as a holdout.",
+              "type": "boolean",
+              "x-help": "bool; shadow_catcher channel is material light with CG / without CG, unclamped; zero baseline gives neutral 1; CG light on an otherwise unlit catcher cannot be represented",
+              "x-help-path": "node.is_shadow_catcher",
+              "x-source": "Blender Cycles Object.is_shadow_catcher"
+            },
+            "light_link_tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-help": "string[]; matched by light illuminates/shadowed_by; inherited",
+              "x-help-path": "node.light_link_tags",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "materials": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/NameOr"
+              },
+              "type": "array",
+              "x-help": "(material-name|inline material)[]; empty = default std/openpbr with roughness 0.5",
+              "x-help-path": "node.mesh.materials",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "morph_weights": {
+              "additionalProperties": {
+                "format": "float",
+                "type": "number"
+              },
+              "default": {},
+              "type": "object",
+              "x-help": "{name:number}",
+              "x-help-path": "node.mesh.morph_weights",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "name": {
+              "default": "",
+              "type": "string",
+              "x-help": "string; globally unique, including imported nodes",
+              "x-help-path": "node.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "pass_index": {
+              "format": "uint32",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; 1..65535; object ID",
+              "x-help-path": "node.pass_index",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "rotation": {
+              "$ref": "#/$defs/Rotation",
+              "default": [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "x-help": "[x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ)",
+              "x-help-path": "node.rotation",
+              "x-source": "glTF 2.0 (quaternion); Blender XYZ Euler"
+            },
+            "scale": {
+              "default": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; any zero world-scale component hides geometry, including children",
+              "x-help-path": "node.scale",
+              "x-source": "glTF 2.0"
+            },
+            "skin": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Skin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "skin|null",
+              "x-help-path": "node.mesh.skin",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AimTarget"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help-path": "node.target",
+              "x-source": "Blender Track To constraint (vork target shorthand)"
+            },
+            "translation": {
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; parent frame",
+              "x-help-path": "node.translation",
+              "x-source": "glTF 2.0"
+            },
+            "type": {
+              "const": "mesh",
+              "type": "string"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; false hides the subtree and disables its lights; animatable (step)",
+              "x-help-path": "node.visible",
+              "x-source": "vork visibility primitive"
+            },
+            "visible_camera": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_camera",
+              "x-source": "Blender Object.visible_camera"
+            },
+            "visible_diffuse": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_diffuse",
+              "x-source": "Blender Object.visible_diffuse"
+            },
+            "visible_glossy": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_glossy",
+              "x-source": "Blender Object.visible_glossy"
+            },
+            "visible_shadow": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; lights must stay true (a light without shadows: shadowed_by [])",
+              "x-help-path": "node.visible_shadow",
+              "x-source": "Blender Object.visible_shadow"
+            },
+            "visible_transmission": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; object visibility to transmission rays; lights must stay true",
+              "x-help-path": "node.visible_transmission",
+              "x-source": "Blender Object.visible_transmission"
+            }
+          },
+          "required": [
+            "type",
+            "geometry"
+          ],
+          "title": "MeshNode",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "children": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Node"
+              },
+              "type": "array",
+              "x-help": "node[]",
+              "x-help-path": "node.children",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "file": {
+              "type": "string",
+              "x-help": "file-path",
+              "x-help-path": "node.asset.file",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "is_holdout": {
+              "default": false,
+              "description": "Cycles holdout: transparent black on transparent film; opaque black otherwise.",
+              "type": "boolean",
+              "x-help": "bool; RGB 0; alpha 0 on transparent background, 1 on opaque background",
+              "x-help-path": "node.is_holdout",
+              "x-source": "Blender Cycles Object.is_holdout"
+            },
+            "is_shadow_catcher": {
+              "default": false,
+              "description": "Cycles shadow catcher. Combined treats this surface as a holdout.",
+              "type": "boolean",
+              "x-help": "bool; shadow_catcher channel is material light with CG / without CG, unclamped; zero baseline gives neutral 1; CG light on an otherwise unlit catcher cannot be represented",
+              "x-help-path": "node.is_shadow_catcher",
+              "x-source": "Blender Cycles Object.is_shadow_catcher"
+            },
+            "light_link_tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-help": "string[]; matched by light illuminates/shadowed_by; inherited",
+              "x-help-path": "node.light_link_tags",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "materials": {
+              "additionalProperties": {
+                "$ref": "#/$defs/NameOr"
+              },
+              "default": {},
+              "type": "object",
+              "x-help": "{imported-name|#index|*: material-name|inline material}; #index = glTF material index; specific beats *",
+              "x-help-path": "node.asset.materials",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "name": {
+              "default": "",
+              "type": "string",
+              "x-help": "string; globally unique, including imported nodes",
+              "x-help-path": "node.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "nodes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/AssetNodeOverrides"
+              },
+              "default": {},
+              "type": "object",
+              "x-help": "{imported-name|#index: overrides}; #index = glTF node index",
+              "x-help-path": "node.asset.nodes",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "pass_index": {
+              "format": "uint32",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; 1..65535; object ID",
+              "x-help-path": "node.pass_index",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "rotation": {
+              "$ref": "#/$defs/Rotation",
+              "default": [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "x-help": "[x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ)",
+              "x-help-path": "node.rotation",
+              "x-source": "glTF 2.0 (quaternion); Blender XYZ Euler"
+            },
+            "scale": {
+              "default": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; any zero world-scale component hides geometry, including children",
+              "x-help-path": "node.scale",
+              "x-source": "glTF 2.0"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AimTarget"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help-path": "node.target",
+              "x-source": "Blender Track To constraint (vork target shorthand)"
+            },
+            "translation": {
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; parent frame",
+              "x-help-path": "node.translation",
+              "x-source": "glTF 2.0"
+            },
+            "type": {
+              "const": "asset",
+              "type": "string"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; false hides the subtree and disables its lights; animatable (step)",
+              "x-help-path": "node.visible",
+              "x-source": "vork visibility primitive"
+            },
+            "visible_camera": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_camera",
+              "x-source": "Blender Object.visible_camera"
+            },
+            "visible_diffuse": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_diffuse",
+              "x-source": "Blender Object.visible_diffuse"
+            },
+            "visible_glossy": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_glossy",
+              "x-source": "Blender Object.visible_glossy"
+            },
+            "visible_shadow": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; lights must stay true (a light without shadows: shadowed_by [])",
+              "x-help-path": "node.visible_shadow",
+              "x-source": "Blender Object.visible_shadow"
+            },
+            "visible_transmission": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; object visibility to transmission rays; lights must stay true",
+              "x-help-path": "node.visible_transmission",
+              "x-source": "Blender Object.visible_transmission"
+            }
+          },
+          "required": [
+            "type",
+            "file"
+          ],
+          "title": "AssetNode",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "children": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Node"
+              },
+              "type": "array",
+              "x-help": "node[]",
+              "x-help-path": "node.children",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "focus_object": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-help": "node-name|null; camera-axis depth supplied to the program at sample time",
+              "x-help-path": "camera.focus_object",
+              "x-source": "Blender CameraDOFSettings.focus_object"
+            },
+            "is_holdout": {
+              "default": false,
+              "description": "Cycles holdout: transparent black on transparent film; opaque black otherwise.",
+              "type": "boolean",
+              "x-help": "bool; RGB 0; alpha 0 on transparent background, 1 on opaque background",
+              "x-help-path": "node.is_holdout",
+              "x-source": "Blender Cycles Object.is_holdout"
+            },
+            "is_shadow_catcher": {
+              "default": false,
+              "description": "Cycles shadow catcher. Combined treats this surface as a holdout.",
+              "type": "boolean",
+              "x-help": "bool; shadow_catcher channel is material light with CG / without CG, unclamped; zero baseline gives neutral 1; CG light on an otherwise unlit catcher cannot be represented",
+              "x-help-path": "node.is_shadow_catcher",
+              "x-source": "Blender Cycles Object.is_shadow_catcher"
+            },
+            "light_link_tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-help": "string[]; matched by light illuminates/shadowed_by; inherited",
+              "x-help-path": "node.light_link_tags",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "material": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "x-help": "material-name|inline material|null; omitted = std/camera; optics are program inputs",
+              "x-help-path": "camera.material",
+              "x-source": "vork (programmable camera and sensor)"
+            },
+            "name": {
+              "default": "",
+              "type": "string",
+              "x-help": "string; globally unique, including imported nodes",
+              "x-help-path": "node.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "pass_index": {
+              "format": "uint32",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; 1..65535; object ID",
+              "x-help-path": "node.pass_index",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "rotation": {
+              "$ref": "#/$defs/Rotation",
+              "default": [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "x-help": "[x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ)",
+              "x-help-path": "node.rotation",
+              "x-source": "glTF 2.0 (quaternion); Blender XYZ Euler"
+            },
+            "scale": {
+              "default": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; any zero world-scale component hides geometry, including children",
+              "x-help-path": "node.scale",
+              "x-source": "glTF 2.0"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AimTarget"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help-path": "node.target",
+              "x-source": "Blender Track To constraint (vork target shorthand)"
+            },
+            "translation": {
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; parent frame",
+              "x-help-path": "node.translation",
+              "x-source": "glTF 2.0"
+            },
+            "type": {
+              "const": "camera",
+              "type": "string"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; false hides the subtree and disables its lights; animatable (step)",
+              "x-help-path": "node.visible",
+              "x-source": "vork visibility primitive"
+            },
+            "visible_camera": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_camera",
+              "x-source": "Blender Object.visible_camera"
+            },
+            "visible_diffuse": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_diffuse",
+              "x-source": "Blender Object.visible_diffuse"
+            },
+            "visible_glossy": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_glossy",
+              "x-source": "Blender Object.visible_glossy"
+            },
+            "visible_shadow": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; lights must stay true (a light without shadows: shadowed_by [])",
+              "x-help-path": "node.visible_shadow",
+              "x-source": "Blender Object.visible_shadow"
+            },
+            "visible_transmission": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; object visibility to transmission rays; lights must stay true",
+              "x-help-path": "node.visible_transmission",
+              "x-source": "Blender Object.visible_transmission"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "CameraNode",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "angle": {
+              "default": 0.009180432185530663,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; sun",
+              "x-help-path": "light.angle",
+              "x-source": "Blender 5.2.1 SunLight.angle (Add Light default)"
+            },
+            "children": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Node"
+              },
+              "type": "array",
+              "x-help": "node[]",
+              "x-help-path": "node.children",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "color": {
+              "description": "None: LightShape::default_color (white, or Blender's world colour for an\nenvironment without an image).",
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": [
+                "array",
+                "null"
+              ],
+              "x-help": "RGB",
+              "x-help-path": "light.color",
+              "x-source": "Blender 5.2.1 Light.color (Add Light default)"
+            },
+            "energy": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ],
+              "x-help": "number|null; sun W/m²; local W; environment multiplier",
+              "x-help-path": "light.energy",
+              "x-source": "Blender 5.2.1 Light.energy (Add Light default)"
+            },
+            "illuminates": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ],
+              "x-help": "light-link-tag[]|null; receivers with any tag; null=all; []=none",
+              "x-help-path": "light.illuminates",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "image": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr4"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "image-name|inline image|null; LM-63 Type C IES (path only); non-environment lights; emits -Z, no peak normalization",
+              "x-help-path": "light.image",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "is_holdout": {
+              "default": false,
+              "description": "Cycles holdout: transparent black on transparent film; opaque black otherwise.",
+              "type": "boolean",
+              "x-help": "bool; RGB 0; alpha 0 on transparent background, 1 on opaque background",
+              "x-help-path": "node.is_holdout",
+              "x-source": "Blender Cycles Object.is_holdout"
+            },
+            "is_shadow_catcher": {
+              "default": false,
+              "description": "Cycles shadow catcher. Combined treats this surface as a holdout.",
+              "type": "boolean",
+              "x-help": "bool; shadow_catcher channel is material light with CG / without CG, unclamped; zero baseline gives neutral 1; CG light on an otherwise unlit catcher cannot be represented",
+              "x-help-path": "node.is_shadow_catcher",
+              "x-source": "Blender Cycles Object.is_shadow_catcher"
+            },
+            "light_link_tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-help": "string[]; matched by light illuminates/shadowed_by; inherited",
+              "x-help-path": "node.light_link_tags",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "material": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Environment radiance material instance.",
+              "x-help": "material-name|inline material|null; environment program",
+              "x-help-path": "light.material",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "name": {
+              "default": "",
+              "type": "string",
+              "x-help": "string; globally unique, including imported nodes",
+              "x-help-path": "node.name",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "pass_index": {
+              "format": "uint32",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; 1..65535; object ID",
+              "x-help-path": "node.pass_index",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "radius": {
+              "default": 0.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; point/spot emitter radius (shadow softness)",
+              "x-help-path": "light.radius",
+              "x-source": "Blender 5.2.1 Light.shadow_soft_size (Add Light default)"
+            },
+            "rotation": {
+              "$ref": "#/$defs/Rotation",
+              "default": [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "x-help": "[x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ)",
+              "x-help-path": "node.rotation",
+              "x-source": "glTF 2.0 (quaternion); Blender XYZ Euler"
+            },
+            "scale": {
+              "default": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; any zero world-scale component hides geometry, including children",
+              "x-help-path": "node.scale",
+              "x-source": "glTF 2.0"
+            },
+            "shadowed_by": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ],
+              "x-help": "light-link-tag[]|null; casters with any tag; null=all; []=none",
+              "x-help-path": "light.shadowed_by",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "shape": {
+              "$ref": "#/$defs/LightShape",
+              "x-help": "sun|point|spot|rectangle|ellipse|environment",
+              "x-help-path": "light.shape",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "size": {
+              "default": 1.0,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; rectangle full side, ellipse diameter",
+              "x-help-path": "light.size",
+              "x-source": "Blender 5.2.1 AreaLight.size (Add Light default)"
+            },
+            "size_y": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ],
+              "x-help": "number|null; second side/diameter; omitted = size (square/disk)",
+              "x-help-path": "light.size_y",
+              "x-source": "Blender 5.2.1 AreaLight square/disk sizing"
+            },
+            "spot_blend": {
+              "default": 0.15000000596046448,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; 0..1",
+              "x-help-path": "light.spot_blend",
+              "x-source": "Blender 5.2.1 SpotLight.spot_blend"
+            },
+            "spot_size": {
+              "default": 0.7853981852531433,
+              "format": "float",
+              "type": "number",
+              "x-help": "number; full cone angle",
+              "x-help-path": "light.spot_size",
+              "x-source": "Blender 5.2.1 SpotLight.spot_size"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AimTarget"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help-path": "node.target",
+              "x-source": "Blender Track To constraint (vork target shorthand)"
+            },
+            "temperature": {
+              "description": "None: `color` alone. Some(kelvin): `color` × std.color blackbody(kelvin).",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ],
+              "x-help": "number|null; K; multiplies color; not environment",
+              "x-help-path": "light.temperature",
+              "x-source": "Blender 5.2.1 Light.temperature with use_temperature"
+            },
+            "translation": {
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[x,y,z]; parent frame",
+              "x-help-path": "node.translation",
+              "x-source": "glTF 2.0"
+            },
+            "type": {
+              "const": "light",
+              "type": "string"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; false hides the subtree and disables its lights; animatable (step)",
+              "x-help-path": "node.visible",
+              "x-source": "vork visibility primitive"
+            },
+            "visible_camera": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_camera",
+              "x-source": "Blender Object.visible_camera"
+            },
+            "visible_diffuse": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_diffuse",
+              "x-source": "Blender Object.visible_diffuse"
+            },
+            "visible_glossy": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool",
+              "x-help-path": "node.visible_glossy",
+              "x-source": "Blender Object.visible_glossy"
+            },
+            "visible_shadow": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; lights must stay true (a light without shadows: shadowed_by [])",
+              "x-help-path": "node.visible_shadow",
+              "x-source": "Blender Object.visible_shadow"
+            },
+            "visible_transmission": {
+              "default": true,
+              "type": "boolean",
+              "x-help": "bool; object visibility to transmission rays; lights must stay true",
+              "x-help-path": "node.visible_transmission",
+              "x-source": "Blender Object.visible_transmission"
+            }
+          },
+          "required": [
+            "type",
+            "shape"
+          ],
+          "title": "LightNode",
+          "type": "object"
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-help-extra": "node.type: node|mesh|asset|camera|light; default \"node\"\nasset (glTF cameras): addressed as <asset>/<node-name|#index>",
+      "x-help-path": "node"
+    },
+    "NodeBinding": {
+      "additionalProperties": false,
+      "description": "An earlier named compositor entry, local to this graph.",
+      "properties": {
+        "node": {
+          "type": "string",
+          "x-help": "earlier compositor entry name; clamped bilinear image sampling",
+          "x-help-path": "material.node.node",
+          "x-source": "vork"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "type": "object"
+    },
+    "Opacity": {
+      "enum": [
+        "coverage",
+        "transmittance"
+      ],
+      "type": "string"
+    },
+    "Profile": {
+      "additionalProperties": false,
+      "description": "Profile file contents.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string",
+          "x-help": "string",
+          "x-help-path": "profile.description",
+          "x-source": "vork render profile"
+        },
+        "level": {
+          "description": "Quality/cost level, independent of the profile's name: 0 draft, 1 final, 2 reference, 3 previs (a separate blocking look).",
+          "format": "uint8",
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u8; 0..3; quality/cost level; 3 is previs",
+          "x-help-path": "profile.level",
+          "x-source": "vork"
+        },
+        "settings": {
+          "$ref": "#/$defs/Settings",
+          "default": {},
+          "description": "Sampling seed, sample budget and denoising intent.",
+          "x-help": "Settings; seed, samples and denoise only",
+          "x-help-path": "profile.settings",
+          "x-source": "vork render profile"
+        },
+        "version": {
+          "description": "The profile's own revision, recorded in output metadata.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32",
+          "x-help-path": "profile.version",
+          "x-source": "vork render profile"
+        }
+      },
+      "required": [
+        "version",
+        "level"
+      ],
+      "title": "ProfileFile",
+      "type": "object"
+    },
+    "Program": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bindings": {
+              "additionalProperties": {
+                "$ref": "#/$defs/NameOr3"
+              },
+              "default": {},
+              "type": "object",
+              "x-help": "<binding>_load(i), _store(i,v), _count; dense grids also expose _dims; u32 _atomic_min(i,v) returns prior value (OOB: UINT_MAX); mat4 = VorkMat4 {c0..c3 columns}; out-of-range loads 0, stores ignored",
+              "x-help-path": "program.bindings",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "dispatch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ComputeDispatch"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "item count or [x,y,z] threads; install/init dt=0; frame schedule frame 0 dt=0; simulation ticks use fixed dt",
+              "x-help-path": "program.dispatch",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "file": {
+              "type": [
+                "string"
+              ],
+              "x-help": "file-path; XOR source; Slang module, import vork",
+              "x-help-path": "program.file",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "schedule": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ComputeSchedule"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "install|frame|simulation; frame uses output FPS; simulation uses scene.simulation pass order; each material instance dispatches with its inputs",
+              "x-help-path": "program.schedule",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "source": {
+              "type": "null"
+            },
+            "source_origin": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "title": "FileProgram",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bindings": {
+              "additionalProperties": {
+                "$ref": "#/$defs/NameOr3"
+              },
+              "default": {},
+              "type": "object",
+              "x-help": "<binding>_load(i), _store(i,v), _count; dense grids also expose _dims; u32 _atomic_min(i,v) returns prior value (OOB: UINT_MAX); mat4 = VorkMat4 {c0..c3 columns}; out-of-range loads 0, stores ignored",
+              "x-help-path": "program.bindings",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "dispatch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ComputeDispatch"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "item count or [x,y,z] threads; install/init dt=0; frame schedule frame 0 dt=0; simulation ticks use fixed dt",
+              "x-help-path": "program.dispatch",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "file": {
+              "type": "null"
+            },
+            "schedule": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ComputeSchedule"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "install|frame|simulation; frame uses output FPS; simulation uses scene.simulation pass order; each material instance dispatches with its inputs",
+              "x-help-path": "program.schedule",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "source": {
+              "type": [
+                "string"
+              ],
+              "x-help": "Slang source; XOR file; import vork",
+              "x-help-extra": "program enum inputs: lowercased Slang case-name tokens (e.g. fog_glow)",
+              "x-help-path": "program.source",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "source_origin": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-help": "virtual filename|null; inline source only; resolves local imports",
+              "x-help-path": "program.source_origin",
+              "x-source": "vork program source location"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "title": "SourceProgram",
+          "type": "object"
+        }
+      ]
+    },
+    "Propagation": {
+      "additionalProperties": false,
+      "properties": {
+        "bounds": {
+          "description": "World-space minimum and maximum in metres; rays leaving continue straight.",
+          "items": {
+            "items": {
+              "format": "float",
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "program": {
+          "description": "Program exporting PropagationStep propagation(PropagationContext, Inputs).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "program",
+        "bounds"
+      ],
+      "type": "object"
+    },
+    "Render": {
+      "additionalProperties": false,
+      "default": null,
+      "properties": {
+        "aovs": {
+          "default": [],
+          "description": "Shader AOV declarations; color outputs contain scene-linear RGB.",
+          "items": {
+            "$ref": "#/$defs/Aov"
+          },
+          "type": "array",
+          "x-help": "[{name,type:value|color}]; output with --channels all or aov:<name>",
+          "x-help-path": "render.aovs",
+          "x-source": "Blender ViewLayer.aovs"
+        },
+        "background": {
+          "$ref": "#/$defs/Background",
+          "default": "environment",
+          "x-help": "environment|transparent|RGB; RGB and transparent apply to camera escapes and opacity passthrough; path glass transmission sees the World",
+          "x-help-path": "render.background",
+          "x-source": "vork (Blender RenderSettings.film_transparent plus a constant RGB)"
+        },
+        "camera": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "camera-node-name|null; null = the only authored camera, else first imported; a camera cut track may select",
+          "x-help-path": "render.camera",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "compositor": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CompositeEntry"
+          },
+          "type": "array",
+          "x-help": "(material-name|{material,name?,resolution?})[]; ordered image graph, last output; material may be inline",
+          "x-help-path": "render.compositor",
+          "x-source": "vork"
+        },
+        "display": {
+          "$ref": "#/$defs/NameOr",
+          "default": {
+            "double_sided": true,
+            "inputs": {},
+            "opacity": null,
+            "program": "std/agx"
+          },
+          "x-help": "material-name|inline material; display program; EXR stays scene-linear",
+          "x-help-path": "render.display",
+          "x-source": "Blender 5.2.1 AgX; display program: vork"
+        },
+        "duration": {
+          "default": 10.416666984558105,
+          "format": "float",
+          "type": "number",
+          "x-help": "number",
+          "x-help-path": "render.duration",
+          "x-source": "Blender 5.2.1 (frame range expressed in seconds)"
+        },
+        "fps": {
+          "default": 24.0,
+          "format": "float",
+          "type": "number",
+          "x-help": "number",
+          "x-help-path": "render.fps",
+          "x-source": "Blender 5.2.1 RenderSettings.fps"
+        },
+        "motion_blur": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MotionBlur"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-help": "MotionBlur|null; non-null enables; shutter in frames",
+          "x-help-path": "render.motion_blur",
+          "x-source": "Blender 5.2.1 render motion blur"
+        },
+        "resolution": {
+          "default": [
+            1920,
+            1080
+          ],
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "x-help": "uvec2",
+          "x-help-path": "render.resolution",
+          "x-source": "Blender 5.2.1 RenderSettings.resolution_x/resolution_y"
+        },
+        "root": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-help": "node-name|null; only this subtree draws and is lit; objects outside still cast shadows; null = whole scene",
+          "x-help-path": "render.root",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "type": "object"
+    },
+    "Rotation": {
+      "anyOf": [
+        {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "euler": {
+              "description": "Radians about X, then Y, then Z (fixed parent axes; Blender XYZ).",
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "euler"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "An authored rotation: a glTF quaternion or a tagged Euler triple."
+    },
+    "Settings": {
+      "additionalProperties": false,
+      "description": "User intent. Technique controls belong to the renderer.",
+      "properties": {
+        "denoise": {
+          "default": false,
+          "description": "Enable optional scene-linear OIDN. Off retains profile-owned reconstruction.",
+          "type": "boolean",
+          "x-help": "bool; optional OIDN on/off; off retains profile reconstruction",
+          "x-help-path": "settings.denoise",
+          "x-source": "vork"
+        },
+        "samples": {
+          "description": "Override the profile sample budget; more samples means cleaner and slower.",
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer",
+          "x-help": "u32; 1..4096; more samples means cleaner and slower",
+          "x-help-path": "settings.samples",
+          "x-source": "vork"
+        },
+        "seed": {
+          "default": 0,
+          "description": "Deterministic sampling seed, independent of the selected technique.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32; deterministic sampling seed",
+          "x-help-path": "settings.seed",
+          "x-source": "vork"
+        }
+      },
+      "type": "object"
+    },
+    "Simulation": {
+      "additionalProperties": false,
+      "description": "A deterministic fixed-clock schedule over ordinary typed named buffers.",
+      "properties": {
+        "dt": {
+          "description": "Positive fixed tick duration, in seconds; independent of render FPS.",
+          "format": "double",
+          "type": "number",
+          "x-help": "positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints",
+          "x-help-path": "simulation.dt",
+          "x-source": "vork simulation contract"
+        },
+        "init": {
+          "description": "Ordered compute program names establishing S0.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-help": "program-name[]; ordered initialization passes; schedule simulation",
+          "x-help-path": "simulation.init",
+          "x-source": "vork simulation contract"
+        },
+        "seed": {
+          "description": "Simulation randomness is independent of image sampling randomness.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32; independent of image sampling seed",
+          "x-help-path": "simulation.seed",
+          "x-source": "vork simulation contract"
+        },
+        "state": {
+          "description": "Complete persistent state and scratch buffers used by these passes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-help": "buffer-name[]; complete typed persistent and scratch state; exclusive schedule ownership",
+          "x-help-path": "simulation.state",
+          "x-source": "vork simulation contract"
+        },
+        "steps": {
+          "description": "Ordered compute program names advancing Sn to Sn+1.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-help": "program-name[]; ordered tick passes with storage barriers; schedule simulation",
+          "x-help-path": "simulation.steps",
+          "x-source": "vork simulation contract"
+        },
+        "t0": {
+          "description": "Time of the initialized state S0, in seconds.",
+          "format": "double",
+          "type": "number",
+          "x-help": "seconds; initialized state S0; requests before t0 hold S0",
+          "x-help-path": "simulation.t0",
+          "x-source": "vork simulation contract"
+        }
+      },
+      "required": [
+        "t0",
+        "dt",
+        "seed",
+        "state",
+        "init",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "Skin": {
+      "additionalProperties": false,
+      "properties": {
+        "inverse_bind_matrices": {
+          "$ref": "#/$defs/NameOr3",
+          "x-help": "mat4-buffer-name|inline buffer",
+          "x-help-path": "node.mesh.skin.inverse_bind_matrices",
+          "x-source": "vork (explicit contract/technique choice)"
+        },
+        "joints": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-help": "node-name[]",
+          "x-help-path": "node.mesh.skin.joints",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "joints",
+        "inverse_bind_matrices"
+      ],
+      "type": "object"
+    },
+    "SubdivisionSurface": {
+      "additionalProperties": false,
+      "properties": {
+        "render_levels": {
+          "default": 2,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer",
+          "x-help": "u32; refinement iterations; allocation checked against device limits",
+          "x-help-path": "geometry.subdivision.render_levels",
+          "x-source": "Blender 5.2.1 (offline render subset)"
+        },
+        "subdivision_type": {
+          "$ref": "#/$defs/SubdivisionType",
+          "default": "catmull_clark",
+          "x-help": "catmull_clark|simple",
+          "x-help-path": "geometry.subdivision.subdivision_type",
+          "x-source": "Blender 5.2.1 (offline render subset)"
+        },
+        "use_limit_surface": {
+          "default": true,
+          "type": "boolean",
+          "x-help": "bool",
+          "x-help-path": "geometry.subdivision.use_limit_surface",
+          "x-source": "Blender 5.2.1 (offline render subset)"
+        }
+      },
+      "type": "object"
+    },
+    "SubdivisionType": {
+      "enum": [
+        "catmull_clark",
+        "simple"
+      ],
+      "type": "string"
+    },
+    "TextureBinding": {
+      "additionalProperties": false,
+      "description": "An image handle. Sampling and transformations belong to the receiving program.",
+      "properties": {
+        "image": {
+          "$ref": "#/$defs/NameOr4",
+          "x-help": "image-name|inline image; the program owns sampling and UV transforms",
+          "x-help-path": "material.texture.image",
+          "x-source": "vork"
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "type": "object"
+    },
+    "Topology": {
+      "oneOf": [
+        {
+          "enum": [
+            "triangles",
+            "points",
+            "curves"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "implicit",
+          "description": "Zero surface of one scalar dense grid; negative values are inside.",
+          "type": "string"
+        }
+      ]
+    },
+    "Track": {
+      "additionalProperties": false,
+      "description": "A keyed property.",
+      "properties": {
+        "interpolation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interpolation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-help": "STEP|LINEAR|CUBICSPLINE; omitted: STEP for strings/bools, else LINEAR",
+          "x-help-path": "animation.track.interpolation",
+          "x-source": "glTF 2.0 LINEAR"
+        },
+        "keys": {
+          "$ref": "#/$defs/Keys",
+          "x-help": "[[time, value], ...] | {times: buffer, values: buffer}; time increasing; CUBICSPLINE [time, value, in_tangent, out_tangent] (tangents per second) or [time, value] (zero tangents); rotation values as in node.rotation",
+          "x-help-path": "animation.track.keys",
+          "x-source": "vork; glTF 2.0 animation samplers"
+        },
+        "path": {
+          "description": "Segments naming the keyed property, e.g. [\"nodes\",\"Bone.001\",\"rotation\"].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-help": "string[]; [\"nodes\",node,property...] | [\"nodes\",asset,\"nodes\",imported-name|#index,property...] | [\"materials\",material,\"inputs\",input] | [\"animation\",layer,\"weight\"] | [\"render\",property...]",
+          "x-help-extra": "animation.track.path properties: node translation|rotation|scale|visible|visible_camera|visible_shadow|visible_diffuse|visible_glossy|visible_transmission|morph_weights,<morph>, camera/light numeric fields (camera optics are material inputs); imported nodes: translation|rotation|scale|morph_weights|visible\nanimation.track.path render properties: camera|background (RGB)|motion_blur,shutter",
+          "x-help-path": "animation.track.path",
+          "x-source": "vork (explicit contract/technique choice)"
+        }
+      },
+      "required": [
+        "path",
+        "keys"
+      ],
+      "title": "Track",
+      "type": "object"
+    },
+    "Wrap": {
+      "enum": [
+        "repeat",
+        "clamp_to_edge",
+        "mirrored_repeat"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "animation": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Layer"
+      },
+      "type": "array",
+      "x-help": "layer[]",
+      "x-help-path": "scene.animation",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "buffers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Buffer"
+      },
+      "default": {},
+      "type": "object",
+      "x-help": "{name:buffer}",
+      "x-help-path": "scene.buffers",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "geometry": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Geometry"
+      },
+      "default": {},
+      "type": "object",
+      "x-help": "{name:geometry}",
+      "x-help-path": "scene.geometry",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "images": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Image"
+      },
+      "default": {},
+      "type": "object",
+      "x-help": "{name:image}",
+      "x-help-path": "scene.images",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "materials": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Material"
+      },
+      "default": {},
+      "type": "object",
+      "x-help": "{name:material}",
+      "x-help-path": "scene.materials",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/Node"
+      },
+      "type": "array",
+      "x-help": "node[]",
+      "x-help-path": "scene.nodes",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "programs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Program"
+      },
+      "default": {},
+      "type": "object",
+      "x-help": "{name:program}",
+      "x-help-path": "scene.programs",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "propagation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Propagation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Authored straight segments inside a world-space box.",
+      "x-help": "{program,bounds}|null; authored straight ray segments inside world-space bounds",
+      "x-help-path": "scene.propagation",
+      "x-source": "vork authored propagation"
+    },
+    "render": {
+      "$ref": "#/$defs/Render",
+      "default": {
+        "aovs": [],
+        "background": "environment",
+        "camera": null,
+        "compositor": [],
+        "display": {
+          "double_sided": true,
+          "inputs": {},
+          "opacity": null,
+          "program": "std/agx"
+        },
+        "duration": 10.416666984558105,
+        "fps": 24.0,
+        "motion_blur": null,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "root": null
+      },
+      "x-help": "render",
+      "x-help-path": "scene.render",
+      "x-source": "vork (explicit contract/technique choice)"
+    },
+    "simulation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Simulation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Fixed-clock retained compute state, independent of output FPS.",
+      "x-help": "simulation|null; fixed-clock ordered retained compute",
+      "x-help-path": "scene.simulation",
+      "x-source": "vork simulation contract"
+    },
+    "version": {
+      "const": 2,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer",
+      "x-help": "2",
+      "x-help-path": "scene.version",
+      "x-source": "vork (explicit contract/technique choice)"
+    }
+  },
+  "required": [
+    "version",
+    "nodes"
+  ],
+  "title": "Scene",
+  "type": "object",
+  "x-help-extra": "coordinates: glTF right-handed Y-up; cameras look along local -Z",
+  "x-standards": {
+    "animation": "glTF 2.0 interpolation",
+    "assets": "glTF 2.0",
+    "camera JSON": "OpenCV",
+    "cameras": "Blender physical camera (Blender 5.2.1)",
+    "colour": "AgX as Blender 5.2.1",
+    "geometry": "glTF 2.0 topology and attribute semantics",
+    "hair": "Blender 5.2.1 Principled Hair; Chiang scattering in raster and path",
+    "lights": "Blender 5.2.1 normalized lights",
+    "materials": "OpenPBR Surface 1.1.1",
+    "textures": "glTF 2.0 samplers; KHR_texture_transform lowered on import"
+  },
+  "x-vork-differences": [
+    "animation.clip.file: file-path|null; null = the target asset's clips; else a glTF file retargeted by node name",
+    "animation.clip.index: u32|null; XOR name",
+    "animation.clip.name: string|null; XOR index",
+    "animation.clip.target: asset-node-name",
+    "animation.layer.blend: replace|add; default replace",
+    "animation.layer.clip: clip|null; XOR tracks",
+    "animation.layer.loop: bool; default false",
+    "animation.layer.name: string|null",
+    "animation.layer.offset: number; source time = offset + time*speed; default 0",
+    "animation.layer.speed: number; default 1",
+    "animation.layer.tracks: track[]|null; XOR clip",
+    "animation.layer.weight: number; default 1",
+    "animation.track.interpolation: STEP|LINEAR|CUBICSPLINE; omitted: STEP for strings/bools, else LINEAR; default null",
+    "animation.track.keys: [[time, value], ...] | {times: buffer, values: buffer}; time increasing; CUBICSPLINE [time, value, in_tangent, out_tangent] (tangents per second) or [time, value] (zero tangents); rotation values as in node.rotation",
+    "animation.track.path: string[]; [\"nodes\",node,property...] | [\"nodes\",asset,\"nodes\",imported-name|#index,property...] | [\"materials\",material,\"inputs\",input] | [\"animation\",layer,\"weight\"] | [\"render\",property...]",
+    "buffer.count: u32|null; file only",
+    "buffer.data: number[]|number[][]; XOR file; mat4 column-major",
+    "buffer.dims: [u32,u32,u32]|null; positive dense typed array dimensions; non-file; x contiguous; field cell centres span local [-1,1]³",
+    "buffer.file: file-path; little-endian, or .vdb/.nvdb with grid; XOR data",
+    "buffer.grid: name|null; .vdb/.nvdb only; f32 or vec3 voxels",
+    "buffer.offset: u64; bytes, multiple of 4; default 0",
+    "buffer.type: f32|i32|u32|vec2|vec3|vec4|uvec4|mat4",
+    "node.focus_object (camera): node-name|null; camera-axis depth supplied to the program at sample time; default null",
+    "node.material (camera): material-name|inline material|null; omitted = std/camera; optics are program inputs; default null",
+    "compositor.resolution: [width,height] pixels or positive output scale; floor, minimum 1; null = output; last image resampled to output",
+    "geometry.attributes: {name: buffer-name|inline buffer}; POSITION required (glTF names and types; COLOR_n: linear vec3/vec4, alpha defaults to 1); implicit: exactly one f32 dense grid, zero threshold; custom f32/vec2/vec3/vec4 bind to material inputs",
+    "geometry.count: one-element u32 buffer|null; points only; overflow rejects the exposure",
+    "geometry.crease_edge: {vertices:[u32,u32],crease:number}[]; OpenSubdiv sharpness, 0 smooth, ≥10 sharp",
+    "geometry.crease_edge.crease: number; ≥0",
+    "geometry.crease_edge.vertices: [u32,u32]",
+    "geometry.curve_vertex_counts: u32 buffer; points per curve, ≥2; curves only",
+    "geometry.face_vertex_counts: u32[]|null; polygon corner counts; absent = triangles",
+    "geometry.ids: u32 buffer|null; points only; one unique identity per live point; matches previous poses across compact rows; births use current-pose motion placeholders",
+    "geometry.indices: u32-buffer-name|inline buffer|null",
+    "geometry.material_ranges: {start,count,material_index}[]; partition indices into node.materials slots; empty = one material; default []",
+    "geometry.material_ranges.count: u32; whole triangles",
+    "geometry.material_ranges.material_index: u32; node.materials slot",
+    "geometry.material_ranges.start: u32; first index",
+    "geometry.morphs: {name:{POSITION,NORMAL?}}; default {}",
+    "geometry.morphs.NORMAL: buffer-name|inline buffer|null",
+    "geometry.morphs.POSITION: vec3-buffer-name|inline buffer",
+    "geometry.subdivision: {subdivision_type?,render_levels?,use_limit_surface?}|null; Blender Subdivision Surface; one material range",
+    "geometry.subdivision.render_levels: u32; refinement iterations; allocation checked against device limits; default 2",
+    "geometry.subdivision.subdivision_type: catmull_clark|simple; default catmull_clark",
+    "geometry.subdivision.use_limit_surface: bool; default true",
+    "geometry.topology: triangles|points|curves|implicit; points render as spheres; default triangles",
+    "geometry.widths: f32 buffer; diameter per point; curves and points; required",
+    "image.color_space: sRGB|Linear Rec.709|Non-Color|null; null: hdr/exr/ies linear, others sRGB; default null",
+    "image.file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C",
+    "image.mag_filter: nearest|linear; default linear",
+    "image.min_filter: nearest|linear|nearest_mipmap_nearest|linear_mipmap_nearest|nearest_mipmap_linear|linear_mipmap_linear; default linear_mipmap_linear",
+    "image.render: ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA; default null",
+    "image.render.background: environment|transparent|RGB; default environment",
+    "image.render.camera: camera-node-name|null; null = the only authored camera, else first imported; default null",
+    "image.render.compositor: same image graph as render.compositor; names local to this capture; default []",
+    "image.render.resolution: uvec2; default [1920,1080]",
+    "image.render.root: node-name|null; only this subtree draws and is lit; objects outside still cast shadows; null = whole scene; default null",
+    "image.time: number|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends; default null",
+    "image.wrap_s: repeat|clamp_to_edge|mirrored_repeat; default repeat",
+    "image.wrap_t: repeat|clamp_to_edge|mirrored_repeat; default repeat",
+    "node.angle (light): number; sun; default 0.009180432",
+    "node.color (light): RGB",
+    "node.energy (light): number|null; sun W/m²; local W; environment multiplier",
+    "node.illuminates (light): light-link-tag[]|null; receivers with any tag; null=all; []=none",
+    "node.image (light): image-name|inline image|null; LM-63 Type C IES (path only); non-environment lights; emits -Z, no peak normalization",
+    "node.material (light): material-name|inline material|null; environment program",
+    "node.radius (light): number; point/spot emitter radius (shadow softness); default 0",
+    "node.shadowed_by (light): light-link-tag[]|null; casters with any tag; null=all; []=none",
+    "node.shape (light): sun|point|spot|rectangle|ellipse|environment",
+    "node.size (light): number; rectangle full side, ellipse diameter; default 1",
+    "node.size_y (light): number|null; second side/diameter; omitted = size (square/disk)",
+    "node.spot_blend (light): number; 0..1; default 0.15",
+    "node.spot_size (light): number; full cone angle; default 0.7853982",
+    "node.temperature (light): number|null; K; multiplies color; not environment",
+    "material.aov.aov: render.aovs name",
+    "material.attribute.attribute: string; geometry or instance attribute name; colour values are linear Rec.709 (no sRGB decoding)",
+    "material.attribute.channel: r|g|b|a|rgb; omitted: r scalar, rgb colour, exact for vectors",
+    "material.attribute.factor: number|vector; omitted = 1",
+    "material.channel.channel: color|depth|view_normal|object_index|motion|shadow_catcher; compositor programs",
+    "material.double_sided: bool; false culls back faces; default true",
+    "material.grid.grid: buffer-name|inline buffer; buffer with a grid",
+    "material.inputs: {name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}}; default {}",
+    "material.inputs (std/openpbr): OpenPBR Surface; shaded inputs: base_weight base_color base_metalness specular_weight specular_color specular_roughness specular_roughness_anisotropy specular_ior transmission_weight transmission_color transmission_depth subsurface_weight subsurface_color subsurface_radius subsurface_radius_scale subsurface_scatter_anisotropy coat_weight coat_color coat_roughness coat_ior coat_darkening fuzz_weight fuzz_color fuzz_roughness emission_luminance emission_color thin_film_weight thin_film_thickness thin_film_ior geometry_opacity geometry_thin_walled geometry_normal geometry_tangent geometry_coat_normal transmission_dispersion_scale transmission_dispersion_abbe_number alpha_cutoff",
+    "material.inputs.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1] per channel; units dimensionless; constant|texture; animatable; default -1",
+    "material.inputs.base_color: color3; Base reflection albedo (dielectric); F0 colour at normal incidence (metal); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
+    "material.inputs.base_metalness: number; Fraction of the microsurface that is metallic; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.base_weight: number; Scalar multiplier to `base_color`; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.coat_color: color3; Square of the coat's normal-incidence transmittance; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "material.inputs.coat_darkening: number; Modulates the physical coat darkening effect; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.coat_ior: number; Refractive index of the coat; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1.6",
+    "material.inputs.coat_roughness: number; Roughness of the coat NDF; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.coat_weight: number; Coverage weight of the coat slab; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.emission_color: color3; Emission colour multiplier (emitted = `emission_color` × `emission_luminance`); range [0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "material.inputs.emission_luminance: number; Emission luminance with `emission_color` = (1,1,1), before coat and fuzz; range [0,inf) per channel; units cd/m² (nits); constant|texture|attribute; animatable; default 0",
+    "material.inputs.fuzz_color: color3; Reflection albedo colour of the fuzz; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "material.inputs.fuzz_roughness: number; Reflection roughness of the fuzz; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0.5",
+    "material.inputs.fuzz_weight: number; Coverage weight of the fuzz slab; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.geometry_coat_normal: vector3; Shading normal of the coat; linear tangent-space RGB; factor scales XY; independent of base normal; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
+    "material.inputs.geometry_normal: vector3; Shading normal of the base; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
+    "material.inputs.geometry_opacity: number; Opacity (presence) of the surface; range [0,1] per channel; units dimensionless; constant|texture; animatable; default 1",
+    "material.inputs.geometry_tangent: vector3; Reference tangent for specular anisotropy; range N/A; units dimensionless; constant or texture; animatable; default unperturbed tangent",
+    "material.inputs.geometry_thin_walled: bool; Surface is a thin shell with no interior volume; range {false,true}; units dimensionless; constant only; not animatable; default false",
+    "material.inputs.specular_color: color3; Tints the dielectric Fresnel factor; metal colour at near-grazing incidence; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "material.inputs.specular_ior: number; Refractive index of the base dielectric; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1.5",
+    "material.inputs.specular_roughness: number; Roughness of the NDF of the dielectric BSDF and conductor BRDF; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0.3",
+    "material.inputs.specular_roughness_anisotropy: number; Anisotropy of that NDF (stretch along `geometry_tangent`); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.specular_weight: number; Modulates the dielectric reflectivity at normal incidence (via IOR); overall multiplier of the metallic Fresnel; range [0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.subsurface_color: color3; Observed reflection colour of the subsurface medium; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
+    "material.inputs.subsurface_radius: number; Length scale of the mean free path; range [0,inf) per channel; units metres; constant|texture|attribute; animatable; default 1",
+    "material.inputs.subsurface_radius_scale: color3; RGB multiplier to `subsurface_radius` (per-channel MFP); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1.0, 0.5, 0.25)",
+    "material.inputs.subsurface_scatter_anisotropy: number; Henyey-Greenstein anisotropy of the subsurface medium; range [-1,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.subsurface_weight: number; Mix weight between subsurface and diffuse slabs; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.thin_film_ior: number; Refractive index of the film; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1.4",
+    "material.inputs.thin_film_thickness: number; Thickness of the film in micrometres; range [0,inf) per channel; units µm; constant|texture|attribute; animatable; default 0.5",
+    "material.inputs.thin_film_weight: number; Coverage weight of the thin film; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.transmission_color: color3; Transmission colour; sets the extinction of the interior medium; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "material.inputs.transmission_depth: number; Depth at which `transmission_color` is realised; 0 = constant on-surface tint; range [0,inf) per channel; units metres; constant|texture|attribute; animatable; default 0",
+    "material.inputs.transmission_dispersion_abbe_number: number; Physical Abbe number of the base dielectric medium; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 20",
+    "material.inputs.transmission_dispersion_scale: number; Linearly scales the amount of dispersion; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.transmission_weight: number; Mix weight between translucent base and opaque base slabs; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.node.node: earlier compositor entry name; clamped bilinear image sampling",
+    "material.opacity: coverage|transmittance|null; null = coverage, transmittance for transmitting surfaces; coverage = occupied area fraction; transmittance = continuous attenuation by 1 - geometry_opacity; renderer chooses integration; default null",
+    "material.program: program-name|inline program|<library>/<module>; std/openpbr, std/hair (curves only), or custom; default std/openpbr",
+    "material.texture.image: image-name|inline image; the program owns sampling and UV transforms",
+    "node.file (asset): file-path",
+    "node.materials (asset): {imported-name|#index|*: material-name|inline material}; #index = glTF material index; specific beats *; default {}",
+    "node.nodes (asset): {imported-name|#index: overrides}; #index = glTF node index; default {}",
+    "node.nodes.<name>.light_link_tags (asset): string[]|null; replaces inherited tags",
+    "node.nodes.<name>.pass_index (asset): u32|null; 1..65535; object ID",
+    "node.children: node[]; default []",
+    "node.is_holdout: bool; RGB 0; alpha 0 on transparent background, 1 on opaque background; default false",
+    "node.is_shadow_catcher: bool; shadow_catcher channel is material light with CG / without CG, unclamped; zero baseline gives neutral 1; CG light on an otherwise unlit catcher cannot be represented; default false",
+    "node.light_link_tags: string[]; matched by light illuminates/shadowed_by; inherited; default []",
+    "node.geometry (mesh): geometry-name|inline geometry",
+    "node.instances (mesh): instances|null",
+    "node.instances.attributes (mesh): equal-length buffers: TRANSLATION vec3, ROTATION vec4 (xyzw), SCALE vec3 (omitted = identity; any zero world-scale component hides the instance), time_offset f32, pass_index u32, custom columns bind to material inputs",
+    "node.instances.count (mesh): one-element u32 compute buffer; zero to attribute capacity; overflow rejects the exposure",
+    "node.materials (mesh): (material-name|inline material)[]; empty = default std/openpbr with roughness 0.5; default []",
+    "node.morph_weights (mesh): {name:number}; default {}",
+    "node.skin (mesh): skin|null",
+    "node.skin.inverse_bind_matrices (mesh): mat4-buffer-name|inline buffer",
+    "node.skin.joints (mesh): node-name[]",
+    "node.name: string; globally unique, including imported nodes; default \"\"",
+    "node.pass_index: u32|null; 1..65535; object ID",
+    "node.rotation: [x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ); default [0,0,0,1]",
+    "node.scale: [x,y,z]; any zero world-scale component hides geometry, including children; default [1,1,1]",
+    "node.target: node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+    "node.translation: [x,y,z]; parent frame; default [0,0,0]",
+    "node.visible: bool; false hides the subtree and disables its lights; animatable (step); default true",
+    "node.visible_camera: bool; default true",
+    "node.visible_diffuse: bool; default true",
+    "node.visible_glossy: bool; default true",
+    "node.visible_shadow: bool; lights must stay true (a light without shadows: shadowed_by []); default true",
+    "node.visible_transmission: bool; object visibility to transmission rays; lights must stay true; default true",
+    "profile.description: string; default \"\"",
+    "profile.level: u8; 0..3; quality/cost level; 3 is previs",
+    "profile.settings: Settings; seed, samples and denoise only; default {}",
+    "profile.version: u32",
+    "program.bindings: <binding>_load(i), _store(i,v), _count; dense grids also expose _dims; u32 _atomic_min(i,v) returns prior value (OOB: UINT_MAX); mat4 = VorkMat4 {c0..c3 columns}; out-of-range loads 0, stores ignored; default {}",
+    "program.dispatch: item count or [x,y,z] threads; install/init dt=0; frame schedule frame 0 dt=0; simulation ticks use fixed dt",
+    "program.file: file-path; XOR source; Slang module, import vork",
+    "program.schedule: install|frame|simulation; frame uses output FPS; simulation uses scene.simulation pass order; each material instance dispatches with its inputs",
+    "program.source: Slang source; XOR file; import vork",
+    "program.source_origin: virtual filename|null; inline source only; resolves local imports",
+    "render.aovs: [{name,type:value|color}]; output with --channels all or aov:<name>; default []",
+    "render.aovs.name: name; EXR channels <name>.X or <name>.R/G/B",
+    "render.aovs.type: value|color",
+    "render.background: environment|transparent|RGB; RGB and transparent apply to camera escapes and opacity passthrough; path glass transmission sees the World; default environment",
+    "render.camera: camera-node-name|null; null = the only authored camera, else first imported; a camera cut track may select; default null",
+    "render.compositor: (material-name|{material,name?,resolution?})[]; ordered image graph, last output; material may be inline; default []",
+    "render.display: material-name|inline material; display program; EXR stays scene-linear; default {\"program\":\"std/agx\"}",
+    "render.duration: number; default 10.416667",
+    "render.fps: number; default 24",
+    "render.motion_blur: MotionBlur|null; non-null enables; shutter in frames; default null",
+    "render.motion_blur.position: start|center|end; default center",
+    "render.motion_blur.shutter: number; frames; default 0.5",
+    "render.resolution: uvec2; default [1920,1080]",
+    "render.root: node-name|null; only this subtree draws and is lit; objects outside still cast shadows; null = whole scene; default null",
+    "scene.animation: layer[]; default []",
+    "scene.buffers: {name:buffer}; default {}",
+    "scene.geometry: {name:geometry}; default {}",
+    "scene.images: {name:image}; default {}",
+    "scene.materials: {name:material}; default {}",
+    "scene.nodes: node[]",
+    "scene.programs: {name:program}; default {}",
+    "scene.propagation: {program,bounds}|null; authored straight ray segments inside world-space bounds",
+    "scene.render: render; default {}",
+    "scene.simulation: simulation|null; fixed-clock ordered retained compute",
+    "scene.version: 2",
+    "settings.denoise: bool; optional OIDN on/off; off retains profile reconstruction; default false",
+    "settings.samples: u32; 1..4096; more samples means cleaner and slower",
+    "settings.seed: u32; deterministic sampling seed; default 0",
+    "simulation.dt: positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints",
+    "simulation.init: program-name[]; ordered initialization passes; schedule simulation",
+    "simulation.seed: u32; independent of image sampling seed",
+    "simulation.state: buffer-name[]; complete typed persistent and scratch state; exclusive schedule ownership",
+    "simulation.steps: program-name[]; ordered tick passes with storage barriers; schedule simulation",
+    "simulation.t0: seconds; initialized state S0; requests before t0 hold S0",
+    "animation.track.path properties: node translation|rotation|scale|visible|visible_camera|visible_shadow|visible_diffuse|visible_glossy|visible_transmission|morph_weights,<morph>, camera/light numeric fields (camera optics are material inputs); imported nodes: translation|rotation|scale|morph_weights|visible",
+    "animation.track.path render properties: camera|background (RGB)|motion_blur,shutter",
+    "coordinates: glTF right-handed Y-up; cameras look along local -Z",
+    "image.render restrictions: first shared pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported",
+    "lights: with no environment light the world is RGB [0.05,0.05,0.05]",
+    "material (glTF import): mapped to OpenPBR; coat_ior 1.5; occlusion affects indirect only",
+    "material.attribute: binds geometry or instance columns to numeric inputs; custom programs read_attribute(handle,ctx) gives value, dx, dy",
+    "material.inputs (transmission): transmission_depth 0 = sqrt(tint) per solid interface; thin sheets = full tint; positive-depth solids = Beer absorption",
+    "material.inputs (animation): numeric scalar/vector/colour inputs on surface/environment/compute/compositor/display programs use ordinary tracks; geometry_thin_walled is structural; an omitted animated program input has a zero blend baseline (author inputs for another baseline)",
+    "material.inputs.subsurface: thick: radius × radius_scale; thin: diffuse reflection/transmission split by scatter_anisotropy",
+    "node.nodes.<name>.visible (asset): bool; default true",
+    "node.nodes.<name>.visible_camera (asset): bool; default true",
+    "node.nodes.<name>.visible_shadow (asset): bool; default true",
+    "node.nodes.<name>.visible_diffuse (asset): bool; default true",
+    "node.nodes.<name>.visible_glossy (asset): bool; default true",
+    "node.nodes.<name>.visible_transmission (asset): bool; default true",
+    "node.type: node|mesh|asset|camera|light; default \"node\"",
+    "asset (glTF cameras): addressed as <asset>/<node-name|#index>",
+    "program enum inputs: lowercased Slang case-name tokens (e.g. fog_glow)",
+    "program.surface emission: authoritative radiance for hits and light samples; lit output is authored shading",
+    "program.surface: Closure|Blend|Hair surface(ShadingContext,Inputs); Hair needs curves",
+    "names: string; tables/layers nonempty; named entries unique; excludes '/'",
+    "paths: scene-relative",
+    "structure: install-time; non-keyable",
+    "normal maps: tangent-space; +Y",
+    "colour: linear Rec.709",
+    "node [type=\"node\"]: {\"type\":\"node\", …}; flat sibling fields: none; no variant wrapper",
+    "node [type=\"mesh\"]: {\"type\":\"mesh\", …}; flat sibling fields: geometry, instances, materials, morph_weights, skin; no variant wrapper",
+    "node [type=\"asset\"]: {\"type\":\"asset\", …}; flat sibling fields: file, materials, nodes; no variant wrapper",
+    "node [type=\"camera\"]: {\"type\":\"camera\", …}; flat sibling fields: focus_object, material; no variant wrapper",
+    "node [type=\"light\"]: {\"type\":\"light\", …}; flat sibling fields: angle, color, energy, illuminates, image, material, radius, shadowed_by, shape, size, size_y, spot_blend, spot_size, temperature; no variant wrapper"
+  ]
+}

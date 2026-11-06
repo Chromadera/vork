@@ -1,0 +1,131 @@
+{
+  "animation": [],
+  "materials": {
+    "benchmark-camera": {
+      "inputs": {
+        "clip_end": 10000,
+        "clip_start": 0.01,
+        "lens": 45
+      },
+      "program": "std/camera"
+    }
+  },
+  "nodes": [
+    {
+      "file": "assets/B-interior.glb",
+      "name": "asset",
+      "type": "asset"
+    },
+    {
+      "material": "benchmark-camera",
+      "name": "camera",
+      "target": [
+        0,
+        1,
+        0
+      ],
+      "translation": [
+        7,
+        5,
+        9
+      ],
+      "type": "camera"
+    },
+    {
+      "color": [
+        1,
+        0.8,
+        0.6
+      ],
+      "energy": 500,
+      "name": "practical-0",
+      "shape": "rectangle",
+      "size": 2,
+      "size_y": 2,
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "translation": [
+        -4.5,
+        4,
+        -3
+      ],
+      "type": "light"
+    },
+    {
+      "color": [
+        1,
+        0.8,
+        0.6
+      ],
+      "energy": 500,
+      "name": "practical-1",
+      "shape": "rectangle",
+      "size": 2,
+      "size_y": 2,
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "translation": [
+        -1.5,
+        4,
+        -3
+      ],
+      "type": "light"
+    },
+    {
+      "color": [
+        1,
+        0.8,
+        0.6
+      ],
+      "energy": 500,
+      "name": "practical-2",
+      "shape": "rectangle",
+      "size": 2,
+      "size_y": 2,
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "translation": [
+        1.5,
+        4,
+        -3
+      ],
+      "type": "light"
+    },
+    {
+      "color": [
+        0.05,
+        0.05,
+        0.05
+      ],
+      "energy": 1,
+      "name": "world",
+      "shape": "environment",
+      "type": "light"
+    }
+  ],
+  "render": {
+    "camera": "camera",
+    "display": {
+      "inputs": {
+        "dither_intensity": 0
+      },
+      "program": "std/agx"
+    },
+    "duration": 10.0,
+    "fps": 24,
+    "resolution": [
+      1920,
+      1080
+    ]
+  },
+  "version": 2
+}

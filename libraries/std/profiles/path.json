@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "level": 2,
+  "settings": {
+    "seed": 0,
+    "denoise": true
+  },
+  "description": "Reference path quality/cost level."
+}

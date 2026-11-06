@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "level": 0,
+  "settings": {
+    "seed": 0,
+    "denoise": true
+  },
+  "description": "Draft quality/cost level with scene-ray lighting and OIDN denoising."
+}

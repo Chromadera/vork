@@ -1,0 +1,17 @@
+{
+  "version": "2026.20",
+  "archives": {
+    "Linux-x86_64": {
+      "name": "linux-x86_64",
+      "sha256": "e863e568c204810d6e8bc31852f056aef6763c55ea9925db2db7affa060347c9"
+    },
+    "Darwin-arm64": {
+      "name": "macos-aarch64",
+      "sha256": "07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4"
+    },
+    "Windows-AMD64": {
+      "name": "windows-x86_64",
+      "sha256": "7b9bb838b105de0bb86390196ac5bcb02efc610c0542517204105cf87ec98399"
+    }
+  }
+}

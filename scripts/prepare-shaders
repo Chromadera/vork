@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Compile portable release shaders without a GPU; never export a driver cache."""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+from shader_bundle import export
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--binary', type=Path, required=True)
+p.add_argument('--output', type=Path, required=True)
+p.add_argument('--cache', type=Path, help='Reuse an existing setup cache; defaults to an empty temporary store')
+a = p.parse_args()
+binary = a.binary.resolve()
+if a.output.exists():
+    p.error('output already exists')
+with tempfile.TemporaryDirectory(prefix='vork-release-shaders-') as temporary:
+    cache = a.cache.resolve() if a.cache else Path(temporary)
+    subprocess.run([str(binary), 'prepare-release-shaders'], env=dict(os.environ, VORK_CACHE_DIR=str(cache)), check=True)
+    # A previously packaged binary can read its immutable assets instead of
+    # writing duplicates into the mutable store. Retain those entries too.
+    export(binary, [binary.parent / 'shaders', cache], a.output)

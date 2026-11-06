@@ -1,0 +1,150 @@
+{
+ "parameters": [
+  {
+   "name": "vork_inputs",
+   "binding": {
+    "kind": "descriptorTableSlot",
+    "index": 0
+   },
+   "type": {
+    "kind": "constantBuffer",
+    "elementType": {
+     "kind": "struct",
+     "name": "Inputs",
+     "fields": [
+      {
+       "name": "gain",
+       "type": {
+        "kind": "scalar",
+        "scalarType": "float32",
+        "sizes": [
+         {
+          "kind": "uniform",
+          "value": 4,
+          "alignment": 4
+         }
+        ]
+       },
+       "binding": {
+        "kind": "uniform",
+        "offset": 0,
+        "size": 4,
+        "elementStride": 0
+       }
+      },
+      {
+       "name": "basis",
+       "type": {
+        "kind": "matrix",
+        "rowCount": 4,
+        "columnCount": 4,
+        "elementType": {
+         "kind": "scalar",
+         "scalarType": "float32"
+        },
+        "sizes": [
+         {
+          "kind": "uniform",
+          "value": 64,
+          "alignment": 16
+         }
+        ]
+       },
+       "binding": {
+        "kind": "uniform",
+        "offset": 16,
+        "size": 64,
+        "elementStride": 0
+       }
+      }
+     ],
+     "sizes": [
+      {
+       "kind": "uniform",
+       "value": 80,
+       "alignment": 16
+      }
+     ]
+    },
+    "containerVarLayout": {
+     "binding": {
+      "kind": "descriptorTableSlot",
+      "index": 0
+     }
+    },
+    "elementVarLayout": {
+     "type": {
+      "kind": "struct",
+      "name": "Inputs",
+      "fields": [
+       {
+        "name": "gain",
+        "type": {
+         "kind": "scalar",
+         "scalarType": "float32",
+         "sizes": [
+          {
+           "kind": "uniform",
+           "value": 4,
+           "alignment": 4
+          }
+         ]
+        },
+        "binding": {
+         "kind": "uniform",
+         "offset": 0,
+         "size": 4,
+         "elementStride": 0
+        }
+       },
+       {
+        "name": "basis",
+        "type": {
+         "kind": "matrix",
+         "rowCount": 4,
+         "columnCount": 4,
+         "elementType": {
+          "kind": "scalar",
+          "scalarType": "float32"
+         },
+         "sizes": [
+          {
+           "kind": "uniform",
+           "value": 64,
+           "alignment": 16
+          }
+         ]
+        },
+        "binding": {
+         "kind": "uniform",
+         "offset": 16,
+         "size": 64,
+         "elementStride": 0
+        }
+       }
+      ],
+      "sizes": [
+       {
+        "kind": "uniform",
+        "value": 80,
+        "alignment": 16
+       }
+      ]
+     },
+     "binding": {
+      "kind": "uniform",
+      "offset": 0,
+      "size": 80,
+      "elementStride": 0
+     }
+    },
+    "sizes": [
+     {
+      "kind": "descriptorTableSlot",
+      "value": 1
+     }
+    ]
+   }
+  }
+ ]
+}

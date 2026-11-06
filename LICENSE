@@ -1,0 +1,60 @@
+# vork Preview License
+
+Copyright © 2026 Nullframe, Inc. All rights reserved except as granted below.
+
+vork is source-available. It is free to use during the research preview, including for commercial work. It is not open source.
+
+"vork" means the software and source code this license comes with, in this version. "You" means the person or organization using vork, including any AI agents acting for you.
+
+## What you may do
+
+You may, free of charge:
+
+- use vork for any purpose, including commercial work and use inside a company of any size;
+- use your AI agents to operate vork for you;
+- modify vork for your own use;
+- share unmodified copies of vork with this license and all notices intact.
+
+If your use of vork would otherwise infringe a patent we own or control, we license that patent to you for the use this license allows. This patent license ends if you bring a patent claim alleging that vork infringes a patent.
+
+## What you make is yours
+
+We claim no rights in the scenes, code or media you create with vork. Any assets you use keep their own terms.
+
+## What you may not do
+
+Without our prior written permission, you may not:
+
+- sell, rent, license, relicense or sublicense vork or a modified version of it, or distribute a modified version;
+- offer vork or a modified version as a hosted or managed service in which other people submit scenes, code or jobs to be rendered;
+- remove or change this license or any copyright notices.
+
+Rendering for your own organization, and delivering the finished media to a client, is allowed and isn't a hosted service.
+
+## This version only
+
+This license covers this version of vork only. Later versions may come under different terms, including paid terms. A change in later versions doesn't take away your rights under this license to the version you already have.
+
+## Contributions
+
+If you send us a contribution, you confirm you have the right to do so, and you grant us a perpetual, irrevocable, worldwide, royalty-free right to use, modify, distribute and license it under any terms, including commercial terms. We don't have to accept contributions.
+
+## Third-party components
+
+vork includes third-party components under their own licenses, listed in the NOTICE file. Those licenses apply to those components. The Blender bridge in `integrations/blender` is a separate component under GPL-3.0-or-later, and this license does not cover it.
+
+## Ending this license
+
+If you break these terms, your rights under this license end automatically. They come back if you fix the breach within 30 days of learning about it, unless you've already broken these terms before.
+
+## No warranty
+
+VORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+
+## No liability
+
+TO THE MAXIMUM EXTENT THE LAW ALLOWS, THE COPYRIGHT HOLDERS AND CONTRIBUTORS ARE NOT LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE, ARISING FROM OR CONNECTED WITH VORK OR ITS USE.
+
+## Questions and permissions
+
+Contact support@voyager.so for permissions, including hosted services and other uses this license doesn't cover.

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["vendor/wgpu", "vendor/wgpu-core", "vendor/wgpu-hal", "vendor/wgpu-types", "vendor/basisu_c_sys", "vendor/exr"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-vork-Preview"
+publish = false
+
+[profile.release]
+debug = "line-tables-only"
+
+# Keep renderer development usable without paying release optimization on edits.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[patch.crates-io]
+# Preserve invariant positions in Metal passthrough shaders; see vendor/wgpu-hal/PROVENANCE.md.
+wgpu-hal = { path = "vendor/wgpu-hal" }
+# Report a lost device from Device::poll as an error instead of panicking; see vendor/wgpu/PROVENANCE.md.
+wgpu = { path = "vendor/wgpu" }
+# Preserve CPU validation chunks across native submission boundaries.
+wgpu-core = { path = "vendor/wgpu-core" }
+wgpu-types = { path = "vendor/wgpu-types" }
+
+# Bound DWA chunk section sizes before allocating; see vendor/exr/PROVENANCE.md.
+exr = { path = "vendor/exr" }
+
+# Skip discarded Basis statistics and transcode hints for ASTC preparation.
+basisu_c_sys = { path = "vendor/basisu_c_sys" }

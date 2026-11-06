@@ -1,0 +1,36 @@
+{
+  "status": "Final draft4/final8 results recorded; preview/path carried forward; Blender baselines retained",
+  "claims": [
+    {
+      "claim": "Default final seven 240-frame clips: EEVEE/vork 1.14\u20132.32x",
+      "qualification": "Measured final8 + OIDN on 81ae2b075; retained measured EEVEE with different settings/timing boundaries. Not equal quality.",
+      "results": "RESULTS.md"
+    },
+    {
+      "claim": "Bird skim/dive/reveal: 96.942/124.718/153.411 seconds",
+      "inputs": [
+        "birds/skim.json.in",
+        "birds/dive.json.in",
+        "birds/reveal.json.in"
+      ],
+      "qualification": "Measured draft4 + OIDN, excludes separate setup and still warmup. EEVEE comparisons are eight-frame projections excluding simulation/startup/encoding.",
+      "results": "RESULTS.md"
+    },
+    {
+      "claim": "Preview EEVEE/vork 14.63\u201336.40x; Workbench/vork 3.99\u201311.24x",
+      "qualification": "Carried-forward prior-freeze preview measurements and retained Blender baselines; different quality and timing boundaries. Not default-final speed.",
+      "results": "RESULTS.md"
+    },
+    {
+      "claim": "Named historical path cases are slower than Cycles",
+      "inputs": [
+        "B-blocking.json",
+        "B-car-pan.json",
+        "B-night.json"
+      ],
+      "qualification": "Carried forward, not remeasured on final4. All slower cases retained.",
+      "results": "RESULTS.md"
+    }
+  ],
+  "results": "RESULTS.md"
+}

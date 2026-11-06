@@ -1,0 +1,6 @@
+target/
+*.mp4
+/out/
+__pycache__/
+.DS_Store
+

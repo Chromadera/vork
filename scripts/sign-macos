@@ -1,0 +1,58 @@
+#!/bin/bash
+# Sign the executable and complete bundled tool distributions before packaging.
+set -euo pipefail
+missing=0
+for name in APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_TEAM_ID APPLE_ID APPLE_APP_SPECIFIC_PASSWORD; do
+  if [ -z "${!name:-}" ]; then
+    echo "::warning::macOS signing and notarisation skipped: $name is absent. Artifact is unsigned."
+    missing=1
+  fi
+done
+if [ "$missing" = 1 ]; then exit 0; fi
+work=$(mktemp -d)
+keychain="$work/signing.keychain-db"
+password=$(openssl rand -hex 32)
+original_keychains=()
+while IFS= read -r existing; do
+  original_keychains+=("$existing")
+done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')
+cleanup() {
+  security list-keychains -d user -s "${original_keychains[@]}" || true
+  security delete-keychain "$keychain" || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+printf '%s' "$APPLE_DEVELOPER_ID_P12_BASE64" | base64 --decode > "$work/cert.p12"
+security create-keychain -p "$password" "$keychain"
+security set-keychain-settings -lut 21600 "$keychain"
+security unlock-keychain -p "$password" "$keychain"
+# codesign must find the private key through the search list as well as the
+# certificate in --keychain; an imported identity alone is insufficient.
+security list-keychains -d user -s "$keychain" "${original_keychains[@]}"
+security import "$work/cert.p12" -k "$keychain" -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)
+if [[ -z "$identity" || "$identity" != *"($APPLE_TEAM_ID)" ]]; then
+  echo "Developer ID Application identity for APPLE_TEAM_ID not found" >&2
+  exit 1
+fi
+# vork deliberately loads user-selected native runtimes via VORK_OIDN.
+cat > "$work/vork.entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>
+PLIST
+while IFS= read -r -d '' binary; do
+  if file -b "$binary" | grep -q 'Mach-O'; then
+    options=(--options runtime)
+    if [ "$binary" = "$1" ]; then
+      options+=(--entitlements "$work/vork.entitlements")
+    fi
+    echo "Signing $binary"
+    codesign --force --timestamp "${options[@]}" --keychain "$keychain" --sign "$identity" "$binary"
+    codesign --verify --strict "$binary"
+  fi
+done < <(find "$@" -type f -print0)
+echo "VORK_MACOS_SIGNED=true" >> "$GITHUB_ENV"

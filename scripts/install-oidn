@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Install the complete pinned Apache-2.0 OIDN runtime, including CPU/GPU backends and notices."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import platform
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+pin = json.loads((ROOT / 'dist/oidn.json').read_text())
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('destination', type=Path)
+p.add_argument('--platform', choices=list(pin['archives']))
+a = p.parse_args()
+key = a.platform or {('Darwin','arm64'): 'darwin-arm64', ('Linux','x86_64'): 'linux-x64', ('Windows','AMD64'): 'windows-x64'}.get((platform.system(), platform.machine()))
+if key not in pin['archives']:
+    p.error('unsupported host; specify --platform')
+if a.destination.exists():
+    p.error('destination already exists')
+archive_pin = pin['archives'][key]
+a.destination.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(dir=a.destination.parent) as temporary:
+    directory = Path(temporary)
+    archive = directory / archive_pin['name']
+    urllib.request.urlretrieve(f"https://github.com/RenderKit/oidn/releases/download/v{pin['version']}/{archive.name}", archive)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != archive_pin['sha256']:
+        raise SystemExit('OIDN archive SHA256 mismatch')
+    extracted = directory / 'extracted'
+    extracted.mkdir()
+    if archive.suffix == '.zip':
+        with zipfile.ZipFile(archive) as source:
+            for entry in source.infolist():
+                target = (extracted / entry.filename).resolve()
+                if not target.is_relative_to(extracted.resolve()):
+                    raise SystemExit('unsafe OIDN archive path')
+            source.extractall(extracted)
+    else:
+        if not hasattr(tarfile, 'data_filter'):
+            p.error('Python with tarfile extraction filters required')
+        with tarfile.open(archive) as source:
+            source.extractall(extracted, filter='data')
+    root, = extracted.iterdir()
+    (root / 'vork-oidn.json').write_text(json.dumps({'version': pin['version'], 'platform': key, 'sha256': archive_pin['sha256']})+'\n')
+    shutil.move(str(root), a.destination)
+print(a.destination)

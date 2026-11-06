@@ -1,0 +1,217 @@
+{
+  "files": [
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 17626,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar.gltf",
+      "sha256": "8e7341dfb0429663d0e93455757ea151cfd4fc5e4a7bc9e55d577bb5b498beb5",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar.gltf"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 3664368,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar.bin",
+      "sha256": "2f264fe41cedb20914817b891a9f02438f2e5049e17f0983b13245f93aeb9ceb",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar.bin"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 98429,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar_normal.png",
+      "sha256": "f3af8fd862a8a1ed13b6cf508d4edc3df6a484c43ed32bc5927a03b452515833",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar_normal.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 83739,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar_emissive.png",
+      "sha256": "f35fdda6764b6b6521296326143a654f6cae13c082fd6021e766677c422cf7e6",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar_emissive.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 196648,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar_basecolor.png",
+      "sha256": "7d51b5df33344f00dbc248f9a6043a7eaa6864b9f7ece1fb90f884a425423ed7",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar_basecolor.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 457137,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar_occlusion_roughness_metallic.png",
+      "sha256": "22911f36dc5e9a3b2acc6dfb8f7946f4c963b5296ab10e8dc6cce260140ce8a3",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar_occlusion_roughness_metallic.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 294759,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/Fabric_normal.png",
+      "sha256": "24aee901f99facf761329b374b46a83d83060fecac88aa290e2cb92c2f6b90c2",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/Fabric_normal.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 191518,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/Fabric_occlusion.png",
+      "sha256": "b9e421842b576be7cf98a8fb8103ebf371b1d3d13eb226379ec4b5d8b8db3fcd",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/Fabric_occlusion.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 412812,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/Fabric_baseColor.png",
+      "sha256": "2d37e6edee4d5249c7076847cd47a732596c0385ce596d8a8d92746b4b902ef7",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/Fabric_baseColor.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 15362,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/ToyCar_clearcoat.png",
+      "sha256": "0dee4964f011c50bb1942cdc4f373f7e85277a3bbd75ae9f45261b763618f0ec",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/glTF/ToyCar_clearcoat.png"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 2073,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/README.md",
+      "sha256": "aed216cda25deab59a115bdd6f486da0437fe4e1d9df11c34e496242dbf89fe2",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/README.md"
+    },
+    {
+      "attribution": "Guido Odendahl; Eric Chadwick",
+      "bytes": 911,
+      "license": "CC0-1.0",
+      "model": "ToyCar",
+      "path": "assets/khronos/ToyCar/LICENSE.md",
+      "sha256": "6e7c41dba03a561a67197a5aba92219bcc462806d69d13d8aba1c0ccbe183253",
+      "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/ToyCar",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/LICENSE.md"
+    }
+  ],
+  "models": {
+    "ABeautifulGame": {
+      "legal": "&copy; 2020, ASWF. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - MaterialX Project for Original model\n\n&copy; 2022, Ed Mackey. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Ed Mackey for Conversion to glTF\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/ABeautifulGame/ABeautifulGame.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ABeautifulGame/README.md"
+    },
+    "AnisotropyBarnLamp": {
+      "legal": "&copy; 2023, Copyright 2023 Wayfair, LLC. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Eric Chadwick for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/AnisotropyBarnLamp/AnisotropyBarnLamp.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/AnisotropyBarnLamp/README.md"
+    },
+    "CesiumMilkTruck": {
+      "legal": "&copy; 2017, Cesium. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Cesium for Everything\n\n&copy; 2015, Cesium. [Cesium Trademark or Logo](../../LICENSES/LicenseRef-LegalMark-Cesium.txt)\n\n - Non-copyrightable logo for Cesium logo\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/CesiumMilkTruck/CesiumMilkTruck.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/CesiumMilkTruck/README.md"
+    },
+    "ClearcoatWicker": {
+      "legal": "&copy; 2023, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Eric Chadwick for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/ClearcoatWicker/ClearcoatWicker.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ClearcoatWicker/README.md"
+    },
+    "CommercialRefrigerator": {
+      "legal": "&copy; 2025, Darmstadt Graphics Group GmbH. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Eric Chadwick for Model and textures and all images in the README.md\n\n&copy; 2025, Sean Thomas. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Sean Thomas for This work is based on 'Commercial Fridge' (https://sketchfab.com/3d-models/commercial-fridge-2174e1e4f1f24f1a95aa110ee060f473) by Sean Thomas (https://sketchfab.com/foon.) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/CommercialRefrigerator/CommercialRefrigerator.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/CommercialRefrigerator/README.md"
+    },
+    "Duck": {
+      "legal": "&copy; 2006, Sony. [SCEA Shared Source License, Version 1.0](../../LICENSES/SCEA.txt)\n\n - Sony for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/Duck/Duck.glb",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/Duck/README.md"
+    },
+    "Fox": {
+      "legal": "&copy; 2014, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - PixelMannen for Model\n\n&copy; 2014, tomkranis. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - tomkranis for Rigging & Animation\n\n&copy; 2017, @AsoboStudio and @scurest. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - @AsoboStudio and @scurest for Conversion to glTF\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/Fox/Fox.glb",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/Fox/README.md"
+    },
+    "GlamVelvetSofa": {
+      "legal": "&copy; 2021, Wayfair, LLC. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Eric Chadwick for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/GlamVelvetSofa/GlamVelvetSofa.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/GlamVelvetSofa/README.md"
+    },
+    "GlassVaseFlowers": {
+      "legal": "&copy; 2023, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Eric Chadwick for Glass vase\n\n&copy; 2023, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Rico Cilliers for Flowers\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/GlassVaseFlowers/GlassVaseFlowers.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/GlassVaseFlowers/README.md"
+    },
+    "IridescenceLamp": {
+      "legal": "&copy; 2022, Wayfair, LLC. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Eric Chadwick for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/IridescenceLamp/IridescenceLamp.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/IridescenceLamp/README.md"
+    },
+    "Lantern": {
+      "legal": "&copy; 2017, Microsoft. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - sbtron for Initial version\n\n&copy; 2018, Frank Galligan. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Frank Galligan for Draco compression\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/Lantern/Lantern.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/Lantern/README.md"
+    },
+    "MorphStressTest": {
+      "legal": "&copy; 2021, Analytical Graphics, Inc.. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Ed Mackey for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/MorphStressTest/MorphStressTest.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/MorphStressTest/README.md"
+    },
+    "NodePerformanceTest": {
+      "legal": "&copy; 2024, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Jon Aspeheim for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/NodePerformanceTest/NodePerformanceTest.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/NodePerformanceTest/README.md"
+    },
+    "RecursiveSkeletons": {
+      "legal": "&copy; 2017, Cesium. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Cesium for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/RecursiveSkeletons/RecursiveSkeletons.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/RecursiveSkeletons/README.md"
+    },
+    "SheenChair": {
+      "legal": "&copy; 2020, Wayfair, LLC. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Eric Chadwick for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/SheenChair/SheenChair.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/SheenChair/README.md"
+    },
+    "Sponza": {
+      "legal": "&copy; 2016, Crytek. [Cryengine Limited License Agreement](../../LICENSES/LicenseRef-CRYENGINE-Agreement.txt)\n\n - Crytek for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/Sponza/Sponza.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/Sponza/README.md"
+    },
+    "StainedGlassLamp": {
+      "legal": "&copy; 2021, Wayfair. [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode)\n\n - Eric Chadwick for Everything\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/StainedGlassLamp/StainedGlassLamp.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/StainedGlassLamp/README.md"
+    },
+    "ToyCar": {
+      "legal": "&copy; 2020, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Guido Odendahl for Initial car model\n\n&copy; 2020, Public. [Creative Commons Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/legalcode)\n\n - Eric Chadwick for Extensions and scene composition\n\n<!-- This file is auto-generated by modelmetadata. Do not edit by hand. -->",
+      "path": "assets/khronos/ToyCar/ToyCar.gltf",
+      "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb/Models/ToyCar/README.md"
+    }
+  },
+  "source_commit": "8f492390ddc7a2ae221a1369ef560589cf8c70fb"
+}

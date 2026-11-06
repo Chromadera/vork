@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 951e63a87de158f61904e1363ba6908411c59029f06ecbb4458c20737c9ba04b # shrinks to shape = Shape { function: "rounded_box", options: Object {"name": String("s"), "radius": Number(0.22712014135970804), "segments": Number(2), "size": Array [Number(3.298182395479889), Number(3.2578498722444906), Number(0.8280659834079866)]}, volume: 8.897554993887054, exact: false }

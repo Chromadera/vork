@@ -1,0 +1,27 @@
+{
+  "blender": "5.2.1",
+  "display": "sRGB",
+  "view": "AgX",
+  "looks": [
+    "None",
+    "Punchy",
+    "Greyscale",
+    "Very High Contrast",
+    "High Contrast",
+    "Medium High Contrast",
+    "Base Contrast",
+    "Medium Low Contrast",
+    "Low Contrast",
+    "Very Low Contrast"
+  ],
+  "size": 65,
+  "min_log2": -12.47393,
+  "max_log2": 12.5260688117,
+  "format": "OpenEXR half RGB, ZIP; sample (r,g,b) of look L at x = 65 b + r, y = 65 L + g; None retains the original PNG16-derived samples",
+  "source_sha256": {
+    "config.ocio": "47a7d83e79c1d21f49ba6c505efe311da723471688c614b5c366e1da7eb8ea3a",
+    "luts/AgX_Base_sRGB.cube": "e707a36f3e90ee79bc342332febf91334c02ce3974cac700ece00ca9d4507491",
+    "luts/luminance_compensation_bt2020.cube": "e3f5adcd8c08f77a96be141e8d504d58125cc80216a7a641abc970c85840cfd2"
+  },
+  "ocio": "2.6.0"
+}

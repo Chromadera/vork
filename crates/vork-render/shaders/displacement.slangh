@@ -1,0 +1,102 @@
+// Material offsets evaluate triangle vertices or authored point centres.
+import vork_constants;
+import material;
+import displacement_dispatch;
+struct Evaluation { uint count; uint material; float time; float previous_time; uint point_vertices; uint pose; uint dispatch_width; uint deforming; uint4 object_header; float4x4 to_stream; float4x4 from_stream; };
+[[vk::binding(0,2)]] ConstantBuffer<Evaluation> evaluation : register(b5);
+[[vk::binding(1,2)]] StructuredBuffer<float> current_source : register(t6);
+[[vk::binding(2,2)]] StructuredBuffer<float> previous_source : register(t7);
+// For each evaluation (triangle vertex or point): UV0.xy and attribute slots.
+[[vk::binding(3,2)]] StructuredBuffer<float4> vertex_attributes : register(t8);
+// Triangles: indices, vertex face offsets and incident triangle ordinals.
+// Points: authored centre XYZ float bits.
+[[vk::binding(4,2)]] StructuredBuffer<uint> topology : register(t9);
+[[vk::binding(5,2)]] RWStructuredBuffer<float> displaced_positions : register(u10);
+[[vk::binding(6,2)]] RWStructuredBuffer<float> current_output : register(u11);
+[[vk::binding(7,2)]] RWStructuredBuffer<float> previous_output : register(u12);
+// Ordered float keys for min/max XYZ; word 6 flags nonfinite evaluation.
+[[vk::binding(8,2)]] RWStructuredBuffer<uint> evaluated_bounds : register(u13);
+uint float_key(float v) {let b=asuint(v);return (b&0x80000000u)!=0u ? ~b : (b^0x80000000u);}
+float source_word(uint at,uint pose) {if(pose==0u || evaluation.deforming==0u) return current_source[at];
+    return previous_source[(at/10u)*20u+(pose-1u)*10u+at%10u];}
+float3 source_vector(uint at,uint pose) {return float3(source_word(at,pose),source_word(at+1u,pose),source_word(at+2u,pose));}
+float3 position(uint vertex,uint pose) {let at=(pose*evaluation_count()+vertex)*3u;return float3(displaced_positions[at],displaced_positions[at+1u],displaced_positions[at+2u]);}
+void output_word(uint at,uint pose,float value) {if(pose==0u) current_output[at]=value;else previous_output[(at/10u)*20u+(pose-1u)*10u+at%10u]=value;}
+uint evaluation_count() {return evaluation.count/max(evaluation.point_vertices,1u);}
+uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
+[shader("compute")][numthreads(1,1,1)] void initialize() {
+    for(uint a=0u;a<3u;a++){evaluated_bounds[a]=float_key(asfloat(0x7f800000u));evaluated_bounds[a+3u]=float_key(asfloat(0xff800000u));}
+    evaluated_bounds[6]=0u;
+}
+[shader("compute")][numthreads(REG_DEFORM_GROUP,1,1)] void evaluate(uint3 id:SV_DispatchThreadID) {
+    let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation_count() || pose>=3u)return;
+#if VORK_ATTRIBUTES > 0
+    for(uint slot=0u;slot<VORK_ATTRIBUTES;slot++) material_attributes[slot]=vertex_attributes[vertex*attribute_stride()+1u+slot];
+#endif
+    material_instance_attributes(evaluation.object_header.x);
+    let p=evaluation.point_vertices!=0u ? asfloat(uint3(topology[vertex*3u],topology[vertex*3u+1u],topology[vertex*3u+2u])) : source_vector(vertex*10u,pose);
+    let n=evaluation.point_vertices!=0u ? float3(0.) : source_vector(vertex*10u+3u,pose);
+    let local_position=mul(float4(p,1.),evaluation.from_stream).xyz;
+    let local_normal=mul(float4(n,0.),transpose(evaluation.to_stream)).xyz;
+    let normal=evaluation.point_vertices!=0u ? float3(0.) : dot(local_normal,local_normal)>0. ? normalize(local_normal) : float3(0.,1.,0.);
+    let record=material_records[evaluation.material];
+    let offset=displacement_dispatch(record.tag.x,local_position,normal,pose==0u ? evaluation.time : evaluation.previous_time,record.tag.w);
+    let result=(evaluation.point_vertices!=0u ? float3(0.) : p)+mul(float4(offset,0.),evaluation.to_stream).xyz;
+    if(any((asuint(result)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluated_bounds[6],1u,ignored);}
+    for(uint a=0u;a<3u;a++) {
+        displaced_positions[(pose*evaluation_count()+vertex)*3u+a]=result[a];
+        if(pose==0u && evaluation.point_vertices==0u) {uint ignored;InterlockedMin(evaluated_bounds[a],float_key(result[a]),ignored);InterlockedMax(evaluated_bounds[a+3u],float_key(result[a]),ignored);}
+    }
+}
+[shader("compute")][numthreads(REG_DEFORM_GROUP,1,1)] void finish(uint3 id:SV_DispatchThreadID) {
+    let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation.count || pose>=3u)return;
+    let p=evaluation.point_vertices!=0u ? source_vector(vertex*10u,pose)+position(vertex/max(evaluation.point_vertices,1u),pose) : position(vertex,pose);
+    if(any((asuint(p)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluated_bounds[6],1u,ignored);}
+    if(evaluation.point_vertices!=0u && pose==0u) {
+        for(uint a=0u;a<3u;a++) {uint ignored;InterlockedMin(evaluated_bounds[a],float_key(p[a]),ignored);InterlockedMax(evaluated_bounds[a+3u],float_key(p[a]),ignored);}
+    }
+    var normal=source_vector(vertex*10u+3u,pose);
+    var tangent=source_vector(vertex*10u+6u,pose);
+    var sign=source_word(vertex*10u+9u,pose);
+    if(evaluation.point_vertices==0u) {
+        // Fit the displacement differential on each source triangle, extending it
+        // by identity perpendicular to that surface. Average differentials, not
+        // normals: the resulting Jacobian perturbs even deliberately authored frames.
+        var dx=float3(0.);var dy=float3(0.);var dz=float3(0.);var weight=0.;
+        let offsets=topology[0];let faces=offsets+evaluation.count+1u;
+        for(uint row=topology[offsets+vertex];row<topology[offsets+vertex+1u];row++) {
+            let triangle=topology[faces+row]*3u+1u;
+            let a=topology[triangle];let b=topology[triangle+1u];let c=topology[triangle+2u];
+            let pa=source_vector(a*10u,pose);
+            let e1=source_vector(b*10u,pose)-pa;let e2=source_vector(c*10u,pose)-pa;
+            let area=cross(e1,e2);let area2=dot(area,area);
+            if(area2>0.) {
+                let w=sqrt(area2);
+                let dual1=cross(e2,area)/area2;let dual2=cross(area,e1)/area2;
+                let da=position(a,pose)-pa;
+                let d1=(position(b,pose)-source_vector(b*10u,pose))-da;
+                let d2=(position(c,pose)-source_vector(c*10u,pose))-da;
+                dx+=w*(d1*dual1.x+d2*dual2.x);
+                dy+=w*(d1*dual1.y+d2*dual2.y);
+                dz+=w*(d1*dual1.z+d2*dual2.z);weight+=w;
+            }
+        }
+        // Preserve the exact original frame for zero gradient (including translation).
+        if(weight>0. && (any(dx!=0.) || any(dy!=0.) || any(dz!=0.))) {
+            let x=float3(1.,0.,0.)+dx/weight;
+            let y=float3(0.,1.,0.)+dy/weight;
+            let z=float3(0.,0.,1.)+dz/weight;
+            let n=normal.x*cross(y,z)+normal.y*cross(z,x)+normal.z*cross(x,y);
+            let t=tangent.x*x+tangent.y*y+tangent.z*z;
+            let b=sign*cross(normal,tangent);
+            let transformed_b=b.x*x+b.y*y+b.z*z;
+            if(dot(n,n)>0.) normal=normalize(n);
+            let orthogonal=t-normal*dot(normal,t);
+            if(dot(orthogonal,orthogonal)>0.) tangent=normalize(orthogonal);
+            sign=dot(cross(normal,tangent),transformed_b)<0. ? -1. : 1.;
+        }
+    }
+    if(any((asuint(normal)&uint3(0x7f800000u))==uint3(0x7f800000u)) || any((asuint(tangent)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluated_bounds[6],1u,ignored);}
+    for(uint a=0u;a<3u;a++) {output_word(vertex*10u+a,pose,p[a]);output_word(vertex*10u+3u+a,pose,normal[a]);output_word(vertex*10u+6u+a,pose,tangent[a]);}
+    output_word(vertex*10u+9u,pose,sign);
+}

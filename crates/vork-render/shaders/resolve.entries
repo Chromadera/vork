@@ -1,0 +1,4 @@
+resolve_color compute
+post_source compute
+resolve_fused compute
+resolve_fused_single compute

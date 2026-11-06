@@ -1,0 +1,96 @@
+fluid: APIC/FLIP liquid surfaces, wetting and whitewater (advanced simulation).
+Authoring uses libraries.fluid.build in a source checkout; materials shade surfaces.
+Use vork help fluid --all for the simulation reference.
+
+<!-- all -->
+# Fluid simulation reference
+
+Authoring: libraries.fluid.build (Python, source checkout) returns ordinary scene maps.
+GPU modules: #include "fluid/config.slang", "fluid/solver.slang",
+"fluid/surface.slang", "fluid/whitewater.slang". Includes deliberately share the
+program's generated buffer accessors. Declare struct Inputs {int stage=0;}; in
+the wrapper, before inclusion. No fluid kernel primitive or scheduler.
+
+Physical controls: extent (domain half-size, metres), scale (metres/solver unit),
+gravity (m/s², downward Y), surface_tension (N/m), density (kg/m³), particle_budget
+(count or lattice dimensions), spacing (metres). whitewater_budget bounds a separate
+one-way population. Defaults: terrestrial gravity, room-temperature water, APIC.
+Numerics: cubic grid cells, surface_grid, bins, square XZ film_grid, dt (seconds),
+speed (maximum expected m/s for timestep validation), pressure_iterations, flip
+(0 APIC, 1 FLIP; intermediate values blend both transfers), seed. Defaults are in build's signature.
+Film diffusivity is m²/s; film depth buffers are in solver length units.
+All mutable buffers are retained simulation state; scratch is included in seek checkpoints.
+No automatic runtime CFL adaptation: author must bound velocities and refine dt/grid.
+
+CALLBACKS (Slang source passed as callbacks; coordinates in solver units)
+float container(float3 p): positive solid, negative free space, signed distance.
+float initial_field(float3 p): signed liquid field including solid clipping.
+bool initial_marker(uint id,out float3 p): initializes bounded marker slots.
+float3 initial_velocity(float3 cellCentre,float dx): components at negative MAC faces.
+float initial_pressure(float3 p): pressure/density in solver units²/s².
+bool film_accept(float2 xz), float film_height(float2 xz): wettable floor mask/height.
+float3 boundary_velocity(float3 p,float time,float3 v): grid forcing before pressure.
+Authored callbacks may use generated bindings; animation can use ordinary numeric
+inputs by authoring the wrappers directly. Initial bulk mass is the number of
+accepted initial_marker slots times spacing³. Changing inflow mass requires an
+authored mass-accounting/recycling pass; initial_field is not a volume ledger.
+
+OUTPUTS
+surface: implicit scalar grid in local [-1,1]³; node translation=origin and scale=extent
+in metres. wetness: XZ subgrid film depth, multiply by scale for metres.
+floor_film / film_surface: closed implicit height surface on a flat opaque rendered
+floor. Use an optical water material, XZ translation=origin.xz, Y translation=
+film_height(DOMAIN_ORIGIN.xz)*scale, and scale=[extent.x,2*extent.y,extent.z] in
+metres. Three Y samples encode height without losing sub-cell film. XZ boundary depths
+extend to the domain faces, where explicit closure preserves edge/corner water. The lower
+closure lies within floating-point roundoff of the support. The floor and film
+must share the authored height; the bounded field rejects overflowing depth.
+white_draw_position/white_width: compact point positions/fixed diameters in solver units;
+use node scale=scale. white_count is the active prefix. Width is not compute-bound:
+the renderer can bound sphere tessellation from its physical size and camera near plane.
+white_draw_id carries slot/generation identities through compaction. Bind it as
+geometry.ids so deaths, compaction and slot reuse preserve historical correspondence.
+white_position/white_life/white_kind are simulation slots, before compaction.
+white_kind: 0 inactive, 1 spray, 2 foam, 3 bubble.
+The caller supplies optical materials; whitewater points require opaque coverage.
+The helper uses unprefixed buffer/program names: rename maps/references for multiple fluids.
+
+METHODS AND LIMITS
+Jiang et al. 2015 APIC; FLIP velocity increments use the unforced P2G grid.
+Ghost-fluid pressure with Laplace jump; fixed red/black SOR iteration count.
+Covariance anisotropy via Yu–Turk 2013 / std.particles. Kernels stay centred on
+material markers and carry fixed rest volume; smoothing does not move their mass.
+A minimum support contains each marker's rest-volume sphere. Display correction
+targets interpolated surface volume plus deposited film, with solid clipping after
+the offset. Analytic X/Y integration and edge-partitioned Gaussian Z quadrature integrate the
+trilinear surface, including sub-cell parcels. A safeguarded
+bracketed solve stops at 0.01% relative residual; 40 unsuccessful evaluations reject
+publication. correction stores offset, bracket endpoints, status (1 converged,
+-1 failed), signed residual in display-cell volumes, and evaluation count. The private raw field tags solid samples; public fields remain finite.
+Rest-density feedback in ghost-fluid pressure relaxes over the cell's gravity/
+capillary time. Signed feedback is restricted to a bulk neighbourhood covering
+quadratic transfer support; boundary cells only correct over-density. Scalar
+display correction is independent of pressure and is not locally conservative.
+Contact markers deposit rest volume once into a conservative bilinear floor film.
+Film diffusion is a depth closure, not resolved shallow-water momentum/contact angle.
+Ihmsen et al. 2012 trapped-air/convex-crest/energy potentials, cylindrical random births,
+neighbour classification, ballistic spray, advected foam, buoyant dragged bubbles.
+Differences: physical speed/time normalization, bounded stochastic source sampling,
+all categories age; whitewater uses opaque point scattering proxies.
+Source proposals and their thinning are independent of secondary capacity and occupancy.
+Deterministic integer scans assign accepted births to available slots and publish a live prefix.
+white_emission is [requested, allocated, dropped, exhausted_slot] for the most recent tick.
+exhausted_slot is 0xffffffff while identities remain available. Generation exhaustion
+of an inactive slot stops allocation and publishes white_count=0xffffffff, rejecting
+the exposure through the point live-count overflow diagnostic. Slots never silently
+retire or reuse an identity. Restart the simulation before this u32 lifetime limit.
+Capacity exhaustion drops accepted births. Whitewater does not remove bulk volume.
+
+Uniform grids scale with domain volume; points currently expand their full capacity.
+A beach should use a bounded breaking-wave patch with authored spectral boundary
+velocity and volume accounting, not allocate a finely resolved open ocean. No sparse
+solver, adaptive sheet resampling, open-boundary marker recycling, two-way air or rigid
+body coupling. Fine spray does not repair unresolved sheets or an authored regular impulse.
+References: https://doi.org/10.1145/2766996 (APIC);
+https://doi.org/10.1145/2421636.2421641 (Yu–Turk);
+https://cg.informatik.uni-freiburg.de/publications/2012_CGI_sprayFoamBubbles.pdf

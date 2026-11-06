@@ -1,0 +1,23 @@
+Microsoft Visual C++ runtime (Windows packages only)
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Shipped files: the Visual C++ runtime DLLs that the bundled OIDN DLLs import,
+in oidn/bin (currently msvcp140.dll, vcruntime140.dll and vcruntime140_1.dll).
+They are unmodified copies from Visual Studio 2022's Microsoft.VC143.CRT
+redistributable folder (VC\Redist\MSVC\<version>\x64), installed app-local next
+to the DLLs that use them. vork.exe and the Slang compiler link the C runtime
+statically and do not use these files.
+
+Terms: these files are "Distributable Code" under the Microsoft Visual Studio
+license terms and are listed in Visual Studio's redistribution list:
+  https://visualstudio.microsoft.com/license-terms/
+  https://learn.microsoft.com/visualstudio/releases/2022/redistribution
+Those terms permit copying and distributing them in object code form with a
+program that adds significant primary functionality. Recipients and
+redistributors may not modify them, may not use Microsoft's trademarks to name
+or endorse their programs, and may only redistribute them under terms that
+protect them at least as much as Microsoft's licence terms. They are not
+covered by vork's MIT/Apache-2.0 licence.
+
+Updates: Microsoft services the system-wide Visual C++ Redistributable through
+Windows Update; these app-local copies update when vork is updated.

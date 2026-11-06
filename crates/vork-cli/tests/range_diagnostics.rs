@@ -1,0 +1,55 @@
+use std::process::Command;
+
+#[test]
+fn implicit_still_notice_requires_written_output() {
+    let dir = std::env::temp_dir().join(format!("vork-range-diagnostics-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scene = dir.join("scene.json");
+    let image = dir.join("still.png");
+    for (size, explicit) in [(6, false), (0, false), (1, true)] {
+        let _ = std::fs::remove_file(&image);
+        std::fs::write(&scene, serde_json::json!({
+            "version":2,"nodes":[{"type":"camera","name":"cam"}],
+            "materials":{"glow":{"program":"post/glare","inputs":{"size":size}}},
+            "render":{"duration":1,"resolution":[8,8],"compositor":["glow"]}
+        }).to_string()).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vork"));
+        command.arg("render").arg(&scene).args(["--profile","std/draft","--out"]).arg(&image);
+        if explicit { command.args(["--at","0"]); }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), size != 6, "{stderr}");
+        assert_eq!(image.exists(), size != 6, "{stderr}");
+        assert_eq!(stderr.contains("rendered t=0"), size != 6 && !explicit, "{stderr}");
+        if size == 6 {
+            for expected in ["render.compositor[0]", "glow", "post/glare", "received 6", "[0, 1]"] {
+                assert!(stderr.contains(expected), "missing {expected}: {stderr}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn duplicate_environments_identify_nodes_in_every_profile() {
+    let dir = std::env::temp_dir().join(format!("vork-environment-diagnostics-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scene = dir.join("scene.json");
+    std::fs::write(&scene, serde_json::json!({"version":2,"nodes":[
+        {"type":"camera"},
+        {"type":"light","shape":"environment","name":"world_a"},
+        {"type":"node","children":[{"type":"light","shape":"environment","name":"world_b","energy":0}]}
+    ]}).to_string()).unwrap();
+    for profile in ["std/draft", "std/final", "std/path"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vork"))
+            .arg("render").arg(&scene).args(["--profile", profile, "--out"])
+            .arg(dir.join("still.png")).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        for expected in ["only one environment", "world_a", "world_b"] {
+            assert!(stderr.contains(expected), "{profile}: {stderr}");
+        }
+        assert!(!stderr.contains("raster renderer"), "{stderr}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

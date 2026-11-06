@@ -1,0 +1,76 @@
+// Shared control resolve; the two entry modules select raster texture shape.
+import vork_constants;
+import vork_prelude;
+import vork_control_sample;
+[[vk::binding(0, 0)]] CONTROL_TEXTURE<float> depth : register(t0);
+[[vk::binding(1, 0)]] CONTROL_TEXTURE<uint4> ids : register(t1);
+[[vk::binding(2, 0)]] CONTROL_TEXTURE<float4> normals : register(t2);
+[[vk::binding(3, 0)]] CONTROL_TEXTURE<float4> ambient : register(t3);
+[[vk::binding(4, 0)]] CONTROL_TEXTURE<float4> motion : register(t4);
+[[vk::binding(5, 0)]] [[vk::image_format("rg32f")]] RWTexture2D<float2> out_depth : register(u5);
+[[vk::binding(6, 0)]] [[vk::image_format("r32ui")]] RWTexture2D<uint> out_ids : register(u6);
+[[vk::binding(7, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> out_normals : register(u7);
+// One sample copies half-float values exactly; MSAA averages need f32.
+#if CONTROL_SAMPLES == 1
+#define AMBIENT_FORMAT "rgba16f"
+#else
+#define AMBIENT_FORMAT "rgba32f"
+#endif
+[[vk::binding(8, 0)]] [[vk::image_format(AMBIENT_FORMAT)]] RWTexture2D<float4> out_ambient : register(u8);
+[[vk::binding(9, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> out_motion : register(u9);
+
+[[vk::binding(11, 0)]] CONTROL_TEXTURE<float4> albedo : register(t10);
+[[vk::binding(10, 0)]] ConstantBuffer<Frame> guide_frame : register(b0);
+[[vk::binding(12, 0)]] RWStructuredBuffer<float4> denoising_guides : register(u1);
+
+void resolve_pixel(uint3 gid) {
+    uint width, height;
+    CONTROL_DIMENSIONS(depth, width, height);
+    if (any(gid.xy >= uint2(width, height))) return;
+    int2 p = int2(gid.xy);
+    let c=sample_controls(p,depth,ids,normals,ambient,motion,uint(CONTROL_SAMPLES));
+    out_depth[p]=c.depth.xy;
+    let flags=uint(guide_frame.projection.w);
+    let final_sample=guide_frame.temporal.x+1.>=guide_frame.temporal.y;
+    let controls=REG_OUTPUT_DEPTH_IDS|REG_OUTPUT_NORMALS|REG_OUTPUT_MOTION|REG_OUTPUT_FLOAT_DEPTH|REG_OUTPUT_FLOAT_NORMALS|REG_OUTPUT_FLOAT_MOTION|REG_COMPOSITOR_IDS;
+    // IDs feed indirect response and final exported controls.
+    if (guide_frame.flags.w>0. || (final_sample && (flags&controls)!=0u)) {out_ids[p]=c.ids.x;}
+    out_normals[p]=c.normals;
+    // Nominal controls have no colour consumer for the ambient response.
+    if (guide_frame.sampling.w==0u && (flags&(REG_OUTPUT_GPU_COLOR|REG_OUTPUT_COLOR_PLANE|REG_OUTPUT_FLOAT_COLOR))!=0u) {out_ambient[p]=c.ambient;}
+    if (final_sample && (flags&(REG_OUTPUT_MOTION|REG_OUTPUT_FLOAT_MOTION|REG_COMPOSITOR_MOTION))!=0u) {out_motion[p]=c.motion;}
+
+}
+[shader("compute")]
+[numthreads(REG_COMPUTE_TILE, REG_COMPUTE_TILE, 1)]
+void resolve(uint3 gid : SV_DispatchThreadID) { resolve_pixel(gid); }
+
+[shader("compute")]
+[numthreads(REG_COMPUTE_TILE, REG_COMPUTE_TILE, 1)]
+void resolve_denoise(uint3 gid : SV_DispatchThreadID) {
+    uint width, height;
+    CONTROL_DIMENSIONS(depth, width, height);
+    if (any(gid.xy >= uint2(width, height))) return;
+    resolve_pixel(gid);
+    if(uint(guide_frame.temporal.w)==REG_DENOISE_GUIDES_PATH) {return;}
+    int2 p = int2(gid.xy);
+    float4 guide_albedo = float4(0.); float4 guide_normal = float4(0.);
+    var identity=CONTROL_LOAD(albedo,p,0).a;
+    for (int sample = 0; sample < CONTROL_SAMPLES; sample++) {
+        var a=CONTROL_LOAD(albedo,p,sample);
+        if(a.a<0. || a.a!=identity) {identity=-1.;}
+        a.a=a.a!=0. ? 1. : 0.;
+        guide_albedo += a / float(CONTROL_SAMPLES);
+        guide_normal += float4(CONTROL_LOAD(normals, p, sample).xyz, 0.) / float(CONTROL_SAMPLES);
+    }
+    uint index = (gid.y * width + gid.x) * 2u;
+    if (guide_frame.temporal.x > 0.) {
+        guide_albedo += denoising_guides[index];
+        let previous=denoising_guides[index+1u];guide_normal.rgb+=previous.rgb;
+        if(previous.w!=identity) {identity=-1.;}
+    }
+    // Mixed camera coverage and transported radiance cannot use a single
+    // primary-surface guide. This word is ignored by OIDN.
+    guide_normal.w=identity;
+    denoising_guides[index] = guide_albedo; denoising_guides[index + 1u] = guide_normal;
+}

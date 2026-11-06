@@ -1,0 +1,36 @@
+{
+  "name": "@usevoyager/vork",
+  "version": "0.1.0",
+  "description": "Rust-generated scene types, JSON Schema and serialization for vork",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./scene.schema.json": "./scene.schema.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "scene.schema.json"
+  ],
+  "scripts": {
+    "prepack": "node -e \"fs.copyFileSync('../../LICENSE','LICENSE')\"",
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "generate": "node generate.mjs",
+    "check:generated": "node generate.mjs --check && node generate-std.mjs --check"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ajv": "^8.20.0",
+    "json-schema-to-typescript": "^16.0.0",
+    "typescript": "^5.9.0"
+  }
+}

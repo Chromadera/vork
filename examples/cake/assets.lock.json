@@ -1,0 +1,209 @@
+[
+  {
+    "asset_id": "carrot_cake",
+    "kind": "model",
+    "path": "carrot_cake/carrot_cake_4k.gltf",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/4k/carrot_cake/carrot_cake_4k.gltf",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 2682,
+    "md5": "e65f680a006eeca49eaf96f152ead3bc",
+    "sha256": "6af8fb32cc700e146ee833b0a43cefb7f8f541377e5233bf497c137b15243a31"
+  },
+  {
+    "asset_id": "carrot_cake",
+    "kind": "model",
+    "path": "carrot_cake/carrot_cake.bin",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/8k/carrot_cake/carrot_cake.bin",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 377492,
+    "md5": "085b7ba8dc8de57f5e8aadb9ed68dfe5",
+    "sha256": "4390df681a8e7d1c1ec8640addb94e422073ccb88d0b1e73971e13cd48bb12cb"
+  },
+  {
+    "asset_id": "carrot_cake",
+    "kind": "model",
+    "path": "carrot_cake/textures/carrot_cake_arm_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/carrot_cake/carrot_cake_arm_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 12805704,
+    "md5": "b16282691b442e1ba73cd225ad7f2e85",
+    "sha256": "e84a30f490e780da57de692f8f286c832be9b12f6f242a377d05c0b84ed44b2f"
+  },
+  {
+    "asset_id": "carrot_cake",
+    "kind": "model",
+    "path": "carrot_cake/textures/carrot_cake_diff_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/carrot_cake/carrot_cake_diff_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 9008348,
+    "md5": "499541c513523eb08fdf2080f6334955",
+    "sha256": "9eb093c4c8b37f4eedb0f0e3225a348159b19306769dafdb5693bea5a30d535d"
+  },
+  {
+    "asset_id": "carrot_cake",
+    "kind": "model",
+    "path": "carrot_cake/textures/carrot_cake_nor_gl_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/carrot_cake/carrot_cake_nor_gl_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 15508758,
+    "md5": "cac95b8aae3d63fed200236aa10a2a24",
+    "sha256": "ec1380ff66de61e354a0d446895c79fe6e8be35c3eebb4d3ec302b431f25a1f5"
+  },
+  {
+    "asset_id": "vintage_electric_kettle",
+    "kind": "model",
+    "path": "vintage_electric_kettle/vintage_electric_kettle_4k.gltf",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/4k/vintage_electric_kettle/vintage_electric_kettle_4k.gltf",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 4801,
+    "md5": "e2a348a85d7a811f590094c9bec4b558",
+    "sha256": "1a484cdda2528701b6997bb2c0d5d52931c9f772c4128eebeca2d5cd4b5f1174"
+  },
+  {
+    "asset_id": "vintage_electric_kettle",
+    "kind": "model",
+    "path": "vintage_electric_kettle/textures/vintage_electric_kettle_arm_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/vintage_electric_kettle/vintage_electric_kettle_arm_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 9260549,
+    "md5": "d317492c72d65b79d358f14565a2905f",
+    "sha256": "c078dd3574efac95aa44993fd5b8cab515311e4cc025c9b9d281fafc98181ede"
+  },
+  {
+    "asset_id": "vintage_electric_kettle",
+    "kind": "model",
+    "path": "vintage_electric_kettle/textures/vintage_electric_kettle_diff_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/vintage_electric_kettle/vintage_electric_kettle_diff_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 7101149,
+    "md5": "ed701b550a12079fbfb0c8ac8bf63683",
+    "sha256": "78ba95f66427dcdc1fd8fe81fcaa90c099916934e61a66cdd221dd716fe26bdd"
+  },
+  {
+    "asset_id": "vintage_electric_kettle",
+    "kind": "model",
+    "path": "vintage_electric_kettle/textures/vintage_electric_kettle_nor_gl_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/vintage_electric_kettle/vintage_electric_kettle_nor_gl_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 10291520,
+    "md5": "8b7d973d237444366244b7ff029d7085",
+    "sha256": "9111f9daee5106c71bdbb186478f0608b565ad37e94783a2acbeb0b1cfeaffab"
+  },
+  {
+    "asset_id": "vintage_electric_kettle",
+    "kind": "model",
+    "path": "vintage_electric_kettle/vintage_electric_kettle.bin",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/4k/vintage_electric_kettle/vintage_electric_kettle.bin",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 416612,
+    "md5": "3e817b9bd20bad65c016e5464ee03bc3",
+    "sha256": "6be39ebc1893feaef3aa05bec6d2bf069af65fec0c1500422aaedf14357dab59"
+  },
+  {
+    "asset_id": "carved_wooden_plate",
+    "kind": "model",
+    "path": "carved_wooden_plate/carved_wooden_plate_4k.gltf",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/4k/carved_wooden_plate/carved_wooden_plate_4k.gltf",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 2836,
+    "md5": "14b5c4488a1c4d1bb80f8e99fd1ce5f0",
+    "sha256": "206de5fc034c592ab707bf90f6e1955d5f4329d66eec7382be478bed14291a06"
+  },
+  {
+    "asset_id": "carved_wooden_plate",
+    "kind": "model",
+    "path": "carved_wooden_plate/carved_wooden_plate.bin",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/8k/carved_wooden_plate/carved_wooden_plate.bin",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 52160,
+    "md5": "70499c8019359d859577d9f7eef46091",
+    "sha256": "4a605b576b1e79968f668c8624733e2e0fff073ae9fc1107b55ad4d976b99787"
+  },
+  {
+    "asset_id": "carved_wooden_plate",
+    "kind": "model",
+    "path": "carved_wooden_plate/textures/carved_wooden_plate_arm_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/carved_wooden_plate/carved_wooden_plate_arm_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 5460332,
+    "md5": "e231fb56bb83b3db22e3bf10d4417cc8",
+    "sha256": "01bced251cab7694e47c32a257ab91ecc0cfb0d725c2d64b13a7f041b00067a0"
+  },
+  {
+    "asset_id": "carved_wooden_plate",
+    "kind": "model",
+    "path": "carved_wooden_plate/textures/carved_wooden_plate_diff_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/carved_wooden_plate/carved_wooden_plate_diff_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 6594279,
+    "md5": "61322480534142c7261783dde4292d8f",
+    "sha256": "c16c966b741259faba7caadcf3242efa0ca8bf9c80e19594832bb6fe07b48045"
+  },
+  {
+    "asset_id": "carved_wooden_plate",
+    "kind": "model",
+    "path": "carved_wooden_plate/textures/carved_wooden_plate_nor_gl_4k.jpg",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/4k/carved_wooden_plate/carved_wooden_plate_nor_gl_4k.jpg",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 5545708,
+    "md5": "cf1f2b82eaab2a2fd1fb75d689f4ca39",
+    "sha256": "88940ddc4edcf24870a9c9ea6bf69928e8eba2829e64f0be255c9917739d6135"
+  },
+  {
+    "asset_id": "wood_floor_deck",
+    "kind": "texture",
+    "path": "wood_floor_deck/Diffuse_4k.png",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/wood_floor_deck/wood_floor_deck_diff_4k.png",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 89673781,
+    "md5": "55d947c2ea1ee289bdce848f8c242841",
+    "sha256": "1da0281c98c5ecacad733dcd1c1a3249a48a0ea41a71f89a426c01f1940209cf"
+  },
+  {
+    "asset_id": "wood_floor_deck",
+    "kind": "texture",
+    "path": "wood_floor_deck/nor_gl_4k.png",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/wood_floor_deck/wood_floor_deck_nor_gl_4k.png",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 86910077,
+    "md5": "899d148ee650c641374d79e4985d6900",
+    "sha256": "e944f70a387a77966ccfaceb622d24a6dde2e2db980258aca82275d914f3db03"
+  },
+  {
+    "asset_id": "wood_floor_deck",
+    "kind": "texture",
+    "path": "wood_floor_deck/Rough_4k.png",
+    "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/wood_floor_deck/wood_floor_deck_rough_4k.png",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "bytes": 40615351,
+    "md5": "0d25b7348daa8479d3783546f2b3e746",
+    "sha256": "687975ab284dfe81131e8172d8f51f15ec82f81849a27f18b00d2f3ac4c4035b"
+  },
+  {
+    "asset_id": "lebombo",
+    "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/lebombo_4k.hdr",
+    "license": "CC0",
+    "license_url": "https://polyhaven.com/license",
+    "sha256": "23a59b56482e804985ae8eae404a0d15a24ec924ad2f250e6f81371760ae2a48",
+    "bytes": 24355962,
+    "path": "lebombo_4k.hdr"
+  }
+]

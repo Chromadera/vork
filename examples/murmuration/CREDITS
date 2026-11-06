@@ -1,0 +1,20 @@
+Murmuration at dusk — asset credits (keep with renders)
+
+This work is based on "Crow" by Alexei Ostapenko:
+https://sketchfab.com/3d-models/crow-d5a9b0df4da3493688b63ce42c8a83e2
+https://sketchfab.com/alexanders823
+Licensed CC-BY-4.0: https://creativecommons.org/licenses/by/4.0/
+Changes: sampled flight pose, reduced distant mesh, rescaled, articulated flight
+wings, extracted wings for the starling body, resized textures.
+
+"Starling" — Virtual Museums of Małopolska, CC0-1.0:
+https://sketchfab.com/3d-models/starling-2aefae6ec2e84abe83d4710c47515c85
+https://creativecommons.org/publicdomain/zero/1.0/
+Changes: removed perch, reduced scan, baked tangent normals, pitched into flight.
+
+"Qwantani Sunset (Pure Sky)", "Island Tree 02" and "Grass Bermuda 01" — Poly Haven, CC0:
+https://polyhaven.com/a/qwantani_sunset_puresky
+https://polyhaven.com/a/island_tree_02
+https://polyhaven.com/a/grass_bermuda_01
+https://polyhaven.com/license
+Pinned original downloads: assets.lock.json.

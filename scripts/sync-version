@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Generate release versions from Cargo workspace.package.version; --check rejects drift."""
+import argparse
+import json
+from pathlib import Path
+import re
+import os
+import tomllib
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--check', action='store_true')
+p.add_argument('--tag', help='require this release tag to equal v<workspace version>')
+a = p.parse_args()
+root = Path(__file__).resolve().parents[1]
+workspace = tomllib.loads((root / 'Cargo.toml').read_text())['workspace']
+version = workspace['package']['version']
+number = r'(?:0|[1-9][0-9]*)'
+match = re.fullmatch(rf'({number}\.{number}\.{number})(?:-(internal|alpha|beta|rc)\.({number}))?', version)
+if not match:
+    p.error('workspace version must be X.Y.Z or X.Y.Z-{internal,alpha,beta,rc}.N')
+if a.tag is not None and a.tag != 'v' + version:
+    p.error(f'tag {a.tag!r} does not match Cargo version v{version}')
+# PyPI uses PEP 440 spellings of the same release identity.
+base, channel, serial = match.groups()
+python_version = base + ({'internal': '.dev', 'alpha': 'a', 'beta': 'b', 'rc': 'rc'}[channel] + serial if channel else '')
+
+def write(name, value):
+    path = root / name
+    if a.check:
+        if path.read_text() != value:
+            p.error(f'{name}: version drift; run scripts/sync-version')
+    else:
+        path.write_text(value)
+
+for name in ['packages/ts/package.json', 'packages/ts/package-lock.json']:
+    path = root / name
+    data = json.loads(path.read_text())
+    data['version'] = version
+    if name.endswith('package-lock.json'):
+        data['packages']['']['version'] = version
+    write(name, json.dumps(data, indent=2) + '\n')
+for name, pattern, replacement in [
+    ('install.sh', r'version=\$\{VERSION:-[^}]+\}', 'version=${VERSION:-' + version + '}'),
+    ('install.ps1', r"(\$version = .* else \{ ')[^']+(' \})", r'\g<1>' + version + r'\g<2>'),
+    ('packages/python/pyproject.toml', r'(?m)^version = "[^"]+"', f'version = "{python_version}"'),
+]:
+    text = (root / name).read_text()
+    value, count = re.subn(pattern, replacement, text)
+    if count != 1:
+        p.error(f'{name}: expected one version field, got {count}')
+    write(name, value)
+
+# Vendored and fuzz lockfiles also record dependencies on workspace packages.
+workspace_names = set()
+for pattern in workspace['members']:
+    for member in root.glob(pattern):
+        manifest = member / 'Cargo.toml'
+        if manifest.is_file():
+            package = tomllib.loads(manifest.read_text())['package']
+            if package.get('version') == {'workspace': True}:
+                workspace_names.add(package['name'])
+# Discover standalone and vendored lockfiles at every depth, including in source
+# archives without Git metadata. Ignore generated dependency/build directories.
+lockfiles = set()
+for directory, children, files in os.walk(root):
+    children[:] = [name for name in children if name not in
+                   {'.git', 'target', 'node_modules', '.venv', '__pycache__'}]
+    if 'Cargo.lock' in files:
+        lockfiles.add(Path(directory) / 'Cargo.lock')
+for path in sorted(lockfiles):
+    lock = path.read_text()
+    lock = re.sub(r'(name = "([^"\n]+)"\nversion = ")[^"]+("\n)',
+                  lambda m: m[1] + version + m[3] if m[2] in workspace_names else m[0], lock)
+    write(path.relative_to(root), lock)

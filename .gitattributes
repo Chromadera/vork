@@ -1,0 +1,3 @@
+# Keep LF in Windows checkouts too (scripts, shaders, help text and NOTICE are byte-compared).
+* text=auto eol=lf
+# Patch payloads preserve upstream whitespace for byte-identical reapplication.
