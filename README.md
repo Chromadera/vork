@@ -1,11 +1,32 @@
-# vork
+<!-- Logo goes above the introduction when available. -->
+vork, the Voyager rendering kernel, is a headless 3D and VFX engine built for agents.
+
+[![A cyber car on a mountain road at sunset — watch the film](https://cdn.moda.app/voyager/blog/vork/cyber-car-poster-2f939652f3e77c3c.webp)](https://voyager.so/vork)
+
+[Watch the film](https://voyager.so/vork): a car drives into the night as the forest
+turns into glowing cyan wireframe, drawn from real triangle edges by a scene shader.
+
+Credit: [“Car Concept”](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept)
+by Unity Fan, glTF adaptation by Eric Chadwick / Darmstadt Graphics Group,
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: scaled, animated,
+brighter head and tail lights, wheel pose. Trees, ground and asphalt from Poly Haven
+(CC0). The far mountains and sky are an image-model painting on a curved 3D card;
+everything else that moves is rendered.
+
+## Paste this to your agent
+
+[Install vork](#install), then paste:
+
+> Read `vork help`. Make a small scene, render a preview and inspect the image.
+> Refine the camera and lighting before rendering at final quality. Read the
+> relevant help topic when you need a feature the first page doesn't explain.
 
 A million birds, each steering itself over a lagoon. A black hole that bends
 light. A glowing seed placed on a real desk, lighting the room around it.
 These are scenes written as code and rendered on a GPU. No video model required.
 
-vork is a headless 3D and VFX engine built for agents. It is written in Rust and
-Slang, with GPU rendering through Vulkan and Metal. An agent writes a scene,
+vork is written in Rust and Slang, with GPU rendering through Vulkan and Metal.
+An agent writes a scene,
 renders it, looks at the result and revises the code. There is no editor to drive.
 
 Most creative tools expose controls that a person can operate. An agent can also
@@ -120,11 +141,7 @@ Start with `vork help`. The getting-started help is about **2,500 tokens**,
 including a complete first scene. The full help is about **19,400 tokens**.
 Those are help-text counts, not a claim that every advanced API fits on one page.
 
-A useful first instruction is:
-
-> Read `vork help`. Make a small scene, render a preview and inspect the image.
-> Refine the camera and lighting before rendering at final quality. Read the
-> relevant help topic when you need a feature the first page doesn't explain.
+Use the [prompt above](#paste-this-to-your-agent) to start.
 
 Python and TypeScript can author ordinary scene JSON through the SDKs. You can
 also write JSON directly. Save this as `shot.json` (also available as
