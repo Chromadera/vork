@@ -1,4 +1,8 @@
-<!-- Logo goes above the introduction when available. -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-header-dark.png">
+  <img alt="vork by Voyager" src="docs/images/readme-header-light.png" width="800">
+</picture>
+
 vork, the Voyager rendering kernel, is a headless 3D and VFX engine built for agents.
 
 [![A cyber car on a mountain road at sunset — watch the film](https://cdn.moda.app/voyager/blog/vork/cyber-car-poster-2f939652f3e77c3c.webp)](https://voyager.so/vork)
