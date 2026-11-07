@@ -56,6 +56,47 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue((self.root / 'prefix/lib/vork/slang/bin/slangc').exists())
         self.assertTrue((self.root / 'prefix/lib/vork/oidn/lib/model').exists())
 
+    def bundled_installer(self):
+        installer = self.root / 'install.sh'
+        shutil.copyfile(INSTALLER, installer)
+        self.env['VORK_DOWNLOAD_BASE'] = 'file:///no-downloads-allowed'
+        return subprocess.run(['sh', str(installer)], cwd='/', env=self.env,
+                              capture_output=True, text=True)
+
+    def test_bundled_archive_from_another_directory(self):
+        result = self.bundled_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Using bundled archive:', result.stdout)
+        self.assertIn('fixture setup', result.stdout)
+
+    def test_bundled_archive_requires_checksum(self):
+        (self.root / 'SHA256SUMS').unlink()
+        result = self.bundled_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('requires SHA256SUMS', result.stderr)
+        self.assertFalse((self.root / 'prefix').exists())
+
+    def test_bundled_corruption_fails(self):
+        self.archive.write_bytes(self.archive.read_bytes() + b'corruption')
+        self.assertNotEqual(self.bundled_installer().returncode, 0)
+        self.assertFalse((self.root / 'prefix').exists())
+
+    def test_bundled_upgrade_replaces_tree_and_preserves_it_on_corruption(self):
+        self.assertEqual(self.bundled_installer().returncode, 0)
+        installed = self.root / 'prefix/lib/vork'
+        stale = installed / 'dropped-by-new-release'
+        stale.write_text('old')
+        result = self.bundled_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(stale.exists())
+        notice = (installed / 'NOTICE').read_bytes()
+        self.archive.write_bytes(self.archive.read_bytes() + b'corruption')
+        result = self.bundled_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Nothing was installed', result.stderr)
+        self.assertEqual((installed / 'NOTICE').read_bytes(), notice)
+        self.assertTrue((self.root / 'prefix/bin/vork').resolve().is_file())
+
     def test_skip_setup(self):
         self.env['VORK_SKIP_SETUP'] = '1'
         result = self.run_installer()
@@ -141,6 +182,22 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.run_installer().returncode, 0)
         self.assertIn('.local/bin', (home / '.bash_profile').read_text())
         self.assertFalse((home / '.profile').exists())
+
+    @unittest.skipUnless(shutil.which('bash'), 'needs bash')
+    def test_bundled_default_install_is_found_by_a_login_shell(self):
+        home = self.root / 'home'; home.mkdir()
+        (home / '.bashrc').write_text('[ -z "$PS1" ] && return\n')
+        (home / '.profile').write_text('if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n')
+        del self.env['PREFIX']
+        self.env.update(SHELL='/bin/bash', PATH='/usr/bin:/bin:/usr/sbin:/sbin')
+        result = self.bundled_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Using bundled archive:', result.stdout)
+        login = subprocess.run(['bash', '-lc', 'vork --version'], cwd='/',
+                               env={'HOME': str(home), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'},
+                               capture_output=True, text=True)
+        self.assertEqual(login.returncode, 0, login.stderr)
+        self.assertIn('fixture --version', login.stdout)
 
     def test_custom_prefix_and_opt_out_leave_startup_files_alone(self):
         home = self.root / 'home'; home.mkdir()

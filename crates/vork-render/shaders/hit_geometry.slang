@@ -75,7 +75,7 @@ public HitTriangle hit_triangle<G:IHitGeometry>(uint instance, uint primitive, u
     }
     // The BLAS winding: object-space corners in index order.
     let face=cross(t.c[1].POSITION-t.c[0].POSITION,t.c[2].POSITION-t.c[0].POSITION);
-    t.face=dot(face,face)>0. ? normalize(face) : t.c[0].NORMAL;
+    t.face=finite_unit_normal(face,t.c[0].NORMAL);
     return t;
 }
 // stream.slang varying() at barycentrics `b`: the same object transforms.
@@ -89,6 +89,7 @@ public Varying hit_varying(HitTriangle t, float3 b) {
     let tangent=t.c[0].TANGENT*b.x+t.c[1].TANGENT*b.y+t.c[2].TANGENT*b.z;
     o.rest=t.c[0].rest*b.x+t.c[1].rest*b.y+t.c[2].rest*b.z;o.world=hit_point(t,b);
     o.NORMAL=mul(t.c[0].NORMAL*b.x+t.c[1].NORMAL*b.y+t.c[2].NORMAL*b.z,t.normal_matrix);
+    o.NORMAL=winding_normal(o.NORMAL,mul(t.face,t.normal_matrix));
     o.TEXCOORD_0=t.c[0].TEXCOORD_0*b.x+t.c[1].TEXCOORD_0*b.y+t.c[2].TEXCOORD_0*b.z;
     o.TEXCOORD_1=t.c[0].TEXCOORD_1*b.x+t.c[1].TEXCOORD_1*b.y+t.c[2].TEXCOORD_1*b.z;
     o.COLOR_0=t.c[0].COLOR_0*b.x+t.c[1].COLOR_0*b.y+t.c[2].COLOR_0*b.z;
@@ -153,7 +154,7 @@ public float4 hit_shadow_offset(HitTriangle t,float3 b,bool front) {
     [unroll] for(uint i=0u;i<3u;i++) {
         p[i]=mul(float4(t.c[i].POSITION-t.c[0].POSITION,0.),model).xyz;
         let raw=mul(t.c[i].NORMAL,t.normal_matrix);
-        n[i]=dot(raw,raw)>0. ? normalize(raw)*side : face;
+        n[i]=finite_unit_normal(raw*side,face);
     }
     return shadow_terminator_geometry(p,n,face,b);
 }
@@ -199,7 +200,7 @@ public float3 solid_exit_normal(float3 interpolated,float3 world_face,float3x3 m
     return solid_exit_normal(shading,geometric,direction,eta);
 }
 // The world face normal on the object's front (winding) side.
-public float3 hit_face(HitTriangle t) {return normalize(mul(t.face,t.normal_matrix));}
+public float3 hit_face(HitTriangle t) {return finite_unit_normal(mul(t.face,t.normal_matrix),float3(0.,0.,1.));}
 
 // Current emitter geometry shares the same transformed/deformed corners as hits.
 public struct HitEmitterGeometry { public float3 point; public float3 face; public float area; };

@@ -1554,7 +1554,7 @@
                   "type": "null"
                 }
               ],
-              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation",
               "x-help-path": "node.target",
               "x-source": "Blender Track To constraint (vork target shorthand)"
             },
@@ -1690,9 +1690,9 @@
                 "$ref": "#/$defs/NameOr"
               },
               "type": "array",
-              "x-help": "(material-name|inline material)[]; empty = default std/openpbr with roughness 0.5",
+              "x-help": "(material-name|inline material)[]; empty = default std/openpbr with roughness 0.3",
               "x-help-path": "node.mesh.materials",
-              "x-source": "vork (explicit contract/technique choice)"
+              "x-source": "OpenPBR Surface 1.1.1"
             },
             "morph_weights": {
               "additionalProperties": {
@@ -1775,7 +1775,7 @@
                   "type": "null"
                 }
               ],
-              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation",
               "x-help-path": "node.target",
               "x-source": "Blender Track To constraint (vork target shorthand)"
             },
@@ -1971,7 +1971,7 @@
                   "type": "null"
                 }
               ],
-              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation",
               "x-help-path": "node.target",
               "x-source": "Blender Track To constraint (vork target shorthand)"
             },
@@ -2165,7 +2165,7 @@
                   "type": "null"
                 }
               ],
-              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation",
               "x-help-path": "node.target",
               "x-source": "Blender Track To constraint (vork target shorthand)"
             },
@@ -2467,7 +2467,7 @@
                   "type": "null"
                 }
               ],
-              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+              "x-help": "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation",
               "x-help-path": "node.target",
               "x-source": "Blender Track To constraint (vork target shorthand)"
             },
@@ -3185,9 +3185,19 @@
       "type": "string"
     }
   },
+  "$id": "https://voyager.so/vork/schema/scene.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "$schema": {
+      "description": "Editor JSON Schema address; metadata only, never fetched by the renderer.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-help": "string; editor schema URL",
+      "x-help-path": "scene.$schema"
+    },
     "animation": {
       "default": [],
       "items": {
@@ -3478,7 +3488,7 @@
     "node.instances (mesh): instances|null",
     "node.instances.attributes (mesh): equal-length buffers: TRANSLATION vec3, ROTATION vec4 (xyzw), SCALE vec3 (omitted = identity; any zero world-scale component hides the instance), time_offset f32, pass_index u32, custom columns bind to material inputs",
     "node.instances.count (mesh): one-element u32 compute buffer; zero to attribute capacity; overflow rejects the exposure",
-    "node.materials (mesh): (material-name|inline material)[]; empty = default std/openpbr with roughness 0.5; default []",
+    "node.materials (mesh): (material-name|inline material)[]; empty = default std/openpbr with roughness 0.3; default []",
     "node.morph_weights (mesh): {name:number}; default {}",
     "node.skin (mesh): skin|null",
     "node.skin.inverse_bind_matrices (mesh): mat4-buffer-name|inline buffer",
@@ -3487,7 +3497,7 @@
     "node.pass_index: u32|null; 1..65535; object ID",
     "node.rotation: [x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ); default [0,0,0,1]",
     "node.scale: [x,y,z]; any zero world-scale component hides geometry, including children; default [1,1,1]",
-    "node.target: node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top",
+    "node.target: node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation",
     "node.translation: [x,y,z]; parent frame; default [0,0,0]",
     "node.visible: bool; false hides the subtree and disables its lights; animatable (step); default true",
     "node.visible_camera: bool; default true",
@@ -3519,6 +3529,7 @@
     "render.motion_blur.shutter: number; frames; default 0.5",
     "render.resolution: uvec2; default [1920,1080]",
     "render.root: node-name|null; only this subtree draws and is lit; objects outside still cast shadows; null = whole scene; default null",
+    "scene.$schema: string; editor schema URL",
     "scene.animation: layer[]; default []",
     "scene.buffers: {name:buffer}; default {}",
     "scene.geometry: {name:geometry}; default {}",

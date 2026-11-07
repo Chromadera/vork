@@ -1590,7 +1590,7 @@ void indirect_material<V:IVariant,P:IProgram>(uint3 gid) {
     let deferred_lit=P.lit && evaluation_allocator[first+7u]!=0u;
     if(!deferred_lit && all(response==float3(0.)) && all(scattering_response==float3(0.))) {return;}
 #ifdef VORK_DIFFUSE_MEDIUM
-    let ray_batch=REG_MEDIUM_GI_RAY_BATCH;
+    let ray_batch=REG_GI_RAY_BATCH;
 #else
     let ray_batch=32u;
 #endif

@@ -15,3 +15,7 @@ cuts are inactive. Numeric nonstructural scene fields, including material and pr
 Aiming and object focus use evaluated poses at the requested time, including
 installation and shutter samples. Unused base poses may coincide; coincident
 evaluated aiming origins are errors naming the node and sample time.
+
+Camera target is structural, including [x,y,z], and cannot be animated. Set
+"target":"aim", add {"name":"aim","translation":[0,0,0]} to nodes, then track
+["nodes","aim","translation"] with vector keys, e.g. [[0,[0,0,0]],[2,[1,0,0]]].

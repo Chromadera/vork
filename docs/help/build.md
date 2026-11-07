@@ -108,3 +108,37 @@ lib/libOpenImageDenoise.2.dylib on macOS, or bin/OpenImageDenoise.dll on Windows
 
 Node/npm and the SDKs are not prerequisites for the Rust workspace build.
 For SDK setup use `vork help sdk`; for authored Slang use `vork help programs`.
+
+## Workspace tests
+
+Workspace tests additionally need Node.js/npm for generated SDK checks.
+Install the TypeScript dependencies and fetch the locked crate sources for the
+licence notice check. After installing Slang and FFmpeg/ffprobe, run from the
+checkout root:
+
+```sh
+npm ci --prefix packages/ts
+cargo +1.96 fetch --locked
+cargo +1.96 check --workspace --all-targets --locked
+cargo +1.96 test --workspace --locked
+```
+
+The public workspace tests use shipped synthetic fixtures and the bundled
+Liberation Sans font (SIL OFL 1.1, including copyright and licence in
+crates/vork-std/tests/fonts/OFL.txt). No additional asset downloads are needed.
+Corpus-dependent tests requiring unshipped assets are excluded from the public
+source and are not part of its coverage.
+
+Renderer GPU tests require the explicit runtime opt-in `VORK_GPU_TESTS=1`;
+without it they print a skip diagnostic (visible with `-- --nocapture`). CPU and
+numeric tests remain enabled. Ignored tests state their extra requirements.
+With a supported GPU and the runtime dependencies installed:
+
+```sh
+VORK_GPU_TESTS=1 cargo test -p vork-render -p vork-cli -- --include-ignored --nocapture
+```
+
+In PowerShell set `$env:VORK_GPU_TESTS = "1"` before the Cargo command.
+Use `-- --nocapture` on the default tests to see diagnostics, including skips
+when adapter discovery finds no GPU. Ignored and skipped tests supply no GPU
+coverage. Denoising tests also need the pinned OIDN runtime described above.

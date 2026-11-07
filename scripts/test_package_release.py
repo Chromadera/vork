@@ -57,7 +57,7 @@ class PackageReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); binary=root/'vork'; binary.write_bytes(b'binary')
             good=root/'good'; good.mkdir(); bad=root/'bad'; bad.mkdir()
-            name='a'*64+'.slang-program-v1.entry'
+            name='a'*64+'.slang-program-v2.entry'
             (good/name).write_bytes(ENVELOPE); (bad/name).write_bytes(b'x'*64)
             for index,caches in enumerate(([good,bad],[bad,good])):
                 output=root/str(index)
@@ -116,6 +116,26 @@ class PackageReleaseTests(unittest.TestCase):
             archive = next((root / 'out').glob('*.tar.gz'))
             with tarfile.open(archive) as package:
                 self.assertIn('vork', package.getnames())
+                sdk_metadata = json.loads(package.extractfile('sdk/package.json').read())
+                self.assertEqual(sdk_metadata['exports'], {
+                    '.': {'types': './index.d.ts', 'import': './index.js'},
+                    './scene.schema.json': './scene.schema.json',
+                })
+                self.assertEqual(sdk_metadata['engines'],
+                                 json.loads((ROOT / 'packages/ts/package.json').read_text())['engines'])
+                for path in ('sdk/index.js', 'sdk/index.d.ts', 'sdk/scene.schema.json'):
+                    self.assertIn(path, package.getnames())
+                expected = {line for line in (ROOT / 'dist/example-payload.txt').read_text().splitlines()
+                            if line and not line.startswith('#')}
+                actual = {entry.name for entry in package.getmembers()
+                          if entry.isfile() and entry.name.startswith('examples/')}
+                self.assertEqual(actual, expected)
+                self.assertNotIn('examples/murmuration/scene.json', actual)
+                self.assertIn('examples/murmuration/launch/skim.json.in', actual)
+                self.assertIn('examples/cake/scene.json.in', actual)
+                for name in ('vignette.slang', 'chromatic-dispersion.slang', 'glare.slang',
+                             'highlight.slang', 'glare-streaks.json'):
+                    self.assertIn('examples/compositor-effects/' + name, actual)
                 for path in ('LICENSE', 'sdk/LICENSE', 'python/LICENSE'):
                     self.assertEqual(package.extractfile(path).read(), (ROOT / 'LICENSE').read_bytes())
                 self.assertNotIn('LICENSE-MIT', package.getnames())

@@ -1,5 +1,6 @@
 /// Public help topics; shared by root help and unknown-topic diagnostics.
 pub const HELP_TOPICS: &[&str] = &[
+    "init",
     "std",
     "blender",
     "fluid",
@@ -8,6 +9,7 @@ pub const HELP_TOPICS: &[&str] = &[
     "sdk",
     "field",
     "contract",
+    "upgrade",
     "nodes",
     "lights",
     "cameras",

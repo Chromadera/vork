@@ -1,3 +1,4 @@
+import { engine } from './engine.js';
 import {callKeys} from './call-keys.js';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -31,7 +32,14 @@ export interface ExposureSummary {
   worst_clipped: { share: number; frame: number } | null;
   worst_near_black: { share: number; frame: number } | null;
 }
+export interface RenderWarning {
+  code: string;
+  requested: Record<string, unknown>;
+  dropped: string;
+}
 export interface RenderResult {
+  /** Requested effects omitted or substituted by the renderer. */
+  warnings: RenderWarning[];
   /** Display-image statistics per output; EXR and control-only outputs have no entry. */
   exposure: { output: string; exposure: ExposureSummary }[];
 }
@@ -39,8 +47,9 @@ export interface RenderResult {
  * Options are render-time choices; the scene file is unchanged.
  */
 export function render(scene: string, options: RenderOptions): RenderResult {
-  execFileSync(process.env.VORK_BIN ?? 'vork', renderArguments(scene, options), { stdio: ['ignore', 'inherit', 'inherit'] });
+  execFileSync(engine(), renderArguments(scene, options), { stdio: ['ignore', 'inherit', 'inherit'] });
   const exposure: RenderResult['exposure'] = [];
+  const warnings = new Map<string, RenderWarning>();
   for (const output of typeof options.out === 'string' ? [options.out] : options.out) {
     const directory = output.endsWith('/') || output.endsWith(sep);
     const file = !directory && ['.png','.mp4','.mov','.exr'].includes(extname(output).toLowerCase());
@@ -49,12 +58,13 @@ export function render(scene: string, options: RenderOptions): RenderResult {
     if (index >= 0) name = name.slice(0,index).replace(/[._-]+$/, '') + name.slice(index+4);
     const sidecar = name.startsWith('.') && !name.slice(1).includes('.') ? 'meta.json' : `${name}.meta.json`;
     const metadata = JSON.parse(readFileSync(file ? join(dirname(output),sidecar) : join(output,'meta.json'), 'utf8'));
+    for (const warning of metadata.warnings ?? []) warnings.set(JSON.stringify(warning), warning);
     if (metadata.exposure != null) exposure.push({output, exposure: metadata.exposure});
   }
-  return {exposure};
+  return {exposure, warnings: [...warnings.values()]};
 }
 /** The `vork render` command line for a scene file and options. */
-export function renderArguments(scene: string, options: RenderOptions): string[] {
+function renderArguments(scene: string, options: RenderOptions): string[] {
   checkOptions(options, ['out','at','frameStart','frameEnd','profile','set','channels']);
   const args = ['render', scene];
   for (const out of typeof options.out === 'string' ? [options.out] : options.out) args.push('--out', out);

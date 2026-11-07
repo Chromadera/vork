@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Convert an assembled release tree to npm packages and wheels; never publishes.
+
+Run after platform signing/notarization. No stripping, patching or repair is allowed.
+"""
+import argparse
+import base64
+import csv
+import hashlib
+import io
+import json
+from pathlib import Path
+import shutil
+import struct
+import re
+import subprocess
+import tempfile
+import tomllib
+import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+TARGETS = {
+    'linux-x64': ('linux', 'x64', 'manylinux_2_35_x86_64', 'sys_platform == "linux" and platform_machine == "x86_64"'),
+    'darwin-arm64': ('darwin', 'arm64', None, 'sys_platform == "darwin" and platform_machine == "arm64"'),
+    'windows-x64': ('win32', 'x64', 'win_amd64', 'sys_platform == "win32" and platform_machine == "AMD64"'),
+}
+
+
+def wheel(output, name, version, tag, files, requires=(), entry=None):
+    normalized = name.replace('-', '_')
+    info = f'{normalized}-{version}.dist-info'
+    files = dict(files)
+    files[f'{info}/METADATA'] = (f'Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nRequires-Python: >=3.11\nLicense-Expression: LicenseRef-vork-Preview\nLicense-File: LICENSE\nDescription-Content-Type: text/plain\n' + ''.join(f'Requires-Dist: {r}\n' for r in requires) + '\nNative vork engine and SDK distribution. See https://github.com/voyager-so/vork for usage and licence terms.\n').encode()
+    files[f'{info}/licenses/LICENSE'] = (ROOT / 'LICENSE').read_bytes()
+    files[f'{info}/WHEEL'] = f'Wheel-Version: 1.0\nGenerator: vork\nRoot-Is-Purelib: {str(tag == "any").lower()}\nTag: py3-none-{tag}\n'.encode()
+    if entry:
+        files[f'{info}/entry_points.txt'] = b'[console_scripts]\nvork = vork._engine:main\n'
+    records = []
+    path = output / f'{normalized}-{version}-py3-none-{tag}.whl'
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name, source in sorted(files.items()):
+            data = source.read_bytes() if isinstance(source, Path) else source
+            item = zipfile.ZipInfo(name)
+            item.compress_type = zipfile.ZIP_DEFLATED
+            mode = (source.stat().st_mode & 0o777) if isinstance(source, Path) else 0o644
+            item.external_attr = (0o100000 | mode) << 16
+            archive.writestr(item, data)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
+            records.append((name, 'sha256=' + digest, len(data)))
+        record = io.StringIO(newline='')
+        writer = csv.writer(record)
+        writer.writerows(records + [(f'{info}/RECORD', '', '')])
+        archive.writestr(f'{info}/RECORD', record.getvalue())
+    print(f'{path}: {path.stat().st_size} bytes')
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--tree', type=Path, required=True, help='extracted complete, signed release archive')
+    p.add_argument('--platform', choices=TARGETS, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    a = p.parse_args()
+    version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
+    if '-' in version:
+        p.error('registry candidate must use a final numeric version; private registries isolate rehearsals')
+    tree = a.tree.resolve()
+    binary = 'vork.exe' if a.platform == 'windows-x64' else 'vork'
+    for name in [binary, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries', 'sdk', 'python']:
+        if not (tree / name).exists():
+            p.error(f'incomplete release tree: missing {name}')
+    if json.loads((tree / 'sdk/package.json').read_text())['version'] != version:
+        p.error('release SDK version does not match Cargo version')
+    header = (tree / binary).read_bytes()
+    if a.platform == 'linux-x64' and not (header[:5] == b'\x7fELF\x02' and struct.unpack_from('<H', header, 18)[0] == 62):
+        p.error('expected an x86-64 ELF engine')
+    if a.platform == 'darwin-arm64' and not (header[:4] == b'\xcf\xfa\xed\xfe' and struct.unpack_from('<I', header, 4)[0] == 0x100000c):
+        p.error('expected an arm64 Mach-O engine')
+    if a.platform == 'windows-x64':
+        pe = struct.unpack_from('<I', header, 0x3c)[0]
+        if header[:2] != b'MZ' or header[pe:pe+6] != b'PE\0\0\x64\x86':
+            p.error('expected an x86-64 PE engine')
+    a.output.mkdir(parents=True, exist_ok=True)
+    # npm drops symlinks. Materialize internal links with identical target bytes;
+    # wheels do the same. Never follow a link outside the signed runtime tree.
+    runtime = {}
+    for f in sorted(tree.rglob('*')):
+        rel = f.relative_to(tree)
+        if rel.parts[0] in ('sdk', 'python', 'examples', 'README.md'):
+            continue
+        if rel.parts[0] not in (binary, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries'):
+            p.error(f'unexpected release content: {rel}')
+        if not f.resolve().is_relative_to(tree):
+            p.error(f'runtime symlink escapes tree: {rel}')
+        if f.is_symlink() and not f.is_file():
+            p.error(f'runtime link must target a regular file: {rel}')
+        if f.is_file():
+            runtime[rel.as_posix()] = f
+    os_name, cpu, tag, _ = TARGETS[a.platform]
+    if a.platform == 'darwin-arm64':
+        minimum = (11, 0)
+        for source in runtime.values():
+            data = source.read_bytes()
+            if data[:4] != b'\xcf\xfa\xed\xfe':
+                continue
+            offset = 32
+            for _ in range(struct.unpack_from('<I', data, 16)[0]):
+                command, size = struct.unpack_from('<II', data, offset)
+                if command in (0x32, 0x24):  # LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX
+                    value = struct.unpack_from('<I', data, offset + (12 if command == 0x32 else 8))[0]
+                    minimum = max(minimum, (value >> 16, (value >> 8) & 255))
+                if size < 8:
+                    p.error(f'invalid Mach-O load command: {source}')
+                offset += size
+        tag = f'macosx_{minimum[0]}_{minimum[1]}_arm64'
+    if a.platform == 'linux-x64':
+        for source in runtime.values():
+            data = source.read_bytes()
+            if data[:4] == b'\x7fELF':
+                versions = [tuple(map(int, v)) for v in re.findall(rb'GLIBC_(\d+)\.(\d+)', data)]
+                if versions and max(versions) > (2, 35):
+                    p.error(f'{source} exceeds the glibc 2.35 baseline: {max(versions)}')
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        native = stage / 'native'
+        native.mkdir()
+        for name, source in runtime.items():
+            dest = native / 'runtime' / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+        native_meta = dict(name=f'@voyager-so/vork-{a.platform}', version=version, os=[os_name], cpu=[cpu], license='SEE LICENSE IN runtime/LICENSE')
+        if a.platform == 'linux-x64':
+            native_meta['libc'] = ['glibc']
+        (native / 'package.json').write_text(json.dumps(native_meta))
+        subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=native, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        main = stage / 'main'
+        shutil.copytree(ROOT / 'packages/ts/dist', main / 'dist')
+        shutil.copy2(ROOT / 'packages/ts/scene.schema.json', main / 'scene.schema.json')
+        shutil.copy2(ROOT / 'LICENSE', main / 'LICENSE')
+        shutil.copy2(ROOT / 'scripts/registry-cli.cjs', main / 'cli.cjs')
+        meta = json.loads((ROOT / 'packages/ts/package.json').read_text())
+        for key in ('scripts', 'devDependencies'):
+            meta.pop(key, None)
+        (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npx vork init my-shot`. Enter my-shot and run `npx vork render scene.json --profile std/draft --out render.png`, then `npx vork help`. Use `npm create vork my-shot` for project-local engine installation. Run `npx vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+, a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
+        meta.update(description='Native vork renderer, TypeScript SDK and scene schema', version=version, bin={'vork': 'cli.cjs'}, files=['dist', 'cli.cjs', 'LICENSE', 'README.md', 'scene.schema.json'], optionalDependencies={f'@voyager-so/vork-{t}': version for t in TARGETS})
+        meta['exports']['./package.json'] = './package.json'
+        (main / 'package.json').write_text(json.dumps(meta, indent=2) + '\n')
+        subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=main, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        creator = stage / 'creator'
+        creator.mkdir()
+        shutil.copy2(ROOT / 'scripts/create-vork.cjs', creator / 'cli.cjs')
+        shutil.copy2(ROOT / 'LICENSE', creator / 'LICENSE')
+        (creator / 'package.json').write_text(json.dumps(dict(name='create-vork', version=version, description='Create an offline vork rendering project', bin={'create-vork': 'cli.cjs'}, engines={'node': '>=22.18'}, license='SEE LICENSE IN LICENSE', dependencies={'@voyager-so/vork': version}), indent=2) + '\n')
+        subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=creator, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    module = 'vork_native_' + a.platform.replace('-', '_')
+    wheel(a.output, 'vork-native-' + a.platform, version, tag,
+          {f'{module}/__init__.py': b''} | {f'{module}/runtime/{n}': f for n, f in runtime.items()})
+    python = {f'vork/{f.relative_to(ROOT / "packages/python/vork").as_posix()}': f for f in (ROOT / 'packages/python/vork').rglob('*') if f.is_file() and '__pycache__' not in f.parts}
+    requires = [f'vork-native-{t}=={version}; {data[3]}' for t, data in TARGETS.items()]
+    wheel(a.output, 'vork', version, 'any', python, requires, entry=True)
+
+
+if __name__ == '__main__':
+    main()

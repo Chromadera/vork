@@ -289,5 +289,5 @@ pub(crate) const SIMULATION_GROUP_OBSERVATIONS: usize = 3;
 /// Baseline windows between larger-group trials after a failed trial.
 pub(crate) const SIMULATION_GROUP_RETRY: u32 = 8;
 
-/// GiMediumQuery in gi_ray.slang: five aligned float4 records per query.
-pub(crate) const GI_MEDIUM_QUERY_BYTES: u64 = 80;
+/// GiQuery in gi_ray.slang: five aligned float4 records per query.
+pub(crate) const GI_QUERY_BYTES: u64 = 80;

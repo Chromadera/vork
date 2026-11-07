@@ -357,6 +357,11 @@ bool transport_null_boundary(Closure c,float incident_ior) {
     if(c.geometry_thin_walled) return !transport_rough_transmission(c);
     return incident_ior==1. && c.specular_ior==1. && (c.transmission_depth<=0. || all(c.transmission_color==float3(1.)));
 }
+// A null event preserves the preceding scattering vertex and its source MIS.
+// It cannot also own a new finite-source endpoint at this interface.
+bool transport_null_event(Closure c,float incident_ior,BsdfSample sample) {
+    return transport_null_boundary(c,incident_ior) && sample.event==REG_RAY_TRANSMISSION && sample.pdf==0.;
+}
 float3 transport_null_transmittance(Closure c,float3 view,float incident_ior,float3 smooth_normal,float3 geometric) {
     c=dielectric_interface(c,incident_ior,c.specular_ior);
     if(!transport_null_boundary(c,incident_ior)) return float3(0.);

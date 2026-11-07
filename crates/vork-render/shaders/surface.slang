@@ -31,7 +31,12 @@ struct Coordinates {
 };
 // TEXCOORD_1, or zero for draws without one (tangent w carries the flag).
 float2 varying_uv1(Varying v) {return select(abs(v.TANGENT.w)>=2.,float2(0.),v.TEXCOORD_1);}
-Coordinates raster_coordinates(Varying v, float3 geometric, float3 incident) {
+Coordinates raster_coordinates(inout Varying v, bool object_front, float3 incident) {
+    // The derivative cross has screen orientation; recover the object's winding side.
+    let face=cross(ddx(v.world),ddy(v.world));
+    let winding=face*select(dot(face,incident)>=0.,1.,-1.)*select(object_front,1.,-1.);
+    v.NORMAL=winding_normal(v.NORMAL,winding);
+    let geometric=surface_geometric(v,object_front);
     Coordinates k;k.material_filter=float3(0.);k.shadow_offset=float4(0.);
     let uv1=varying_uv1(v);
     k.position_dx=ddx(v.world);k.position_dy=ddy(v.world);
@@ -286,7 +291,7 @@ Surface surface_at<V:IVariant, P:IProgram,let decode_table:bool=true>(Varying v,
     if ((material_records[record].tag.z&REG_FLAG_GLTF_UNLIT)!=0u) { evaluated.closure.emission_color=evaluated.closure.base_color;evaluated.closure.emission_luminance=1.; }
     return evaluated;
 }
-float3 surface_geometric(Varying v, bool object_front) {return normalize(v.NORMAL)*select(object_front,1.,-1.);}
+float3 surface_geometric(Varying v, bool object_front) {return finite_unit_normal(v.NORMAL,float3(0.,0.,1.))*select(object_front,1.,-1.);}
 Surface surface<V:IVariant, P:IProgram>(Varying v, bool front) {return surface<V,P>(v,front,0u);}
 Surface surface<V:IVariant, P:IProgram>(Varying v, bool front, uint lobe) {Coordinates k;return surface<V,P>(v,front,lobe,k);}
 // `k`: the fragment's coordinates, for a later lit stage.
@@ -302,7 +307,7 @@ Surface surface<V:IVariant, P:IProgram>(Varying v, bool front, uint lobe, out Co
     if (!material_covers_side<V>(v,object_front)) {discard;}
     let view=camera_view(v.world,frame);
     // Derivatives first: everything after the record read is non-uniform.
-    k=raster_coordinates(v,surface_geometric(v,object_front),view);
+    k=raster_coordinates(v,object_front,view);
     let s=surface_at<V,P>(v,object_front,view,k,Lobe(lobe,0.));
     if (V.has_mask) {return raster_coverage(v,s,index,count);}
     return s;
@@ -337,7 +342,7 @@ Surface raster_coverage(Varying v, Surface s, uint index, uint count) {
 float program_shadow_opacity<P:IProgram>(Varying v, bool front) {
     let object_front=material_front(v,front);
     let view=camera_view(v.world,frame);
-    let k=raster_coordinates(v,surface_geometric(v,object_front),view);
+    let k=raster_coordinates(v,object_front,view);
     let s=surface_at<Unspecialized,P>(v,object_front,view,k);
     return candidate_scalar_opacity(material_record(v.object),s.closure.geometry_opacity);
 }

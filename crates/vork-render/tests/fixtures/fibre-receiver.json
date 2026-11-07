@@ -1,0 +1,169 @@
+{
+  "version": 2,
+  "buffers": {
+    "p": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          -0.8,
+          0
+        ],
+        [
+          0,
+          0.8,
+          0
+        ]
+      ]
+    },
+    "w": {
+      "type": "f32",
+      "data": [
+        0.4,
+        0.4
+      ]
+    },
+    "c": {
+      "type": "u32",
+      "data": [
+        2
+      ]
+    },
+    "q": {
+      "type": "vec3",
+      "data": [
+        [
+          -1.2,
+          -1.2,
+          -1
+        ],
+        [
+          1.2,
+          -1.2,
+          -1
+        ],
+        [
+          1.2,
+          1.2,
+          -1
+        ],
+        [
+          -1.2,
+          1.2,
+          -1
+        ]
+      ]
+    },
+    "n": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ]
+    },
+    "i": {
+      "type": "u32",
+      "data": [
+        0,
+        1,
+        2,
+        0,
+        2,
+        3
+      ]
+    }
+  },
+  "geometry": {
+    "strand": {
+      "topology": "curves",
+      "attributes": {
+        "POSITION": "p"
+      },
+      "widths": "w",
+      "curve_vertex_counts": "c"
+    },
+    "plane": {
+      "attributes": {
+        "POSITION": "q",
+        "NORMAL": "n"
+      },
+      "indices": "i"
+    }
+  },
+  "programs": {
+    "test_hair": {
+      "file": "hair-model.slang"
+    }
+  },
+  "materials": {
+    "hair": {
+      "program": "test_hair",
+      "inputs": {
+        "color": [
+          0.5,
+          0.3,
+          0.1
+        ],
+        "model": "chiang"
+      }
+    },
+    "white": {
+      "inputs": {
+        "base_color": [
+          0.8,
+          0.8,
+          0.8
+        ],
+        "specular_weight": 0
+      }
+    }
+  },
+  "nodes": [
+    {"type":"camera","translation":[0,0,5],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":3}}},
+    {
+      "type": "mesh",
+      "geometry": "plane",
+      "materials": [
+        "white"
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "strand",
+      "materials": [
+        "hair"
+      ],
+      "visible_camera": false
+    },
+    {
+      "type": "light",
+      "shape": "sun",
+      "energy": 2,
+      "angle": 0
+    }
+  ],
+  "render": {
+    "resolution": [
+      64,
+      64
+    ],
+    "display": {"program":"std/standard","inputs":{"dither_intensity":0}}}
+}

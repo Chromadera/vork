@@ -314,7 +314,7 @@ pub(super) fn pass(
         let mut authored:Vec<_>=layout.iter().map(|entry|entry.binding).collect();authored.sort_unstable();
         let slots:Vec<_>=authored.into_iter().enumerate().map(|(physical,authored)|(0,authored,physical as u32)).collect();
         let mut hash=blake3::Hasher::new();hash.update(b"native-image-hlsl-9");hash.update(vork_slang::VERSION.as_bytes());hash.update(&serde_json::to_vec(&slots)?);hash.update(shader.as_bytes());
-        let code:Vec<u8>=programs::cached(r,hash.finalize(),|_|&[],||Compiler::discover().compile_image_spirv(&shader,&slots))?;
+        let code:Vec<u8>=programs::cached_generated(r,hash.finalize(),||Compiler::discover().compile_image_spirv(&shader,&slots))?;
         crate::native::module(d,"compositor image pass",Some(&code),None,(group[0],group[1],1))
     } else {
         crate::timing::shader_module(d,wgpu::ShaderModuleDescriptor {label:Some("compositor image pass"),source:wgpu::ShaderSource::Wgsl(shader.into())})

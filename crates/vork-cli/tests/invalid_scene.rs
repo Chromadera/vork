@@ -25,24 +25,27 @@ fn invalid_scene_exits_with_validation_error() {
         .unwrap(),
     )
     .unwrap();
+    // Drain diagnostics to a file while polling: a pipe can fill before exit,
+    // making the harness itself look like a renderer shutdown deadlock.
+    let log = dir.join("stderr.log");
     for _ in 0..32 {
         let mut child = Command::new(env!("CARGO_BIN_EXE_vork"))
             .arg("render")
             .arg(&scene)
             .arg("--out")
             .arg(dir.join("frame.png"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
             .unwrap();
         let start = Instant::now();
         while child.try_wait().unwrap().is_none() {
             if start.elapsed() > Duration::from_secs(30) {
                 child.kill().unwrap();
-                let output = child.wait_with_output().unwrap();
+                child.wait().unwrap();
                 panic!(
                     "scene error hung during shutdown: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    std::fs::read_to_string(&log).unwrap()
                 );
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -53,9 +56,9 @@ fn invalid_scene_exits_with_validation_error() {
             Some(3),
             "status: {}; stderr: {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            std::fs::read_to_string(&log).unwrap()
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = std::fs::read_to_string(&log).unwrap();
         assert!(stderr.contains("unknown field \"mesh\""), "{stderr}");
         assert!(!dir.join("frame.png").exists());
     }

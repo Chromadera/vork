@@ -1,4 +1,4 @@
-// Lens Distortion's dispersion only. The green channel remains at the camera UV.
+// Chromatic dispersion. The green channel remains at the camera UV.
 import vork;
 public struct Inputs { [InputRange(0.0, 1.0, true, true)] float dispersion = 0.; };
 public float4 composite(CompositeContext ctx, Inputs inputs) { float2 uv=ctx.uv; float2 size=ctx.size; float time=ctx.time;

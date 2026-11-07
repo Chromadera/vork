@@ -2,8 +2,9 @@
 import vork_constants;
 import material;
 import displacement_dispatch;
-struct Evaluation { uint count; uint material; float time; float previous_time; uint point_vertices; uint pose; uint dispatch_width; uint deforming; uint4 object_header; float4x4 to_stream; float4x4 from_stream; };
-[[vk::binding(0,2)]] ConstantBuffer<Evaluation> evaluation : register(b5);
+struct Evaluation { uint count; uint material; float time; float previous_time; uint point_vertices; uint pose; uint dispatch_width; uint deforming; uint4 object_header; float4x4 to_stream; float4x4 from_stream; uint4 addresses; };
+[[vk::binding(0,2)]] StructuredBuffer<Evaluation> evaluations : register(t5);
+static Evaluation evaluation;
 [[vk::binding(1,2)]] StructuredBuffer<float> current_source : register(t6);
 [[vk::binding(2,2)]] StructuredBuffer<float> previous_source : register(t7);
 // For each evaluation (triangle vertex or point): UV0.xy and attribute slots.
@@ -11,24 +12,26 @@ struct Evaluation { uint count; uint material; float time; float previous_time; 
 // Triangles: indices, vertex face offsets and incident triangle ordinals.
 // Points: authored centre XYZ float bits.
 [[vk::binding(4,2)]] StructuredBuffer<uint> topology : register(t9);
-[[vk::binding(5,2)]] RWStructuredBuffer<float> displaced_positions : register(u10);
+// Positions are float bits; the trailing job bounds use ordered uint atomics.
+[[vk::binding(5,2)]] RWStructuredBuffer<uint> evaluation_scratch : register(u10);
 [[vk::binding(6,2)]] RWStructuredBuffer<float> current_output : register(u11);
 [[vk::binding(7,2)]] RWStructuredBuffer<float> previous_output : register(u12);
-// Ordered float keys for min/max XYZ; word 6 flags nonfinite evaluation.
-[[vk::binding(8,2)]] RWStructuredBuffer<uint> evaluated_bounds : register(u13);
+// Per-job bounds contain ordered min/max XYZ; word 6 flags nonfinite evaluation.
 uint float_key(float v) {let b=asuint(v);return (b&0x80000000u)!=0u ? ~b : (b^0x80000000u);}
-float source_word(uint at,uint pose) {if(pose==0u || evaluation.deforming==0u) return current_source[at];
+float source_word(uint at,uint pose) {if(pose==0u || evaluation.deforming==0u) return current_source[evaluation.addresses.x+at];
     return previous_source[(at/10u)*20u+(pose-1u)*10u+at%10u];}
 float3 source_vector(uint at,uint pose) {return float3(source_word(at,pose),source_word(at+1u,pose),source_word(at+2u,pose));}
-float3 position(uint vertex,uint pose) {let at=(pose*evaluation_count()+vertex)*3u;return float3(displaced_positions[at],displaced_positions[at+1u],displaced_positions[at+2u]);}
-void output_word(uint at,uint pose,float value) {if(pose==0u) current_output[at]=value;else previous_output[(at/10u)*20u+(pose-1u)*10u+at%10u]=value;}
+float3 position(uint vertex,uint pose) {let at=evaluation.addresses.z+(pose*evaluation_count()+vertex)*3u;return asfloat(uint3(evaluation_scratch[at],evaluation_scratch[at+1u],evaluation_scratch[at+2u]));}
+void output_word(uint at,uint pose,float value) {if(pose==0u) current_output[evaluation.addresses.y+at]=value;else previous_output[evaluation.addresses.y*2u+(at/10u)*20u+(pose-1u)*10u+at%10u]=value;}
 uint evaluation_count() {return evaluation.count/max(evaluation.point_vertices,1u);}
 uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
-[shader("compute")][numthreads(1,1,1)] void initialize() {
-    for(uint a=0u;a<3u;a++){evaluated_bounds[a]=float_key(asfloat(0x7f800000u));evaluated_bounds[a+3u]=float_key(asfloat(0xff800000u));}
-    evaluated_bounds[6]=0u;
+[shader("compute")][numthreads(1,1,1)] void initialize(uint3 id:SV_DispatchThreadID) {
+    evaluation=evaluations[id.z*3u];if(evaluation.object_header.y==0u)return;
+    for(uint a=0u;a<3u;a++){evaluation_scratch[evaluation.addresses.w+a]=float_key(asfloat(0x7f800000u));evaluation_scratch[evaluation.addresses.w+a+3u]=float_key(asfloat(0xff800000u));}
+    evaluation_scratch[evaluation.addresses.w+6]=0u;
 }
 [shader("compute")][numthreads(REG_DEFORM_GROUP,1,1)] void evaluate(uint3 id:SV_DispatchThreadID) {
+    evaluation=evaluations[id.z];if(evaluation.object_header.y==0u)return;
     let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation_count() || pose>=3u)return;
 #if VORK_ATTRIBUTES > 0
     for(uint slot=0u;slot<VORK_ATTRIBUTES;slot++) material_attributes[slot]=vertex_attributes[vertex*attribute_stride()+1u+slot];
@@ -42,18 +45,19 @@ uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
     let record=material_records[evaluation.material];
     let offset=displacement_dispatch(record.tag.x,local_position,normal,pose==0u ? evaluation.time : evaluation.previous_time,record.tag.w);
     let result=(evaluation.point_vertices!=0u ? float3(0.) : p)+mul(float4(offset,0.),evaluation.to_stream).xyz;
-    if(any((asuint(result)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluated_bounds[6],1u,ignored);}
+    if(any((asuint(result)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluation_scratch[evaluation.addresses.w+6],1u,ignored);}
     for(uint a=0u;a<3u;a++) {
-        displaced_positions[(pose*evaluation_count()+vertex)*3u+a]=result[a];
-        if(pose==0u && evaluation.point_vertices==0u) {uint ignored;InterlockedMin(evaluated_bounds[a],float_key(result[a]),ignored);InterlockedMax(evaluated_bounds[a+3u],float_key(result[a]),ignored);}
+        evaluation_scratch[evaluation.addresses.z+(pose*evaluation_count()+vertex)*3u+a]=asuint(result[a]);
+        if(pose==0u && evaluation.point_vertices==0u) {uint ignored;InterlockedMin(evaluation_scratch[evaluation.addresses.w+a],float_key(result[a]),ignored);InterlockedMax(evaluation_scratch[evaluation.addresses.w+a+3u],float_key(result[a]),ignored);}
     }
 }
 [shader("compute")][numthreads(REG_DEFORM_GROUP,1,1)] void finish(uint3 id:SV_DispatchThreadID) {
+    evaluation=evaluations[id.z];if(evaluation.object_header.y==0u)return;
     let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation.count || pose>=3u)return;
     let p=evaluation.point_vertices!=0u ? source_vector(vertex*10u,pose)+position(vertex/max(evaluation.point_vertices,1u),pose) : position(vertex,pose);
-    if(any((asuint(p)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluated_bounds[6],1u,ignored);}
+    if(any((asuint(p)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluation_scratch[evaluation.addresses.w+6],1u,ignored);}
     if(evaluation.point_vertices!=0u && pose==0u) {
-        for(uint a=0u;a<3u;a++) {uint ignored;InterlockedMin(evaluated_bounds[a],float_key(p[a]),ignored);InterlockedMax(evaluated_bounds[a+3u],float_key(p[a]),ignored);}
+        for(uint a=0u;a<3u;a++) {uint ignored;InterlockedMin(evaluation_scratch[evaluation.addresses.w+a],float_key(p[a]),ignored);InterlockedMax(evaluation_scratch[evaluation.addresses.w+a+3u],float_key(p[a]),ignored);}
     }
     var normal=source_vector(vertex*10u+3u,pose);
     var tangent=source_vector(vertex*10u+6u,pose);
@@ -96,7 +100,7 @@ uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
             sign=dot(cross(normal,tangent),transformed_b)<0. ? -1. : 1.;
         }
     }
-    if(any((asuint(normal)&uint3(0x7f800000u))==uint3(0x7f800000u)) || any((asuint(tangent)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluated_bounds[6],1u,ignored);}
+    if(any((asuint(normal)&uint3(0x7f800000u))==uint3(0x7f800000u)) || any((asuint(tangent)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluation_scratch[evaluation.addresses.w+6],1u,ignored);}
     for(uint a=0u;a<3u;a++) {output_word(vertex*10u+a,pose,p[a]);output_word(vertex*10u+3u+a,pose,normal[a]);output_word(vertex*10u+6u+a,pose,tangent[a]);}
     output_word(vertex*10u+9u,pose,sign);
 }

@@ -13,8 +13,9 @@ pub(crate) fn prepare(r:&Renderer,scene:&vork_scene::v2::Scene,base:&Path)->Resu
     let abi=programs::abi();let mut hash=blake3::Hasher::new();
     hash.update(b"authored-segments-v1");hash.update(include_str!("../../vork-slang/src/propagation.rs").as_bytes());hash.update(abi.cache_identity()?.as_bytes());hash.update(source.as_bytes());hash.update(origin.to_string_lossy().as_bytes());
     let key=hash.finalize();let tag=key.to_hex();
-    let program=programs::cached(r,key,|p:&vork_slang::PropagationProgram|&p.dependencies,
-        ||vork_slang::Compiler::discover().compile_propagation(&abi,&source,&origin,&tag[..12]))?;
+    let program=programs::cached(r,key,&vork_slang::Compiler::discover(),
+        &abi, &source, &origin,
+        |compiler|compiler.compile_propagation(&abi,&source,&origin,&tag[..12]))?;
     if !program.warnings.trim().is_empty() {eprintln!("{}",program.warnings);}
     let words=program.inputs.pack(&std::collections::BTreeMap::new(),|_,_|unreachable!())?;
     let mut text=program.native.clone();

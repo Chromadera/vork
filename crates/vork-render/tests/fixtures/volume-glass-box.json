@@ -1,0 +1,190 @@
+{
+  "version": 2,
+  "render": {
+    "background": "environment",
+    "display": {"program":"std/agx","inputs":{"exposure":0}},
+    "resolution": [
+      480,
+      320
+    ],
+    "fps": 12,
+    "duration": 1,
+    "camera": "shot_camera"
+  },
+  "nodes": [
+    {
+      "type": "mesh",
+      "name": "ground",
+      "scale": [14,1,14],
+      "children": [],
+      "geometry": "unit_plane",
+      "materials": [
+        "ground_surface"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "display_box",
+      "translation": [-2,0.5,0],
+      "children": [],
+      "geometry": "unit_box",
+      "materials": [
+        "display_box_surface"
+      ]
+    },
+    {"type":"camera","translation":[7,5,10],"rotation":[-0.16074243187904358,0.2963387072086334,0.050669584423303604,0.9400945901870728],"name":"shot_camera","children":[],"material":{"program":"std/camera","inputs":{"lens":30.049168798152053,"clip_start":0.1,"clip_end":100,"projection":"persp"}}},
+    {"type":"light","translation":[-3,5,4],"rotation":[-0.31402075687864384,-0.2984014753183226,-0.10467358562621462,0.895204425954968],"color":[1,1,1],"shape":"rectangle","name":"key","children":[],"visible_glossy":false,"energy":900,"size":4,"size_y":4},
+    {"type":"light","translation":[4,3,2],"rotation":[-0.17754884951811015,0.5141519822026013,0.10973122366563245,0.8319153825869399],"color":[1,1,1],"shape":"rectangle","name":"fill","children":[],"visible_diffuse":false,"energy":350,"size":3,"size_y":4},
+    {"type":"light","translation":[0,4,-4],"rotation":[0,0.9486832980505138,0.31622776601683794,0],"color":[1,1,1],"shape":"rectangle","name":"rim","children":[],"visible_diffuse":false,"energy":650,"size":3,"size_y":2},
+    {
+      "type": "light",
+      "name": "environment",
+      "shape": "environment",
+      "color": [
+        0.12,
+        0.12,
+        0.12
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "room_back",
+      "geometry": "unit_box",
+      "materials": [
+        "room"
+      ],
+      "translation": [0,2,-3],
+      "scale": [10,4,0.15]
+    },
+    {
+      "type": "mesh",
+      "name": "room_side",
+      "geometry": "unit_box",
+      "materials": [
+        "room"
+      ],
+      "translation": [-4,2,0],
+      "scale": [0.15,4,6]
+    },
+    {
+      "type": "mesh",
+      "name": "fog_glass_box",
+      "geometry": "unit_box",
+      "materials": [
+        "smoke"
+      ],
+      "translation": [0,1.5,0],
+      "scale": [3,3,3]
+    }
+  ],
+  "buffers": {
+    "unit_plane_position": {
+      "type": "vec3",
+      "offset": 912,
+      "count": 4,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_plane_normal": {
+      "type": "vec3",
+      "offset": 960,
+      "count": 4,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_plane_uv0": {
+      "type": "vec2",
+      "offset": 1008,
+      "count": 4,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_plane_indices": {
+      "type": "u32",
+      "offset": 1040,
+      "count": 6,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_box_position": {
+      "type": "vec3",
+      "offset": 0,
+      "count": 24,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_box_normal": {
+      "type": "vec3",
+      "offset": 288,
+      "count": 24,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_box_uv0": {
+      "type": "vec2",
+      "offset": 576,
+      "count": 24,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    },
+    "unit_box_indices": {
+      "type": "u32",
+      "offset": 768,
+      "count": 36,
+      "file": "../../../../examples/assets/starter-geometry.bin"
+    }
+  },
+  "geometry": {
+    "unit_plane": {
+      "topology": "triangles",
+      "attributes": {
+        "POSITION": "unit_plane_position",
+        "NORMAL": "unit_plane_normal",
+        "TEXCOORD_0": "unit_plane_uv0"
+      },
+      "indices": "unit_plane_indices"
+    },
+    "unit_box": {
+      "topology": "triangles",
+      "attributes": {
+        "POSITION": "unit_box_position",
+        "NORMAL": "unit_box_normal",
+        "TEXCOORD_0": "unit_box_uv0"
+      },
+      "indices": "unit_box_indices"
+    }
+  },
+  "materials": {
+    "ground_surface": {
+      "inputs": {
+        "base_color": [
+          0.35,
+          0.35,
+          0.35
+        ],
+        "specular_roughness": 0.8
+      }
+    },
+    "display_box_surface": {
+      "inputs": {
+        "base_color": [
+          0.18,
+          0.18,
+          0.18
+        ],
+        "base_metalness": 0,
+        "specular_roughness": 0.45
+      }
+    },
+    "room": {
+      "inputs": {
+        "base_color": [
+          0.32,
+          0.34,
+          0.38
+        ],
+        "specular_roughness": 0.8
+      }
+    },
+    "smoke": {
+      "program": "glass_fog",
+      "inputs": {"density":0.55,"scattering":[0.65,0.8,1],"absorption":[0.35000002,0.19999999,0],"anisotropy":0.2}
+    }
+  },
+  "programs": {
+    "glass_fog": {"file": "../../../../scenes/programs/glass-fog.slang"}
+  }
+}

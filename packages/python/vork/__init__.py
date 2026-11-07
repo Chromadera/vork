@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+from ._engine import engine as _engine
 import struct
 import stat
 import subprocess
@@ -14,7 +15,7 @@ from typing import Any, Optional, Sequence, Union, TypedDict
 from .types import Scene
 from ._validate import helper_options as _helper_options
 
-# SDK authoring choice shared with @usevoyager/vork: externalize buffers of at least 4 KiB.
+# SDK authoring choice shared with @voyager-so/vork: externalize buffers of at least 4 KiB.
 BINARY_BUFFER_MIN_BYTES = 4096
 _WIDTHS = {'f32': 1, 'i32': 1, 'u32': 1, 'vec2': 2, 'vec3': 3, 'vec4': 4, 'uvec4': 4, 'mat4': 16}
 
@@ -102,7 +103,7 @@ def _external_buffers(scene: dict, file: str) -> Optional[bytes]:
 def write_scene(scene: Scene, path: str, base_dir: Optional[str] = None) -> str:
     """Write scene JSON with relative resource paths and a binary sidecar for large buffers.
 
-    Mirrors writeScene in @usevoyager/vork: resource paths resolve against base_dir (default:
+    Mirrors writeScene in @voyager-so/vork: resource paths resolve against base_dir (default:
     the working directory) and are written relative to the scene's directory; inline buffers
     of at least 4 KiB go to an immutable PATH.buffers.UUID.bin sidecar. The JSON is
     atomically replaced after its sidecar is complete; old sidecars are retained for readers. The input is not
@@ -126,82 +127,32 @@ def write_scene(scene: Scene, path: str, base_dir: Optional[str] = None) -> str:
 
     result = copy.deepcopy(scene)
 
-    # Resource slots mirror crates/vork-scene/src/v2/inline.rs. Walk definitions
-    # before their dependencies, never interpreting user-defined table/input names
-    # as fields (an input named "file" is not a filesystem path).
-    seen = set()
+    # Generated from the Rust scene schema, shared with the TypeScript writer.
+    from importlib.resources import files
+    graph = json.loads(files(__package__).joinpath('_resource_slots.json').read_text())
+    slots = {}
 
-    def each(value):
-        return value.values() if isinstance(value, dict) else value or []
+    def walk(value, node, parent=None, key=None):
+        if node.get('file') and isinstance(value, str) and parent is not None:
+            slots[(id(parent), key)] = (parent, key)
+        if 'ref' in node:
+            walk(value, graph['defs'][node['ref']])
+        for branch in node.get('branches', []):
+            walk(value, branch, parent, key)
+        if isinstance(value, dict):
+            for field, child in node.get('properties', {}).items():
+                if field in value:
+                    walk(value[field], child, value, field)
+            if 'values' in node:
+                for field, child in value.items():
+                    walk(child, node['values'], value, field)
+        elif isinstance(value, (list, tuple)) and 'items' in node:
+            for index, child in enumerate(value):
+                walk(child, node['items'], value, index)
 
-    def resource(kind, value):
-        if not isinstance(value, dict) or id(value) in seen:
-            return
-        seen.add(id(value))
-        for field in ('file', 'source_origin') if kind == 'programs' else ('file',) if kind in ('images', 'buffers') else ():
-            if isinstance(value.get(field), str):
-                value[field] = asset_path(value[field])
-        if kind == 'geometry':
-            for field in ('indices', 'curve_vertex_counts', 'widths'):
-                resource('buffers', value.get(field))
-            for buffer in each(value.get('attributes')):
-                resource('buffers', buffer)
-            for morph in each(value.get('morphs')):
-                for field in ('POSITION', 'NORMAL'):
-                    resource('buffers', morph.get(field))
-        elif kind == 'materials':
-            resource('programs', value.get('program'))
-            for input in each(value.get('inputs')):
-                if isinstance(input, dict):
-                    resource('images', input.get('image'))
-                    resource('buffers', input.get('grid'))
-        elif kind == 'images':
-            render(value.get('render') or {})
-        elif kind == 'programs':
-            for buffer in each(value.get('bindings')):
-                resource('buffers', buffer)
-
-    def render(value):
-        resource('materials', value.get('display'))
-        for field in ('compositor', 'compositor_per_step'):
-            for material in each(value.get(field)):
-                resource('materials', material)
-
-    def visit(node):
-        if node.get('type') == 'asset':
-            node['file'] = asset_path(node['file'])
-        if node.get('type') in ('mesh', 'asset'):
-            resource('geometry', node.get('geometry'))
-            for material in each(node.get('materials')):
-                resource('materials', material)
-        if node.get('type') == 'mesh':
-            instances = node.get('instances') or {}
-            resource('buffers', instances.get('count'))
-            for buffer in each(instances.get('attributes')):
-                resource('buffers', buffer)
-            resource('buffers', (node.get('skin') or {}).get('inverse_bind_matrices'))
-        if node.get('type') == 'light':
-            resource('images', node.get('image'))
-            for field in ('material',):
-                resource('materials', node.get(field))
-        for child in node.get('children') or []:
-            visit(child)
-
-    for kind in ('images', 'buffers', 'programs', 'geometry', 'materials'):
-        for value in each(result.get(kind)):
-            resource(kind, value)
-    for node in result['nodes']:
-        visit(node)
-    render(result.get('render') or {})
-    for layer in result.get('animation') or []:
-        clip = layer.get('clip')
-        if clip and clip.get('file'):
-            clip['file'] = asset_path(clip['file'])
-        for track in each(layer.get('tracks')):
-            keys = track.get('keys')
-            if isinstance(keys, dict):
-                for field in ('times', 'values'):
-                    resource('buffers', keys.get(field))
+    walk(result, graph['root'])
+    for parent, key in slots.values():
+        parent[key] = asset_path(parent[key])
     # Immutable sidecar first, then one atomic JSON publication. Retain previous
     # sidecars for readers that have already opened an earlier JSON snapshot.
     binary_path = f'{physical}.buffers.{uuid.uuid4()}.bin'
@@ -239,7 +190,7 @@ def std(function: str, argument: Any = None, **options: Any) -> Any:
     if argument is not None and options:
         raise TypeError('pass an argument or keyword options')
     result = subprocess.run(
-        [os.environ.get('VORK_BIN', 'vork'), 'std', function, '-'],
+        [_engine(), 'std', function, '-'],
         input=json.dumps(options if argument is None else argument, allow_nan=False),
         text=True, capture_output=True,
     )
@@ -249,7 +200,7 @@ def std(function: str, argument: Any = None, **options: Any) -> Any:
 
 
 @_helper_options
-def render_arguments(scene: str, out: Union[str, Sequence[str]], *, at: Optional[float] = None,
+def _render_arguments(scene: str, out: Union[str, Sequence[str]], *, at: Optional[float] = None,
                      frame_start: Optional[int] = None, frame_end: Optional[int] = None,
                      profile: Optional[str] = None,
                      set: Optional[dict] = None,
@@ -293,7 +244,14 @@ class ExposureOutput(TypedDict):
     exposure: ExposureSummary
 
 
+class RenderWarning(TypedDict):
+    code: str
+    requested: dict[str, Any]
+    dropped: str
+
+
 class RenderResult(TypedDict):
+    warnings: list[RenderWarning]
     exposure: list[ExposureOutput]
 
 
@@ -304,9 +262,10 @@ def render(scene: str, out: Union[str, Sequence[str]], **options: Any) -> Render
     set, channels). EXR and control-only outputs have no exposure entry.
     VORK_BIN selects the executable; the scene file is unchanged.
     """
-    subprocess.run([os.environ.get('VORK_BIN', 'vork'), *render_arguments(scene, out, **options)],
+    subprocess.run([_engine(), *_render_arguments(scene, out, **options)],
                    check=True)
     exposure = []
+    warnings = []
     for output in [out] if isinstance(out, str) else out:
         directory = output.endswith(os.sep) or output.endswith('/')
         file = not directory and os.path.splitext(output)[1].lower() in ('.png', '.mp4', '.mov', '.exr')
@@ -318,9 +277,12 @@ def render(scene: str, out: Union[str, Sequence[str]], **options: Any) -> Render
         path = os.path.join(os.path.dirname(output), sidecar) if file else os.path.join(output, 'meta.json')
         with open(path, encoding='utf-8') as f:
             metadata = json.load(f)
+        for warning in metadata.get('warnings', []):
+            if warning not in warnings:
+                warnings.append(warning)
         if metadata.get('exposure') is not None:
             exposure.append({'output': output, 'exposure': metadata['exposure']})
-    return {'exposure': exposure}
+    return {'exposure': exposure, 'warnings': warnings}
 
 
 @_helper_options

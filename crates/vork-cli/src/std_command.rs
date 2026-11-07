@@ -33,7 +33,7 @@ impl Args {
                 vork_std::environment::prepare_frames(&argument,&times,|time|source.frame(time,fps,u32::MAX),read,write)?
             } else {vork_std::environment::prepare(&argument,read,write)?}
         } else {vork_std::evaluate(&self.function,&argument)?};
-        println!("{result}");
+        output!("{result}");
         Ok(())
     }
 }

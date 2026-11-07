@@ -176,6 +176,7 @@ mod tests {
     use wgpu::util::DeviceExt;
     #[test]
     #[ignore = "requires GPU and pinned Slang; runs in the main GPU contracts"]
+    #[cfg(vork_private_tests)]
     fn raster_hdr_silhouette_without_surface_guides_stays_unfiltered() -> Result<()> {
         let r = crate::test_renderer()?.expect("GPU required");
         let mut value: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/compositor-bloom.json"))?;
@@ -369,6 +370,33 @@ mod tests {
         assert!(rms < 0.04, "noise residual {rms}");
         let mean = smooth.iter().map(|p| p[0]).sum::<f32>() / count as f32;
         assert!((mean - 0.5).abs() < 0.005, "mean energy {mean}");
+        // Nonuniform HDR signal, including image borders, fractional coverage,
+        // material edges and protected/no-guide pixels. The global RGB sum is
+        // an independent conservation invariant, not another filter reference.
+        let mut input=Vec::<[f32;4]>::new();let mut varied_guides=Vec::<[f32;4]>::new();
+        for i in 0..count {
+            let coverage=[0.25,0.5,0.75,1.][i%4];
+            let rgb=if i%23==0 {[8.,2.,0.4]} else {[0.02*(i%7) as f32,0.03,0.01]};
+            input.push([rgb[0]*coverage,rgb[1]*coverage,rgb[2]*coverage,coverage]);
+            let identity=if i%19==0 {-1.} else if i%17==0 {0.} else if i%5==0 {2.} else {1.};
+            let a=coverage*samples as f32;let albedo=if i%11==0 {0.8} else {0.2};
+            varied_guides.extend([[albedo*a,albedo*a,albedo*a,a],[0.,a,0.,identity]]);
+        }
+        let result=filter(&input,&varied_guides)?;
+        for (i,p) in result.iter().enumerate() {
+            assert!(p.iter().all(|x|x.is_finite()));
+            assert!((p[3]-input[i][3]).abs()<1e-7);
+            for c in 0..3 {
+                assert!(p[c]>=-1e-7 && p[c]/p[3]<=[8.,2.,0.4][c]+1e-5,"new radiance extremum: {p:?}");
+                if varied_guides[2*i+1][3]<=0. {assert!((p[c]-input[i][c]).abs()<1e-6,"protected pixel changed");}
+            }
+        }
+        for c in 0..3 {
+            let before:f64=input.iter().map(|p|f64::from(p[c])).sum();
+            let after:f64=result.iter().map(|p|f64::from(p[c])).sum();
+            eprintln!("reconstruction RGB[{c}] {before} -> {after}");
+            assert!((after-before).abs()<before*2e-6,"reconstruction changed image energy");
+        }
         Ok(())
     }
 }

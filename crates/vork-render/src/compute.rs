@@ -403,12 +403,17 @@ impl Compute {
                 )
                 .as_bytes(),
             );
+            let abi=programs::abi();
+            let compiler=vork_slang::Compiler::discover();
+            let inputs=programs::bound_program_identity(&r.disk_cache,&compiler,&abi,&text,&origin,&header)?;
+            let compiler=compiler.with_identity(&inputs);
             let artifact = programs::cached(
                 r,
                 key,
-                |p: &vork_slang::ComputeProgram| &p.dependencies,
-                || {
-                    vork_slang::Compiler::discover().compile_compute(
+                &compiler,
+                &abi, &text, &origin,
+                |compiler| {
+                    compiler.compile_compute(
                         &text,
                         &origin,
                         &header,
@@ -419,7 +424,9 @@ impl Compute {
             )?;
             if program.schedule == Some(ComputeSchedule::Simulation) {
                 identity.update(key.as_bytes());
-                for file in &artifact.dependencies { identity.update(&std::fs::read(file)?); }
+                // Bind retained simulation to the compiled code and reflected
+                // defaults, never to dependency bytes reopened after compilation.
+                identity.update(&serde_json::to_vec(&artifact)?);
             }
             if !artifact.warnings.trim().is_empty() {
                 eprintln!("{}", artifact.warnings.trim());

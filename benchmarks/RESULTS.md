@@ -1,16 +1,15 @@
 # Benchmark results
 
-Measured renderer: `81ae2b0755bb696fc3e904744b76a103feded023`.
 Linux NVIDIA L4, four CPUs, 32 GiB per worker; seed 11.
 Binary SHA-256: `e4d4e5fb585de30ea7f9e69e874ddee1951e046a6dc9441ee1563c90bfe5e115`.
 
 Raw logs, measurements and contact sheets are not in this repository.
 Ranges are observed minima/maxima, not confidence intervals. See the README
 for timing boundaries, quality differences, limitations and rerun recipes.
-New final uses eight samples + OIDN; draft four + OIDN. Preview and path
+The measured final profile used eight samples + OIDN; draft four + OIDN. Preview and path
 results are carried forward and were not remeasured on this build.
 
-## New std/final vs EEVEE — seven full movies
+## std/final vs EEVEE — seven full movies
 
 | Scene | Warm final s (measured) | First after setup s | Setup s | EEVEE s (reused measured) | Comparison | Prior 32-sample final s | Change in command time |
 |---|---|---|---|---|---|---|---|
@@ -72,35 +71,35 @@ Three complete movies per shot. Skim 192 frames, dive 240, reveal 288, at 24 fps
 
 ## Carried-forward std/previs
 
-| Cell | Warm s (prior freeze measured) | EEVEE comparison where available |
+| Cell | Warm s (earlier build) | EEVEE comparison where available |
 |---|---|---|
 | bird-skim-previs | 48.990 [46.473–49.020], n=3 | unmeasured |
 | bird-birds2-previs | 50.127 [50.093–50.204], n=3 | unmeasured |
-| preview7-D-cube-still | 1.284 [1.234–1.286], n=5 | see previous report |
+| preview7-D-cube-still | 1.284 [1.234–1.286], n=5 | comparison not published |
 | preview7-D-cube-video | 3.062 [2.949–3.321], n=3 | unmeasured |
-| preview7-B-blocking-still | 1.030 [1.029–1.078], n=5 | see previous report |
+| preview7-B-blocking-still | 1.030 [1.029–1.078], n=5 | comparison not published |
 | preview7-B-blocking-video | 3.496 [3.495–3.498], n=3 | unmeasured |
-| preview7-B-interior-still | 1.337 [1.234–1.433], n=5 | see previous report |
+| preview7-B-interior-still | 1.337 [1.234–1.433], n=5 | comparison not published |
 | preview7-B-interior-video | 4.565 [4.507–4.659], n=3 | unmeasured |
-| preview7-B-car-pan-still | 1.285 [1.234–1.340], n=5 | see previous report |
+| preview7-B-car-pan-still | 1.285 [1.234–1.340], n=5 | comparison not published |
 | preview7-B-car-pan-video | 6.391 [6.187–6.584], n=3 | unmeasured |
-| preview7-B-night-still | 1.333 [1.282–1.389], n=5 | see previous report |
+| preview7-B-night-still | 1.333 [1.282–1.389], n=5 | comparison not published |
 | preview7-B-night-video | 5.864 [5.808–5.931], n=3 | unmeasured |
-| preview7-C-ToyCar-still | 1.542 [1.485–1.591], n=5 | see previous report |
+| preview7-C-ToyCar-still | 1.542 [1.485–1.591], n=5 | comparison not published |
 | preview7-C-ToyCar-video | 4.107 [4.103–4.158], n=3 | unmeasured |
-| preview7-C-SheenChair-still | 1.030 [1.029–1.032], n=5 | see previous report |
+| preview7-C-SheenChair-still | 1.030 [1.029–1.032], n=5 | comparison not published |
 | preview7-C-SheenChair-video | 3.013 [2.947–3.043], n=3 | unmeasured |
-| repo-B-crowd-previs-still | 1.132 [1.079–1.185], n=5 | see previous report |
+| repo-B-crowd-previs-still | 1.132 [1.079–1.185], n=5 | comparison not published |
 | repo-B-crowd-previs-video | 4.097 [4.056–4.267], n=3 | unmeasured |
-| repo-B-push-in-previs-still | 1.385 [1.337–1.434], n=5 | see previous report |
+| repo-B-push-in-previs-still | 1.385 [1.337–1.434], n=5 | comparison not published |
 | repo-B-push-in-previs-video | 3.705 [3.700–3.711], n=3 | unmeasured |
-| repo-B-rack-focus-previs-still | 1.285 [1.233–1.388], n=5 | see previous report |
+| repo-B-rack-focus-previs-still | 1.285 [1.233–1.388], n=5 | comparison not published |
 | repo-B-rack-focus-previs-video | 3.902 [3.799–3.907], n=3 | unmeasured |
-| repo-B-street-previs-still | 1.283 [1.231–1.391], n=5 | see previous report |
+| repo-B-street-previs-still | 1.283 [1.231–1.391], n=5 | comparison not published |
 | repo-B-street-previs-video | 3.964 [3.953–4.061], n=3 | unmeasured |
-| repo-B-turntable-previs-still | 1.334 [1.333–1.341], n=5 | see previous report |
+| repo-B-turntable-previs-still | 1.334 [1.333–1.341], n=5 | comparison not published |
 | repo-B-turntable-previs-video | 4.612 [4.563–4.712], n=3 | unmeasured |
-| repo-B-walking-previs-still | 1.346 [1.281–1.441], n=5 | see previous report |
+| repo-B-walking-previs-still | 1.346 [1.281–1.441], n=5 | comparison not published |
 | repo-B-walking-previs-video | 2.190 [2.190–2.238], n=3 | unmeasured |
 
 ## Carried-forward std/path
@@ -137,4 +136,4 @@ Three complete movies per shot. Skim 192 frames, dive 240, reveal 288, at 24 fps
 | D-cube | 9.253 [9.156–9.604], n=5 | 2.558 | 3.62× slower |
 | D-Duck | 10.008 [9.349–10.715], n=5 | unmeasured | unmeasured |
 
-Path timings originated in frozen-44ccb8d57 and were already carried forward by frozen-04a1a993a. They are not measured on this commit.
+These path timings were measured on an earlier build, not the renderer identified above. Re-run both tools with the supplied inputs before drawing conclusions about current performance.

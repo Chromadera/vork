@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "materials": {
+    "floor": {"inputs": {"base_color": [0, 0, 0], "specular_roughness": 0.4}},
+    "source": {"inputs": {"base_color": [0, 0, 0], "specular_weight": 0, "emission_color": [1, 1, 1], "emission_luminance": 3000}}
+  },
+  "nodes": [
+    {"type": "mesh", "name": "floor", "geometry": {"std": "grid", "size": [20, 20]}, "materials": ["floor"]},
+    {"type": "mesh", "name": "source", "geometry": {"std": "grid", "size": [0.02, 0.02]}, "materials": ["source"], "translation": [0, 2, -4], "rotation": [1, 0, 0, 0]},
+    {"type":"camera","name":"camera","translation":[0,2,4],"target":[0,0,0],"material":{"program":"std/camera","inputs":{"lens":50}}}
+  ],
+  "render": {"resolution": [32, 24], "background": [0, 0, 0]}
+}

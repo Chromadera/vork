@@ -6,7 +6,7 @@ highlights can narrow or change brightness; ray-camera effects can remain grainy
 Judge the finished lighting with final or path.
 std/draft: 4 samples with scene-ray indirect lighting and OIDN denoising.
 std/final: 8 samples, the default; scene-ray lighting and OIDN denoising.
-std/path: accuracy, especially interiors, indirect lighting, glass and caustics.
+std/path: 4096 samples; accuracy, especially interiors, indirect lighting, glass and caustics.
 Draft, final and path denoise with bundled OIDN by default. --set denoise=false uses the profile
 reconstruction (raw path samples for path); --set seed=42 makes sampling repeatable on the same backend.
 --set samples=N overrides the profile budget (1..4096); more samples means cleaner and slower.

@@ -22,7 +22,8 @@ Scene geometry builders remain available.
 
 
 `text` is a native std loader: it reads the supplied TrueType/OpenType font with
-MIT/Apache-2.0 ttf-parser and tessellates outlines with MIT/Apache-2.0 Lyon. It emits
+MIT xberg-ttf-parser (the maintained ttf-parser fork) and tessellates outlines with
+MIT/Apache-2.0 Lyon. It emits
 ordinary buffer/geometry fragments, with counters, kerning, multiline alignment,
 extrusion and rounded bevels. The QuickJS runtime keeps no host bindings.
 `text(name, options)` in the Node SDK calls the installed `vork std text` loader;

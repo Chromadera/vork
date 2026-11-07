@@ -1,10 +1,14 @@
 import unittest
 from typing import get_args, get_type_hints, is_typeddict
-from vork import std, render_arguments
+from vork import std, _render_arguments as render_arguments
 import vork.types as types
 
 
 class GeneratedTypes(unittest.TestCase):
+    def test_argv_builder_is_private(self):
+        import vork
+        self.assertFalse(hasattr(vork, "render_arguments"))
+
     def test_all_references_resolve(self):
         for value in vars(types).values():
             if is_typeddict(value):

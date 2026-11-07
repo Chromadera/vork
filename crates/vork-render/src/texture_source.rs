@@ -109,6 +109,7 @@ mod tests {
     /// harness's format selector). Each aborted, panicked, took gigabytes or ran for
     /// tens of seconds; each is now refused with its cause or returns its panic.
     #[test]
+    #[cfg(vork_private_tests)]
     fn malformed_images_are_refused_before_decoding_or_contained() {
         let seeds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vork-fuzz/seeds/image");
         let mut cases = vec![

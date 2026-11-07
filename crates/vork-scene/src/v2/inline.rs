@@ -154,7 +154,7 @@ mod tests {
             "version":2,"nodes":[{"type":"camera","name":"camera"}],
             "render":{"display":{"program":"blender/filmic","inputs":{
                 "lut":{"image":{"render":{"camera":"camera","compositor":[{
-                    "program":"post/glare","inputs":{"texture":{"image":{"file":"lut.exr"}}}
+                    "program":"post/white_balance","inputs":{"texture":{"image":{"file":"lut.exr"}}}
                 }]}}}
             }}}
         })).unwrap()).unwrap();
@@ -180,20 +180,20 @@ mod tests {
     #[test]
     fn inline_render_images_lower_their_compositors_recursively() {
         let image = serde_json::json!({"render":{"camera":"capture","root":"empty",
-            "compositor":[{"program":"post/glare"}]}});
+            "compositor":[{"program":"post/white_balance"}]}});
         for document in [
             serde_json::json!({"version":2,"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"}],
                 "materials":{"surface":{"inputs":{"base_color":{"image":image}}}}}),
             serde_json::json!({"version":2,"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"},
                 {"type":"light","shape":"environment","material":{"program":"std/environment_image","inputs":{"image":{"image":image}}}}]}),
             serde_json::json!({"version":2,"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"}],
-                "render":{"compositor":[{"program":"post/glare","inputs":{"texture":{"image":image}}}]}}),
+                "render":{"compositor":[{"program":"post/white_balance","inputs":{"texture":{"image":image}}}]}}),
         ] {
             let loaded = Scene::from_json(&serde_json::to_vec(&document).unwrap());
             let scene=loaded.unwrap();
             let image = scene.images.values().next().unwrap().render.as_ref().unwrap();
             assert_eq!(image.compositor.len(), 1);
-            assert_eq!(scene.materials[image.compositor[0].material()].program, "post/glare");
+            assert_eq!(scene.materials[image.compositor[0].material()].program, "post/white_balance");
         }
     }
     #[test]

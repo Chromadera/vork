@@ -60,15 +60,6 @@ const ROUNDED_BOX_SEGMENTS = 8;
  * turning by more than this is sharp (split normals); gentler corners share a smooth normal.
  * vork-std's native extrude repeats it (crates/vork-std/src/extrude.rs). */
 const SMOOTH_ANGLE_DEGREES = 30;
-/** Numerical Recipes uint32 LCG: reproducible seeded sampling across host languages. */
-const LCG_MULTIPLIER = 1664525;
-const LCG_INCREMENT = 1013904223;
-/** Exact uint32 range used to normalize seeded random values to [0,1). */
-const UINT32_RANGE = 4294967296;
-/** MurmurHash3 fmix32 avalanche constants decorrelate adjacent author seeds. */
-const SEED_MIX_MULTIPLIER_A = 0x85ebca6b;
-const SEED_MIX_MULTIPLIER_B = 0xc2b2ae35;
-const SEED_MIX_SHIFTS = [16, 13, 16];
 /** SDK authoring choice: externalize buffers of at least 4 KiB to keep scene JSON readable. */
 const BINARY_BUFFER_MIN_BYTES = 4096;
 
@@ -81,18 +72,6 @@ function unit(v) {
 }
 function cross(a, b) {
     return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-}
-
-
-/** Internal deterministic generator; fmix32 decorrelates adjacent author seeds before the LCG. */
-function seededRandom(seed) {
-    if (!Number.isInteger(seed) || seed < 0 || seed >= UINT32_RANGE)
-        throw new RangeError('seed must be a uint32');
-    let state = seed;
-    state = Math.imul(state ^ (state >>> SEED_MIX_SHIFTS[0]), SEED_MIX_MULTIPLIER_A);
-    state = Math.imul(state ^ (state >>> SEED_MIX_SHIFTS[1]), SEED_MIX_MULTIPLIER_B);
-    state = (state ^ (state >>> SEED_MIX_SHIFTS[2])) >>> 0;
-    return () => { state = (Math.imul(state, LCG_MULTIPLIER) + LCG_INCREMENT) >>> 0; return state / UINT32_RANGE; };
 }
 
 
@@ -492,132 +471,6 @@ function revolve(name = "revolve", { profile, segments: count = SHAPE_LONGITUDES
     return mesh.finish(name);
 }
 
-
-
-
-function positiveInteger(value, field) {
-    if (!Number.isSafeInteger(value) || value < 1)
-        throw new RangeError(`${field} must be a positive safe integer`);
-    return value;
-}
-function finish(name, transforms) {
-    checkName(name, 'instance name');
-    const translation = `${name}_translation`, rotation = `${name}_rotation`;
-    const quaternions = transforms.map(m => {
-        const diagonal = [m[0], m[5], m[10]];
-        const trace = diagonal[0] + diagonal[1] + diagonal[2];
-        const q = [0, 0, 0, 0];
-        if (trace > 0) {
-            const s = 2 * Math.sqrt(1 + trace);
-            q[0] = (m[6] - m[9]) / s;
-            q[1] = (m[8] - m[2]) / s;
-            q[2] = (m[1] - m[4]) / s;
-            q[3] = s / 4;
-        }
-        else {
-            const i = diagonal.indexOf(Math.max(...diagonal)), j = (i + 1) % 3, k = (i + 2) % 3;
-            const s = 2 * Math.sqrt(1 + diagonal[i] - diagonal[j] - diagonal[k]);
-            q[i] = s / 4;
-            q[j] = (m[j * 4 + i] + m[i * 4 + j]) / s;
-            q[k] = (m[k * 4 + i] + m[i * 4 + k]) / s;
-            q[3] = (m[j * 4 + k] - m[k * 4 + j]) / s;
-        }
-        const length = Math.hypot(...q);
-        return q.map(v => v / length);
-    });
-    return { buffers: {
-            [translation]: { type: 'vec3', data: transforms.map(m => m.slice(12, 15)) },
-            [rotation]: { type: 'vec4', data: quaternions },
-        }, instances: { attributes: { TRANSLATION: translation, ROTATION: rotation } } };
-}
-/** Uniform area sampling over one inline triangle geometry; local +Y follows the face normal.
- * Transforms use the source geometry's local space; give the instanced node the surface
- * node's transform, or parent it under that node. The seed is a uint32. */
-function scatter(onGeometry, count, seed, name) {
-    positiveInteger(count, 'count');
-    const random = seededRandom(seed);
-    const geometries = Object.values(onGeometry.geometry);
-    if (geometries.length !== 1)
-        throw new RangeError('scatter requires exactly one geometry');
-    const geometry = geometries[0];
-    name ??= `${Object.keys(onGeometry.geometry)[0]}_scatter`;
-    checkName(name, 'instance name');
-    if (geometry.topology !== undefined && geometry.topology !== 'triangles')
-        throw new RangeError('scatter requires triangle topology');
-    const position = geometry.attributes.POSITION;
-    const source = typeof position === 'string' ? onGeometry.buffers[position] : position;
-    if (!source || source.type !== 'vec3' || !source.data || source.file)
-        throw new RangeError('scatter requires inline vec3 positions');
-    const numbers = (value) => {
-        if (typeof value === 'number' && Number.isFinite(value))
-            return [value];
-        if (Array.isArray(value))
-            return value.flatMap(numbers);
-        throw new RangeError('scatter buffers require finite numeric data');
-    };
-    if ((source.offset ?? 0) !== 0 || source.count != null)
-        throw new RangeError('inline scatter buffers cannot have offset/count');
-    const positionRows = Array.from(source.data, numbers);
-    if (!positionRows.every(row => row.length === 3))
-        throw new RangeError('scatter positions require vec3 elements');
-    const positions = positionRows.flat();
-    if (positions.length % 3 !== 0)
-        throw new RangeError('scatter positions require complete vec3 elements');
-    let indices;
-    if (geometry.indices) {
-        const buffer = typeof geometry.indices === 'string' ? onGeometry.buffers[geometry.indices] : geometry.indices;
-        if (!buffer || buffer.type !== 'u32' || !buffer.data || buffer.file)
-            throw new RangeError('scatter requires inline u32 indices');
-        if ((buffer.offset ?? 0) !== 0 || buffer.count != null)
-            throw new RangeError('inline scatter buffers cannot have offset/count');
-        const rows = Array.from(buffer.data, numbers);
-        if (!rows.every(row => row.length === 1))
-            throw new RangeError('scatter indices require scalar elements');
-        indices = rows.flat();
-    }
-    else
-        indices = Array.from({ length: positions.length / 3 }, (_, i) => i);
-    if (indices.length % 3 !== 0 || !indices.every(i => Number.isInteger(i) && i >= 0 && i < positions.length / 3))
-        throw new RangeError('scatter indices require complete triangles of valid vertex indices');
-    const vertex = (i) => positions.slice(i * 3, i * 3 + 3);
-    const sub = (a, b) => a.map((v, k) => v - b[k]);
-    const triangles = [];
-    let area = 0;
-    for (let i = 0; i < indices.length; i += 3) {
-        const a = vertex(indices[i]), b = vertex(indices[i + 1]), c = vertex(indices[i + 2]);
-        const normal = cross(sub(b, a), sub(c, a)), weight = Math.hypot(...normal) / 2;
-        if (!Number.isFinite(weight))
-            throw new RangeError('scatter triangle area is not finite');
-        if (weight === 0)
-            continue;
-        area += weight;
-        if (!Number.isFinite(area))
-            throw new RangeError('scatter surface area is not finite');
-        triangles.push({ a, b, c, normal: unit(normal), end: area });
-    }
-    if (area === 0)
-        throw new RangeError('scatter requires nonzero surface area');
-    const transforms = [];
-    for (let i = 0; i < count; i++) {
-        const target = random() * area;
-        let lo = 0, hi = triangles.length - 1;
-        while (lo < hi) {
-            const mid = (lo + hi) >>> 1;
-            if (triangles[mid].end <= target)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-        const { a, b, c, normal } = triangles[lo];
-        const u = Math.sqrt(random()), v = random();
-        const p = a.map((x, k) => x * (1 - u) + b[k] * u * (1 - v) + c[k] * u * v);
-        const reference = Math.abs(normal[0]) < Math.abs(normal[2]) ? [1, 0, 0] : [0, 0, 1];
-        const right = unit(cross(normal, reference)), forward = cross(right, normal);
-        transforms.push([...right, 0, ...normal, 0, ...forward, 0, ...p, 1]);
-    }
-    return finish(name, transforms);
-}
-
 const stdFunctions = {"box": {keys:["name","size"], required:[], invoke: args => (({name,...options}) => box(name,options))(args)},
 "sphere": {keys:["name","radius","segments","rings"], required:[], invoke: args => (({name,...options}) => sphere(name,options))(args)},
 "cylinder": {keys:["name","radius","height","segments"], required:[], invoke: args => (({name,...options}) => cylinder(name,options))(args)},
@@ -626,8 +479,7 @@ const stdFunctions = {"box": {keys:["name","size"], required:[], invoke: args =>
 "capsule": {keys:["name","radius","height","segments","rings"], required:[], invoke: args => (({name,...options}) => capsule(name,options))(args)},
 "rounded_box": {keys:["name","size","radius","segments"], required:[], invoke: args => (({name,...options}) => roundedBox(name,options))(args)},
 "grid": {keys:["name","size","segments"], required:[], invoke: args => (({name,...options}) => grid(name,options))(args)},
-"revolve": {keys:["name","profile","segments"], required:["profile"], invoke: args => (({name,...options}) => revolve(name,options))(args)},
-"scatter": {keys:["on_geometry","count","seed","name"], required:["on_geometry","count","seed"], invoke: args => scatter(args["on_geometry"],args["count"],args["seed"],args["name"])}};
+"revolve": {keys:["name","profile","segments"], required:["profile"], invoke: args => (({name,...options}) => revolve(name,options))(args)}};
 function stdEvaluate(name,args) {
   if (!Object.hasOwn(stdFunctions,name)) throw new Error('unknown standard-library function '+name+'; see vork help std');
   const fn=stdFunctions[name];

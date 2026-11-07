@@ -240,8 +240,12 @@ impl SlangForward {
             if stage.composes() && self.msaa {kernel_defines.push("-DVORK_RASTER_MSAA".into());}
         }
 
-        // Bound the path optimization graph on both native backends. Vulkan's
-        // SPIR-V handoff restores driver inlining; Metal keeps these boundaries.
+        // Bound the lighting graph for triangle-only Vulkan GI and the path graph
+        // on both native backends. Vulkan restores driver inlining at the
+        // SPIR-V handoff; Metal keeps these boundaries.
+        let surface_outlining = !self.metal && !self.scene.field_controls && self.scene.medium.is_none()
+            && matches!(kernel, Some(ProgramKernel::Gi {..}));
+        if surface_outlining {kernel_defines.push("-DVORK_SURFACE_SLANG_OUTLINE".into());}
         let path_outlining = matches!(kernel, Some(ProgramKernel::Path {..}));
         if path_outlining {
             kernel_defines.extend([NATIVE_OPTIMIZATION.to_owned(), "-DVORK_PATH_SLANG_OUTLINE".into()]);
@@ -376,6 +380,67 @@ impl SlangForward {
             match main { "decoupled_programs" => Some(15), _ => None }
         } else {None};
         let denoise=self.scene.denoise && matches!(entry.0,"controls_fs"|"transparent_controls_fs");
+        let mut modules = native::SOURCES.to_vec();
+        for (name, source) in &program_modules {
+            if let Some(module)=modules.iter_mut().find(|(n,_)|*n==name) {*module=(name,source);} else {modules.push((name,source));}
+        }
+        if let Some(text) = text {
+            modules.push((main, text));
+        }
+        let mut include: Vec<String> = if secondary {all_programs} else {programs}
+            .map_or(&[][..], |p| &p.include[..])
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect();
+        if let Some(environment)=&self.scene.environment {include.extend(environment.include.iter().map(|p|p.display().to_string()));}
+        if let Some(p)=&self.scene.propagation {include.extend(p.include.iter().map(|p|p.display().to_string()));}
+        if let Some(camera)=&self.scene.camera {include.extend(camera.include.iter().map(|p|p.display().to_string()));}
+        if let Some(native)=path_medium.or(refraction_medium).or(reflection_medium).or(diffuse_medium).or(surface_medium) {include.extend(native.includes.iter().map(|p|p.display().to_string()));}
+        let query_defines:Vec<_> = if self.metal && entry.1=="vertex" {
+            vec!["-DVORK_MATERIAL_WORDS_REGISTER=t2","-DVORK_FRAME_LIGHTS_REGISTER=t30"]
+        }else{Vec::new()};
+        let kernel_module = match main {
+            "gi_programs" => "gi_ray",
+            "reflections_programs" => "reflections_hits", "probe_programs" => "probe_update",
+            "path_programs_main" | "path_programs_fixed" => "path", _ => "",
+        };
+        let mut native_registers = if self.metal {
+            crate::forward_variant::hit_kernel_registers(kernel_module,
+                adaptive,
+                main == "probe_programs" || (self.scene.probes && matches!(main,"gi_programs"|"reflections_programs")))
+        } else {Vec::new()};
+        if let Some(first) = probe_register {
+            native_registers.extend(crate::forward_variant::probe_registers(first));
+        }
+        let args: Vec<&str> = ["-target", target]
+            .into_iter()
+            .chain(SLANG_FLAGS.iter().copied())
+            .chain(flags.iter().copied())
+            .chain(native_registers.iter().map(String::as_str))
+            .chain(program_coverage.then_some("-DVORK_PROGRAM_COVERAGE"))
+            .chain(kernel_defines.iter().map(String::as_str))
+            .chain(query_defines.iter().copied())
+
+            .chain(visibility_medium.is_some().then_some("-DVORK_VOLUME_VISIBILITY"))
+            .chain((self.ray_shadows || (main=="decoupled_programs" && self.scene.ray_refraction)).then_some("-DVORK_RAY_BINDINGS"))
+            .chain((main=="decoupled_programs" && self.scene.ray_refraction).then_some("-DVORK_RAY_REFRACTION"))
+            .chain(denoise.then_some("-DVORK_DENOISE"))
+            .chain(probes.then_some("-DVORK_PROBES"))
+            .chain(fibre.then_some("-DVORK_FIBRE"))
+            .chain(fibre.then_some(fibre_binding))
+            .chain(probes.then_some(probe_binding.as_str()))
+            .chain((self.scene.attributes > 0).then_some(define.as_str()))
+            .chain(include.iter().flat_map(|d| ["-I", d.as_str()]))
+            .collect();
+        let compiler=vork_slang::Compiler::discover();
+        let identities=(if secondary {all_programs} else {programs}).map(|p|p.identities.clone()).unwrap_or_default();
+        let (identity,prepared)=if probe {
+            let Some(identity)=programs::cached_native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities)? else {return Ok(Lookup::Absent);};
+            (identity,None)
+        } else {
+            programs::native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities)?
+        };
+        if let Some(programs)=if secondary {all_programs} else {programs} {for input in &programs.inputs {identity.verify(input)?;}}
         let mut hash = blake3::Hasher::new();
         if self.scene.field_controls {hash.update(b"field-driver-inline-v1");}
         if refraction_medium.is_some() || reflection_medium.is_some() || diffuse_medium.is_some() || surface_medium.is_some() {hash.update(b"medium-driver-inline-v1");}
@@ -393,74 +458,20 @@ impl SlangForward {
         if fibre {hash.update(fibre_binding.as_bytes());}
         // Embedded renderer modules and compiler inputs have a shader-only
         // content identity in the store, independent of host builds/devices.
-        for (name, source) in &program_modules {
-            hash.update(name.as_bytes());
-            hash.update(source.as_bytes());
-        }
+        hash.update(&identity.identity);
         let path = (self.cache)(hash.finalize());
         if probe {return Ok(if disk_cache::read(&path).is_some() {Lookup::Stored} else {Lookup::Absent});}
         let code = match disk_cache::read(&path) {
             Some(code) => code,
             None => {
-                let mut modules = native::SOURCES.to_vec();
-                for (name, source) in &program_modules {
-                    if let Some(module)=modules.iter_mut().find(|(n,_)|*n==name) {*module=(name,source);} else {modules.push((name,source));}
-                }
-                if let Some(text) = text {
-                    modules.push((main, text));
-                }
-                let mut include: Vec<String> = if secondary {all_programs} else {programs}
-                    .map_or(&[][..], |p| &p.include[..])
-                    .iter()
-                    .map(|d| d.display().to_string())
-                    .collect();
-                if let Some(environment)=&self.scene.environment {include.extend(environment.include.iter().map(|p|p.display().to_string()));}
-                if let Some(p)=&self.scene.propagation {include.extend(p.include.iter().map(|p|p.display().to_string()));}
-                if let Some(camera)=&self.scene.camera {include.extend(camera.include.iter().map(|p|p.display().to_string()));}
-                if let Some(native)=path_medium.or(refraction_medium).or(reflection_medium).or(diffuse_medium).or(surface_medium) {include.extend(native.includes.iter().map(|p|p.display().to_string()));}
-                let query_defines:Vec<_> = if self.metal && entry.1=="vertex" {
-                    vec!["-DVORK_MATERIAL_WORDS_REGISTER=t2","-DVORK_FRAME_LIGHTS_REGISTER=t30"]
-                }else{Vec::new()};
-                let kernel_module = match main {
-                    "gi_programs" => "gi_ray",
-                    "reflections_programs" => "reflections_hits", "probe_programs" => "probe_update",
-                    "path_programs_main" | "path_programs_fixed" => "path", _ => "",
-                };
-                let mut native_registers = if self.metal {
-                    crate::forward_variant::hit_kernel_registers(kernel_module,
-                        adaptive,
-                        main == "probe_programs" || (self.scene.probes && matches!(main,"gi_programs"|"reflections_programs")))
-                } else {Vec::new()};
-                if let Some(first) = probe_register {
-                    native_registers.extend(crate::forward_variant::probe_registers(first));
-                }
-                let args: Vec<&str> = ["-target", target]
-                    .into_iter()
-                    .chain(SLANG_FLAGS.iter().copied())
-                    .chain(flags.iter().copied())
-                    .chain(native_registers.iter().map(String::as_str))
-                    .chain(program_coverage.then_some("-DVORK_PROGRAM_COVERAGE"))
-                    .chain(kernel_defines.iter().map(String::as_str))
-                    .chain(query_defines.iter().copied())
-
-                    .chain(visibility_medium.is_some().then_some("-DVORK_VOLUME_VISIBILITY"))
-                    .chain((self.ray_shadows || (main=="decoupled_programs" && self.scene.ray_refraction)).then_some("-DVORK_RAY_BINDINGS"))
-                    .chain((main=="decoupled_programs" && self.scene.ray_refraction).then_some("-DVORK_RAY_REFRACTION"))
-                    .chain(denoise.then_some("-DVORK_DENOISE"))
-                    .chain(probes.then_some("-DVORK_PROBES"))
-                    .chain(fibre.then_some("-DVORK_FIBRE"))
-                    .chain(fibre.then_some(fibre_binding))
-                    .chain(probes.then_some(probe_binding.as_str()))
-                    .chain((self.scene.attributes > 0).then_some(define.as_str()))
-                    .chain(include.iter().flat_map(|d| ["-I", d.as_str()]))
-                    .collect();
-                let entries=vec![entry];
                 let start=std::time::Instant::now();
-                let mut code = vork_slang::Compiler::discover().compile_modules(&modules,main,&entries,&args)?;
+                let prepared=match prepared {Some(input)=>input,None=>compiler.prepare_identified_modules(&modules,main,&[entry],&args,&identities)?};
+                anyhow::ensure!(prepared.identity()==identity.identity,"Slang inputs changed during cache lookup; retry the command");
+                let mut code = prepared.compile()?;
                 if self.metal && matches!(kernel,Some(ProgramKernel::Decoupled {stage:ShadeStage::Evaluate,..})) {
                     code=crate::camera_native::inline_metal_functions(&code);
                 }
-                if (self.scene.field_controls || path_outlining || refraction_medium.is_some() || reflection_medium.is_some() || diffuse_medium.is_some() || surface_medium.is_some()) && !self.metal { allow_driver_inlining(&mut code)?; }
+                if (self.scene.field_controls || surface_outlining || path_outlining || refraction_medium.is_some() || reflection_medium.is_some() || diffuse_medium.is_some() || surface_medium.is_some()) && !self.metal { allow_driver_inlining(&mut code)?; }
                 crate::timing::creation(&self.device,label,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
                 let _ = disk_cache::write(&path, &code);
                 code
@@ -545,6 +556,9 @@ impl SlangForward {
     /// transport (ray refraction, program shadow coverage, fibres) can reach one.
     /// Then no table kernel grows with the scene's program count.
     fn table_programs(&self,kernel:Option<crate::pipelines::ProgramKernel>)->Option<&programs::Native> {
+        // Composition consumes stored closures and explicitly calls NoPrograms.
+        // Do not import the scene dispatcher merely to define an unused type.
+        if matches!(kernel,Some(crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::Compose,..})) {return None;}
         let table=matches!(kernel,Some(crate::pipelines::ProgramKernel::Decoupled {stage,..}) if stage.table());
         self.scene.programs.as_deref().filter(|_|!table || self.transport_programs())
     }

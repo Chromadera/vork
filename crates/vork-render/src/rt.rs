@@ -60,7 +60,6 @@ pub(crate) fn gi_layout(
     d: &wgpu::Device,
     materials: &wgpu::BindGroupLayout,
     probes: bool,
-    medium: bool,
 ) -> wgpu::PipelineLayout {
     let entries = gi_entries();
     let group = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -69,17 +68,17 @@ pub(crate) fn gi_layout(
     });
     d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ray GI layout"),
-        bind_group_layouts: &[Some(&group), Some(materials), probes.then(|| crate::probes::read_layout(d)).as_ref(), Some(&gi_read_layout(d,medium))],
+        bind_group_layouts: &[Some(&group), Some(materials), probes.then(|| crate::probes::read_layout(d)).as_ref(), Some(&gi_read_layout(d))],
         immediate_size: 0,
     })
 }
-pub(crate) fn gi_read_entries(medium:bool)->Vec<wgpu::BindGroupLayoutEntry> {
+pub(crate) fn gi_read_entries()->Vec<wgpu::BindGroupLayoutEntry> {
     let mut entries=vec![hit_buffers_entry(0,wgpu::ShaderStages::COMPUTE)];
-    if medium {entries.push(pipelines::buffer_entry(1,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false}));}
+    entries.push(pipelines::buffer_entry(1,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false}));
     entries
 }
-pub(crate) fn gi_read_layout(d:&wgpu::Device,medium:bool)->wgpu::BindGroupLayout {
-    d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("GI hit and accumulation buffers"),entries:&gi_read_entries(medium)})
+pub(crate) fn gi_read_layout(d:&wgpu::Device)->wgpu::BindGroupLayout {
+    d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("GI hit and accumulation buffers"),entries:&gi_read_entries()})
 }
 /// Group 3 of hit-shading compute kernels: only the hit buffer array (wgpu
 /// keeps binding arrays out of groups with uniform buffers; group 2 is the
@@ -520,10 +519,10 @@ pub(crate) fn normalize_materials(scene: &mut Scene) {
         for input in ["geometry_opacity", "alpha_cutoff"] {
             if (input!="alpha_cutoff" || material.program=="std/openpbr") && matches!(material.inputs.get(input), Some(vork_scene::v2::Input::Attribute(_))) {
                 if material.program=="std/openpbr" {
+                    crate::warnings::dropped("ray_opacity_attribute", serde_json::json!({"material":name,"input":input,"binding":material.inputs.get(input)}), format!("warning: material {name}: ignored named {input} attribute for ray visibility; using the program default"));
                     material.inputs.remove(input);
-                    eprintln!("warning: material {name}: ignored named {input} attribute for ray visibility; using the program default");
                 } else {
-                    eprintln!("warning: material {name}: ignored custom surface with named {input} attribute for ray visibility; using default OpenPBR surface");
+                    crate::warnings::dropped("ray_surface_attribute", serde_json::json!({"material":name,"surface":material,"input":input,"tracks":scene.animation.iter().flat_map(|layer|layer.tracks.iter().flatten()).filter(|track|matches!(track.path.as_slice(),[root,target,..] if root=="materials" && target==name)).collect::<Vec<_>>()}), format!("warning: material {name}: ignored custom surface and its material animation with named {input} attribute for ray visibility; using default OpenPBR surface"));
                     *material=serde_json::from_value(serde_json::json!({})).expect("default material");
                     discarded.insert(name.clone());
                     break;
@@ -877,6 +876,15 @@ fn geometry_key(draw: &install::Draw) -> (wgpu::Buffer,wgpu::Buffer,u64,u64,u32,
     (draw.vertices.clone(),draw.indices.clone(),draw.vertex_offset,draw.index_offset,
         draw.count,draw.vertex_count,draw.layout.vertex_stride(),draw.ray_corners.is_some())
 }
+/// A shared position stream still needs separate BLAS for distinct topology or
+/// coverage flags. Static geometry retains its installed ownership separately.
+fn evaluated_owners(draws: &[install::Draw]) -> Vec<usize> {
+    let mut geometries = std::collections::HashMap::new();
+    draws.iter().enumerate().map(|(i, draw)| {
+        if !draw.evaluated() { return i; }
+        *geometries.entry((draw.evaluation_leader().unwrap_or(i), geometry_key(draw))).or_insert(i)
+    }).collect()
+}
 fn triangles_size(draw: &install::Draw) -> wgpu::BlasTriangleGeometrySizeDescriptor {
     triangles(draw.ray_corners.is_some(),draw.vertex_count,draw.count)
 }
@@ -1086,12 +1094,16 @@ impl FrameRays {
     pub(crate) fn new(s: &InstalledScene, r: &Renderer, objects: &wgpu::Buffer) -> Result<Option<Self>> {
         let d=&r.device;
         let Some(installed) = s.rays.as_ref() else {return Ok(None);};
+        // Evaluated positions can be shared by draws with different index ranges.
+        // Own BLAS by the complete geometry identity, not just the pose leader.
+        let owners = evaluated_owners(&s.draws);
         let deformed: Vec<Option<(wgpu::BlasTriangleGeometrySizeDescriptor, wgpu::Blas)>> = s
             .draws
             .iter()
             .zip(&installed.alpha_tested)
-            .map(|(draw, &alpha_tested)| {
-                if !draw.evaluated() {return None;}
+            .enumerate()
+            .map(|(i, (draw, &alpha_tested))| {
+                if !draw.evaluated() || owners[i] != i {return None;}
                 let size = triangles(alpha_tested, draw.vertex_count, draw.count);
                 let built = blas(d, "deformed primitive BLAS", &size);
                 Some((size, built))
@@ -1108,7 +1120,7 @@ impl FrameRays {
                 let instances:Vec<_>=installed.instances.iter().enumerate().map(|(slot,&(draw,object))| {
                     let blas=visibility_blas.get(&slot).copied()
                         .or(installed.blas[draw].as_ref())
-                        .or_else(||deformed[draw].as_ref().map(|(_,b)|b)).expect("ray instance BLAS");
+                        .or_else(||deformed[owners[draw]].as_ref().map(|(_,b)|b)).expect("ray instance BLAS");
                     (object,!s.materials[s.draws[draw].material].transparent,s.draws[draw].implicit.is_none(),installed.shadow_solids[slot],blas.clone())
                 }).collect();
                 crate::gpu_tlas::Placement::new(r,objects,&instances,&installed.placement_pipeline)
@@ -1126,14 +1138,19 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
     };
     // The slot's first sample builds everything; later ones follow the uploads.
     let first = f.changes.changed(values::ChangeKey::RayStructures, &[1]);
-    let uploads = &f.changes.uploads;
-    let uploaded = |buffer: &wgpu::Buffer| uploads.iter().any(|u| &u.0 == buffer);
+    let uploaded = |buffer: &wgpu::Buffer| f.changes.buffer_dirty(buffer);
     // CPU subdivision uploads its evaluated poses with fixed skin parameters.
     // Those vertex changes invalidate the same deformed BLAS as GPU skin/morphs.
-    let deform_changed = f.computed_geometry.iter().enumerate().any(|(i,g)|g.is_some() && f.changes.dirty(values::ChangeKey::ComputedPositions(i))) || first
-        || f.skin.iter().flatten().any(|d| uploaded(&d.params))
-        || f.subdivision_morphs.iter().flatten().any(uploaded)
-        || f.displacements.iter().flatten().any(|frame|frame.dirty(&f.changes));
+    let dirty_geometry: Vec<bool> = s.draws.iter().enumerate().map(|(i, draw)| {
+        // Static draws and aliases own no evaluated BLAS to invalidate.
+        if rays.deformed[i].is_none() {return false;}
+        let i = draw.displacement_leader.unwrap_or(i);
+        first || f.changes.dirty(values::ChangeKey::ComputedPositions(i))
+            || f.skin[i].as_ref().is_some_and(|d| uploaded(&d.params) || uploaded(&d.previous_params))
+            || f.subdivision_morphs[i].as_ref().is_some_and(uploaded)
+            || f.displacements.get(i).and_then(|frame| frame.as_ref()).is_some_and(|frame| frame.dirty(&f.changes))
+    }).collect();
+    let deform_changed = rays.deformed.iter().zip(&dirty_geometry).any(|(blas, dirty)| blas.is_some() && *dirty);
     let placement_changed = if rays.placement.is_some() {
         let changed=rays.placement_revision != f.changes.placement_revision;
         rays.placement_revision=f.changes.placement_revision;
@@ -1157,7 +1174,7 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
         .deformed
         .iter()
         .enumerate()
-        .filter(|_| deform_changed)
+        .filter(|(index, _)| dirty_geometry[*index])
         .filter_map(|(index, deformed)| {
             let (size, blas) = deformed.as_ref()?;
             let draw = &s.draws[index];

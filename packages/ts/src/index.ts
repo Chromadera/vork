@@ -1,6 +1,7 @@
 import { mkdir, open, rename, rm, realpath, lstat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve, relative, basename } from 'node:path';
+import { resourceSlots } from './resource-slots.js';
 import type { Scene } from './schema.js';
 import { externalBuffers } from './lib/buffers.js';
 export type * from './schema.js';
@@ -21,49 +22,29 @@ async function withAssetPaths(value: Scene, baseDir: string, sceneDir: string): 
     return relative(sceneDir, resolve(await fileIdentity(dirname(source)), basename(source)));
   };
   const result = structuredClone(value);
-  // One declaration of resource-bearing fields. `*` means array items or
-  // opaque table values, never a resource name interpreted as a field.
-  const edges: Record<string, [string, string][]> = {
-    scene: [['nodes.*','node'],['render','render'],['animation.*','layer'],
-      ...['images','buffers','programs','geometry','materials'].map(kind => [`${kind}.*`,kind] as [string,string])],
-    node: [['children.*','node'],['geometry','geometry'],['materials.*','materials'],
-      ['instances.count','buffers'],['instances.attributes.*','buffers'],['skin.inverse_bind_matrices','buffers'],
-      ['image','images'],['material','materials']],
-    geometry: [['indices','buffers'],['curve_vertex_counts','buffers'],['widths','buffers'],
-      ['attributes.*','buffers'],['morphs.*.POSITION','buffers'],['morphs.*.NORMAL','buffers']],
-    materials: [['program','programs'],['inputs.*','input']],
-    input: [['image','images'],['grid','buffers']],
-    images: [['render','render']],
-    render: [['compositor.*','materials'],['compositor_per_step.*','materials'],['display','materials']],
-    programs: [['bindings.*','buffers']],
-    layer: [['tracks.*.keys.times','buffers'],['tracks.*.keys.values','buffers']],
-  };
-  const files: Record<string, string[]> = {
-    buffers:['file'], images:['file'], programs:['file','source_origin'],
-    node:['file'], layer:['clip.file'],
-  };
-  type ObjectValue = Record<string, any>;
-  const slots = async (value: any, path: string[], visit: (parent: ObjectValue, key: string) => Promise<void>): Promise<void> => {
-    if (!value || typeof value !== 'object') return;
-    const head = path[0]!;
-    const tail = path.slice(1);
-    for (const key of head === '*' ? Object.keys(value) : [head]) {
-      if (tail.length) await slots(value[key],tail,visit);
-      else await visit(value,key);
+  const files = new Map<object, Set<string>>();
+  type Graph = {file?: boolean; ref?: string; branches?: readonly Graph[];
+    properties?: Record<string, Graph>; items?: Graph; values?: Graph};
+  const defs: Record<string, Graph> = resourceSlots.defs;
+  const walk = (value: any, node: Graph, parent?: any, key?: string): void => {
+    if (node.file && parent && key !== undefined && typeof value === 'string') {
+      if (!files.has(parent)) files.set(parent, new Set());
+      files.get(parent)!.add(key);
     }
+    if (node.ref) walk(value, defs[node.ref]!);
+    for (const branch of node.branches ?? []) walk(value, branch, parent, key);
+    if (!value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(node.properties ?? {})) {
+      if (Object.hasOwn(value, key)) walk(value[key], child, value, key);
+    }
+    if (Array.isArray(value) && node.items) value.forEach((item, key) => walk(item, node.items!, value, String(key)));
+    if (!Array.isArray(value) && node.values) for (const key of Object.keys(value)) walk(value[key], node.values, value, key);
   };
-  const seen = new Set<object>();
-  const resource = async (kind: string, value: any): Promise<void> => {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || seen.has(value)) return;
-    seen.add(value);
-    for (const path of files[kind] ?? []) await slots(value,path.split('.'),async (parent,key) => {
-      if (typeof parent[key] === 'string') parent[key] = await assetPath(parent[key]);
-    });
-    for (const [path,target] of edges[kind] ?? []) await slots(value,path.split('.'),async (parent,key) => {
-      await resource(target,parent[key]);
-    });
-  };
-  await resource('scene',result);
+  walk(result, resourceSlots.root);
+  for (const [parent, keys] of files) for (const key of keys) {
+    const object = parent as Record<string, string>;
+    object[key] = await assetPath(object[key]!);
+  }
   return result;
 }
 /** Write scene JSON with relative resource paths and a binary sidecar for large buffers. */
@@ -106,8 +87,7 @@ export async function writeScene(value: Scene, path: string, baseDir = process.c
 
 export { box, sphere, cylinder, cone, torus, capsule, roundedBox, grid, revolve } from './lib/shapes.js';
 export type { GeometryFragment } from './lib/shapes.js';
-export { scatter, type InstanceFragment } from './lib/scatter.js';
 export { text, type TextOptions } from './lib/text.js';
 export { extrude, type ExtrudeOptions } from './lib/extrude.js';
-export { render, renderArguments, type RenderOptions, type RenderResult, type ExposureSummary } from './lib/render.js';
+export { render, type RenderOptions, type RenderResult, type RenderWarning, type ExposureSummary } from './lib/render.js';
 export { environmentImage, sky, type EnvironmentImageOptions, type EnvironmentFragment } from './lib/environment.js';

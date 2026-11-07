@@ -14,6 +14,8 @@ pub(crate) fn record_fields(buffer:&wgpu::Buffer, bytes:u64)->Vec<wgpu::BufferBi
 /// One retained hit-shading specialization for the complete installed scene.
 pub(crate) fn pipeline(r: &Renderer, cached: &crate::pipelines::CachedPipelines, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<wgpu::ComputePipeline> {
     let kernel=cached.drawn_kernel(crate::pipelines::ProgramKernel::Reflections { features }, mode,&r.compiler);
+    #[cfg(test)]
+    r.compiler.hit_selections.lock().unwrap().push((crate::pipelines::ProgramKernel::Reflections { features },kernel));
     let (module, entry) = cached.program_kernel(kernel)?;
     let layout=crate::rt::reflections_hits_layout(&r.device,&cached.mat_layout,probes,cached.resolve_native.as_ref().map_or(0,|n| if n.visibility_lights>0 {n.sample_pages} else {0}));
     let pipeline=r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

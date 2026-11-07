@@ -1,0 +1,4 @@
+{
+  "refraction": "ray",
+  "reflections": "environment"
+}

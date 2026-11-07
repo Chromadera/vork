@@ -38,23 +38,36 @@ void filter(uint3 id:SV_DispatchThreadID) {
     // and mixed coverage. Reuse that word rather than load raw guide coverage.
     if(identity<=0.) {destination[i]=center;return;}
     let coverage=accumulation[i].a/float(params.samples);
-    var sum=float3(0.);var weights=0.;var variance=0.;
+    if(coverage<=0.) {destination[i]=center;return;}
+    var sum=center.rgb;var variance=center.a;
     for(int y=-1;y<=1;y++) for(int x=-1;x<=1;x++) {
-        let j=index(int2(id.xy)+int2(x,y)*int(params.step));let tap=source[j];
+        let position=int2(id.xy)+int2(x,y)*int(params.step);
+        // Clamped border taps are not reciprocal. Missing neighbours exchange
+        // no energy, leaving their weight at the receiver itself.
+        if(any(position<int2(0)) || any(position>=int2(params.width,params.height))) {continue;}
+        let j=index(position);let tap=source[j];
         if(filtered_guides[2*j+1].w!=identity) {continue;}
         let da=filtered_guides[2*j].rgb-a;let dn=filtered_guides[2*j+1].rgb-n;
         if(dot(da,da)>RECONSTRUCT_ALBEDO_EDGE_SQUARED) {continue;}
         let dc=length(tap.rgb-center.rgb)/sqrt(3.);
-        let alpha=accumulation[j].a/float(params.samples)-coverage;
+        let tap_coverage=accumulation[j].a/float(params.samples);
+        if(tap_coverage<=0.) {continue;}
+        let alpha=tap_coverage-coverage;
         let spatial=float((x==0?2:1)*(y==0?2:1));
         let sigma=RECONSTRUCT_COLOR_SIGMA*sqrt(max(center.a+tap.a,RECONSTRUCT_VARIANCE_FLOOR));
         let weight=spatial*exp(-dot(da,da)*RECONSTRUCT_ALBEDO_SCALE-dot(dn,dn)*RECONSTRUCT_NORMAL_SCALE-abs(dc)/sigma-abs(alpha)*RECONSTRUCT_ALPHA_SCALE);
-        sum+=tap.rgb*weight;weights+=weight;variance+=tap.a*weight;
+        // Off-centre spatial weights sum to 12; the centre exchanges zero.
+        // Every pair uses the same conductance
+        // and exchanges opposite premultiplied RGB flux; do not normalize each
+        // receiver by a different surviving weight sum. min coverage keeps the
+        // update convex even at fractional camera coverage.
+        let exchange=weight*(min(coverage,tap_coverage)/coverage)/12.;
+        sum+=(tap.rgb-center.rgb)*exchange;variance+=(tap.a-center.a)*exchange;
     }
     // Keep the local noise scale through coarse levels. Shrinking it after
     // every pass mistakes residual low-frequency noise for a lighting edge
     // and freezes moving blotches on otherwise smooth walls.
-    destination[i]=float4(sum/weights,variance/weights);
+    destination[i]=float4(sum,variance);
 }
 [shader("compute")] [numthreads(REG_COMPUTE_TILE,REG_COMPUTE_TILE,1)]
 void finish(uint3 id:SV_DispatchThreadID) {

@@ -11,8 +11,8 @@ test('shape options suggest names and reject the misspelling', () => {
   assert.throws(() => sdk.extrude('plate',{outline:[],depht:2}), /did you mean "depth"/);
 });
 
-test('render and renderArguments diagnose options before invoking the CLI', () => {
-  for (const render of [sdk.render, sdk.renderArguments]) {
+test('render diagnoses options before invoking the CLI', () => {
+  for (const render of [sdk.render]) {
     assert.throws(() => render('missing.json',{out:'out.png',proflie:[10,10]}), /unknown option "proflie"; did you mean "profile"\? Nearest valid names/);
     assert.throws(() => render('missing.json',{out:'out.png',zzzzzzzz:1}), error => /Nearest valid names/.test(error.message) && !error.message.includes('did you mean'));
   }

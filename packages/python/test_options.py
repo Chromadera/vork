@@ -1,5 +1,5 @@
 import unittest
-from vork import std, render, render_arguments
+from vork import std, render, _render_arguments as render_arguments
 from vork._validate import _check_options
 
 

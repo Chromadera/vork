@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import shutil
 
-ENTRY = re.compile(r'[0-9a-f]{64}\.(?:slang-variant-v1|slang-program-v1|slang-resolve-v2|aov-resolve-v1)\.entry')
+ENTRY = re.compile(r'[0-9a-f]{64}\.(?:slang-variant-v1|slang-program-v2|slang-resolve-v2|aov-resolve-v1)\.entry')
 
 
 def digest(path):

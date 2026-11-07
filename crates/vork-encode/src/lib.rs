@@ -201,6 +201,7 @@ impl PreparedEncoder {
                 ring_depth,
             ) {
                 Ok(session) => {
+                    eprintln!("Video encoder: native NVENC (GPU); FFmpeg muxing");
                     return Ok(Encoder {
                         gpu,
                         width,
@@ -245,46 +246,19 @@ impl PreparedEncoder {
         // Windows has no zero-copy session; ffmpeg's NVENC still beats libx264 after readback.
         #[cfg(any(target_os = "linux", windows))]
         if !prores && !matches!(gpu.backend, Backend::Readback) {
-            // Probe actual encoder initialization, not merely ffmpeg's compiled encoder list.
-            let available = Command::new("ffmpeg")
-                .args([
-                    "-v",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    // Modern H.264 NVENC rejects 64x64; keep genuinely small
-                    // outputs small so Auto can still select software for them.
-                    &format!(
-                        "color=size={}x{}",
-                        width.min(NVENC_PROBE_EXTENT),
-                        height.min(NVENC_PROBE_EXTENT)
-                    ),
-                    "-frames:v",
-                    "1",
-                    "-c:v",
-                    "h264_nvenc",
-                    "-f",
-                    "null",
-                    "-",
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
-            if available {
-                codec = "h264_nvenc";
-            } else {
-                ensure!(
-                    !matches!(gpu.backend, Backend::HardwareReadback),
-                    "NVENC unavailable"
-                );
+            match probe_ffmpeg_nvenc(width, height) {
+                Ok(()) => codec = "h264_nvenc",
+                Err(error) => {
+                    ensure!(!matches!(gpu.backend, Backend::HardwareReadback), "{error:#}");
+                    eprintln!("FFmpeg NVENC unavailable; using software libx264: {error:#}");
+                }
             }
         }
         if prores {
             codec = "prores_ks";
         }
         require_ffmpeg_encoder(codec)?;
+        eprintln!("Video encoder: FFmpeg {codec} (readback)");
         let mut command = Command::new("ffmpeg");
         command.args([
             "-v",
@@ -397,8 +371,22 @@ impl PreparedEncoder {
         })
     }
 }
-// Check before opening the rawvideo pipe: a missing codec otherwise surfaces as
-// a platform-specific broken pipe on the first frame, hiding the actionable cause.
+/// Test FFmpeg's NVENC against the installed driver, using the same initialization
+/// probe for setup and output selection. Native Linux NVENC has a separate ABI.
+pub fn probe_ffmpeg_nvenc(width: u32, height: u32) -> Result<()> {
+    // Modern NVENC rejects tiny frames; preserve small output dimensions so Auto
+    // can select software for those outputs rather than accepting a larger probe.
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i",
+            &format!("color=size={}x{}", width.min(NVENC_PROBE_EXTENT), height.min(NVENC_PROBE_EXTENT)),
+            "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"])
+        .stdin(Stdio::null()).output().context("start FFmpeg NVENC probe")?;
+    ensure!(output.status.success(), "FFmpeg h264_nvenc initialization failed ({}): {}",
+        output.status, String::from_utf8_lossy(&output.stderr).trim());
+    Ok(())
+}
+
+// Check before opening the rawvideo pipe so codec errors retain their cause.
 fn require_ffmpeg_encoder(codec: &str) -> Result<()> {
     let output = Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])

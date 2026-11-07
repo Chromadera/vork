@@ -787,7 +787,7 @@ pub(crate) fn evaluate(
         frame.readback.unmap();
     }
     if let Some((i, flags)) = error {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "computed geometry draw {i}: {}",
             if flags & 1 != 0 {
                 "live count exceeds installed capacity"
@@ -796,7 +796,7 @@ pub(crate) fn evaluate(
             } else {
                 "nonfinite attribute or negative/nonfinite width"
             }
-        );
+        ).context(crate::failure::FailureKind::Scene));
     }
     Ok(result)
 }

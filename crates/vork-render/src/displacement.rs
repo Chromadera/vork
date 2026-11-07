@@ -84,11 +84,18 @@ impl Mesh {
     }
 }
 
+fn batch_capacity(limits: &wgpu::Limits) -> usize {
+    ((u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
+        / (3 * std::mem::size_of::<Parameters>()) as u64) as usize)
+        .min(limits.max_compute_workgroups_per_dimension as usize / 3)
+}
+
 pub(crate) struct Pipeline {
     initialize: wgpu::ComputePipeline,
     evaluate: wgpu::ComputePipeline,
     finish: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    capacity: usize,
 }
 impl Pipeline {
     pub(crate) fn new(
@@ -101,18 +108,12 @@ impl Pipeline {
             r.device.limits().max_storage_buffers_per_shader_stage >= 11,
             "material displacement requires eleven storage buffer bindings"
         );
-        let entries: Vec<_> = (0..9)
+        let entries: Vec<_> = (0..8)
             .map(|binding| {
                 pipelines::buffer_entry(
                     binding,
                     wgpu::ShaderStages::COMPUTE,
-                    if binding == 0 {
-                        wgpu::BufferBindingType::Uniform
-                    } else {
-                        wgpu::BufferBindingType::Storage {
-                            read_only: binding < 5,
-                        }
-                    },
+                    wgpu::BufferBindingType::Storage { read_only: binding < 5 },
                 )
             })
             .collect();
@@ -136,6 +137,7 @@ impl Pipeline {
         } else {
             forward_variant::SPIRV_TARGET
         };
+        let capacity = batch_capacity(&r.device.limits());
         let define = format!("-DVORK_ATTRIBUTES={attributes}");
         let includes: Vec<_> = native_programs
             .include
@@ -166,6 +168,10 @@ impl Pipeline {
         );
         modules.push(("displacement", source));
         let compile = |entry: &str| -> Result<wgpu::ComputePipeline> {
+            let compiler=vork_slang::Compiler::discover();
+            let (identity,prepared)=crate::programs::native_input_identity(
+                &|key|r.disk_cache.path("material-displacement",1,key),&compiler,&modules,"displacement",&[(entry,"compute")],&args,&native_programs.identities)?;
+            for input in &native_programs.inputs {identity.verify(input)?;}
             let mut key = blake3::Hasher::new();
             for part in [target, entry, define.as_str()] {
                 key.update(part.as_bytes());
@@ -173,10 +179,7 @@ impl Pipeline {
             for argument in &args {
                 key.update(argument.as_bytes());
             }
-            for (name, text) in &modules {
-                key.update(name.as_bytes());
-                key.update(text.as_bytes());
-            }
+            key.update(&identity.identity);
             let path = r
                 .disk_cache
                 .path("material-displacement", 1, key.finalize());
@@ -184,12 +187,9 @@ impl Pipeline {
                 code
             } else {
                 let start=std::time::Instant::now();
-                let code = vork_slang::Compiler::discover().compile_modules(
-                    &modules,
-                    "displacement",
-                    &[(entry, "compute")],
-                    &args,
-                )?;
+                let prepared=match prepared {Some(input)=>input,None=>compiler.prepare_identified_modules(&modules,"displacement",&[(entry,"compute")],&args,&native_programs.identities)?};
+                anyhow::ensure!(prepared.identity()==identity.identity,"Slang inputs changed during cache lookup; retry the command");
+                let code = prepared.compile()?;
                 crate::timing::creation(&r.device,entry,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
                 let _ = disk_cache::write(&path, &code);
                 code
@@ -230,6 +230,7 @@ impl Pipeline {
             evaluate: compile("evaluate")?,
             finish: compile("finish")?,
             layout,
+            capacity,
         })
     }
 }
@@ -248,6 +249,8 @@ struct Parameters {
     object_header: [u32; 4],
     to_stream: Mat4,
     from_stream: Mat4,
+    /// Source words, output words, scratch words and bounds words within pages.
+    addresses: [u32; 4],
 }
 
 /// Deterministic frame-private page addresses, also used by installed hit records.
@@ -324,146 +327,110 @@ pub(crate) fn resources(
             ),
         );
     }
-    Ok(s.draws
-        .iter()
-        .enumerate()
-        .map(|(i, draw)| {
-            let mesh = draw.displacement.as_ref()?;
-            if draw.displacement_leader.is_some_and(|leader| leader != i) {
-                return None;
+    // A batch owns its control resources. Jobs retain only their logical identity
+    // and output range. Equal source/topology and destination pages share bindings.
+    let mut groups: std::collections::HashMap<_, Vec<usize>> = std::collections::HashMap::new();
+    for (i, draw) in s.draws.iter().enumerate() {
+        let Some(mesh) = &draw.displacement else { continue };
+        if draw.displacement_leader.is_some_and(|leader| leader != i) { continue; }
+        let (leader, _) = ranges[i].unwrap();
+        let source = skin[i].as_ref().map_or(&mesh.source, |s| &s.output.buffer);
+        let previous = skin[i].as_ref().map_or(&mesh.source, |s| &s.previous_output);
+        let (source_offset, source_size) = skin[i].as_ref().map_or((0, source.size()),
+            |s| (s.output.offset, s.output.size));
+        groups.entry((source.clone(), source_offset, source_size, previous.clone(), mesh.attributes.clone(),
+            mesh.topology.clone(), leader)).or_default().push(i);
+    }
+    let mut frames: Vec<Option<Frame>> = (0..s.draws.len()).map(|_| None).collect();
+    for ((source, source_offset, source_size, previous, attributes, topology, leader), jobs) in groups {
+        let (current, endpoints) = &streams[&leader];
+        for jobs in jobs.chunks(pipeline.capacity) {
+            let mesh = s.draws[jobs[0]].displacement.as_ref().unwrap();
+            let batch = Arc::new(Batch::new(r, pipeline, mesh, jobs, &source, source_offset, source_size, &previous,
+                &attributes, &topology, current, endpoints));
+            for (slot, &i) in jobs.iter().enumerate() {
+                let (_, offset) = ranges[i].unwrap();
+                let size = u64::from(mesh.count) * 40;
+                frames[i] = Some(Frame {
+                    geometry: EvaluatedGeometry {
+                        attributes: None,
+                        output: geometry::VertexStream { buffer: current.clone(), offset, size },
+                        previous_output: geometry::VertexStream {
+                            buffer: endpoints.clone(), offset: offset * 2, size: size * 2,
+                        },
+                    },
+                    batch: batch.clone(), slot, job: i,
+                });
             }
-            let (leader, offset) = ranges[i]?;
-            let (current, previous) = &streams[&leader];
-            let size = u64::from(mesh.count) * 40;
-            Some(Frame::new(
-                r,
-                pipeline,
-                mesh,
-                skin[i].as_ref(),
-                EvaluatedGeometry {
-                    attributes: None,
-                    output: geometry::VertexStream {
-                        buffer: current.clone(),
-                        offset,
-                        size,
-                    },
-                    previous_output: geometry::VertexStream {
-                        buffer: previous.clone(),
-                        offset: offset * 2,
-                        size: size * 2,
-                    },
-                },
-            ))
-        })
-        .collect())
+        }
+    }
+    Ok(frames)
 }
 
-pub(crate) struct Frame {
-    pub(crate) geometry: EvaluatedGeometry,
-    bind: [wgpu::BindGroup; 3],
-    params: [wgpu::Buffer; 3],
-    bounds: wgpu::Buffer,
+/// Retained control and scratch storage for evaluations with compatible bindings.
+struct Batch {
+    bind: wgpu::BindGroup,
+    params: wgpu::Buffer,
+    scratch: wgpu::Buffer,
+    bounds_offset: u64,
     readback: wgpu::Buffer,
+    jobs: Vec<usize>,
     count: u32,
     groups: [u32; 2],
     timed: bool,
     point_vertices: u32,
 }
+pub(crate) struct Frame {
+    pub(crate) geometry: EvaluatedGeometry,
+    batch: Arc<Batch>,
+    slot: usize,
+    job: usize,
+}
 impl Frame {
     pub(crate) fn append_inputs(&self, changes: &values::ChangeTracker, inputs: &mut Vec<u8>) {
-        for params in &self.params {
-            changes.append_buffer_inputs(params, inputs);
-        }
+        changes.append_inputs(values::ChangeKey::Displacement(self.job), inputs);
     }
     pub(crate) fn dirty(&self, changes: &values::ChangeTracker) -> bool {
-        self.params.iter().any(|buffer| {
-            changes
-                .uploads
-                .iter()
-                .any(|(destination, ..)| destination == buffer)
-        })
+        changes.dirty(values::ChangeKey::DisplacedPositions(self.job))
     }
-    pub(crate) fn new(
-        r: &Renderer,
-        pipeline: &Pipeline,
-        mesh: &Mesh,
-        skin: Option<&FrameDeform>,
-        geometry: EvaluatedGeometry,
+}
+impl Batch {
+    fn new(r: &Renderer, pipeline: &Pipeline, mesh: &Mesh, jobs: &[usize],
+        source: &wgpu::Buffer, source_offset: u64, source_size: u64,
+        previous: &wgpu::Buffer, attributes: &wgpu::Buffer,
+        topology: &wgpu::Buffer, current: &wgpu::Buffer, endpoints: &wgpu::Buffer,
     ) -> Self {
-        let buffer = |label, size, usage| {
-            gpu_memory::buffer(
-                &r.device,
-                &wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size,
-                    usage,
-                    mapped_at_creation: false,
-                },
-            )
-        };
-        let params = std::array::from_fn(|_| {
-            buffer(
-                "geometry evaluation parameters",
-                std::mem::size_of::<Parameters>() as u64,
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            )
+        let buffer = |label, size, usage| gpu_memory::buffer(&r.device, &wgpu::BufferDescriptor {
+            label: Some(label), size, usage, mapped_at_creation: false,
         });
-        let positions = buffer(
-            "displaced positions",
-            u64::from(mesh.count / mesh.point_vertices.max(1)) * 3 * 4 * 3,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let bounds = buffer(
-            "evaluated bounds",
-            32,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        );
-        let readback = buffer(
-            "evaluated bounds readback",
-            32,
-            wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        );
-        let bind = std::array::from_fn(|pose| {
-            r.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("material geometry evaluation"),
-                layout: &pipeline.layout,
-                entries: &[
-                    entry(0, params[pose].as_entire_binding()),
-                    entry(
-                        1,
-                        skin.map_or_else(
-                            || mesh.source.as_entire_binding(),
-                            |s| s.output.binding(),
-                        ),
-                    ),
-                    entry(
-                        2,
-                        skin.map_or(&mesh.source, |s| &s.previous_output)
-                            .as_entire_binding(),
-                    ),
-                    entry(3, mesh.attributes.as_entire_binding()),
-                    entry(4, mesh.topology.as_entire_binding()),
-                    entry(5, positions.as_entire_binding()),
-                    entry(6, geometry.output.binding()),
-                    entry(7, geometry.previous_output.binding()),
-                    entry(8, bounds.as_entire_binding()),
-                ],
-            })
+        let params = buffer("geometry evaluation table",
+            (jobs.len() * 3 * std::mem::size_of::<Parameters>()) as u64,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let bounds_offset = jobs.len() as u64 * u64::from(mesh.count / mesh.point_vertices.max(1)) * 36;
+        let scratch = buffer("geometry scratch and bounds", bounds_offset + jobs.len() as u64 * 32,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let readback = buffer("evaluated bounds page readback", jobs.len() as u64 * 32,
+            wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ);
+        let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material geometry batch"), layout: &pipeline.layout,
+            entries: &[
+                entry(0, params.as_entire_binding()),
+                // Skin pools can exceed a storage binding limit. Retain the
+                // source range that the deformation owner admitted, not its pool.
+                entry(1, wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: source, offset: source_offset,
+                    size: std::num::NonZeroU64::new(source_size),
+                })),
+                entry(2, previous.as_entire_binding()), entry(3, attributes.as_entire_binding()),
+                entry(4, topology.as_entire_binding()), entry(5, scratch.as_entire_binding()),
+                entry(6, current.as_entire_binding()), entry(7, endpoints.as_entire_binding()),
+            ],
         });
         let count = mesh.count.div_ceil(constants::DEFORM_GROUP);
         let width = count.min(r.device.limits().max_compute_workgroups_per_dimension);
-        let groups = [width, count.div_ceil(width)];
-        Self {
-            groups,
-            geometry,
-            bind,
-            params,
-            bounds,
-            readback,
-            count: mesh.count,
-            timed: mesh.timed,
-            point_vertices: mesh.point_vertices,
-        }
+        Self { bind, params, scratch, bounds_offset, readback, jobs: jobs.to_vec(), count: mesh.count,
+            groups: [width, count.div_ceil(width)], timed: mesh.timed,
+            point_vertices: mesh.point_vertices }
     }
 }
 
@@ -488,8 +455,11 @@ pub(crate) fn evaluate(
         return Ok(Vec::new());
     };
     let mut bounds = vec![None; s.draws.len()];
+    let mut parameters = vec![[Parameters::zeroed(); 3]; frames.len()];
+    let mut active = vec![false; frames.len()];
     for (i, frame) in frames.iter().enumerate() {
         let Some(frame) = frame else { continue };
+        let batch = &frame.batch;
         let offset = s.roots[s.draws[i].object as usize].time_offset;
         for pose in 0..3 {
             let to_stream = s.draws[i]
@@ -502,44 +472,54 @@ pub(crate) fn evaluate(
                 "material displacement requires an invertible mesh-local frame for draw {i}"
             );
             let params = Parameters {
-                count: frame.count,
+                count: batch.count,
                 material: objects[s.draws[i].object as usize].material_index[0],
-                time: if frame.timed { time + offset } else { 0. },
-                previous_time: if frame.timed {
+                time: if batch.timed { time + offset } else { 0. },
+                previous_time: if batch.timed {
                     if pose==2 {next_time+offset} else {previous_time + offset}
                 } else {
                     0.
                 },
-                point_vertices: frame.point_vertices,
+                point_vertices: batch.point_vertices,
                 pose: pose as u32,
-                dispatch_width: frame.groups[0] * constants::DEFORM_GROUP,
+                dispatch_width: batch.groups[0] * constants::DEFORM_GROUP,
                 reserved: u32::from(s.draws[i].deform.is_some()),
                 object_header: [objects[s.draws[i].object as usize].metadata[2], 0, 0, 0],
                 to_stream,
                 from_stream,
+                addresses: [
+                    0, // Source addresses are relative to the bound deformation range.
+                    (frame.geometry.output.offset / 4) as u32,
+                    frame.slot as u32 * (batch.count / batch.point_vertices.max(1)) * 9,
+                    (batch.bounds_offset / 4) as u32 + frame.slot as u32 * 8,
+                ],
             };
-            changes.upload(&frame.params[pose], 0, bytemuck::bytes_of(&params));
+            parameters[i][pose] = params;
+        }
+        // Logical jobs own dirty state, not the shared parameter table. A skin
+        // update invalidates only its consumers, even when descriptors share a page.
+        let changed = changes.changed(values::ChangeKey::Displacement(i),
+            bytemuck::cast_slice(&parameters[i]));
+        active[i] = cached_bounds[i].is_none() || changed
+            || skin[i].as_ref().is_some_and(|skin|
+                changes.buffer_dirty(&skin.params) || changes.buffer_dirty(&skin.previous_params));
+        if active[i] { changes.publish(values::ChangeKey::DisplacedPositions(i)); }
+    }
+    let batches: Vec<_> = frames.iter().flatten().filter(|f| f.slot == 0)
+        .map(|f| &*f.batch).filter(|b| b.jobs.iter().any(|&i| active[i])).collect();
+    for batch in &batches {
+        for (slot, &i) in batch.jobs.iter().enumerate() {
+            let mut poses = parameters[i];
+            for params in &mut poses {
+                params.object_header[1] = u32::from(active[i]);
+            }
+            // Keep logical dirty subranges even though jobs share one binding.
+            // The upload owner merges adjacent changed rows into one copy.
+            changes.upload(&batch.params,
+                (slot * 3 * std::mem::size_of::<Parameters>()) as u64,
+                bytemuck::cast_slice(&poses));
         }
     }
-    let uploaded = |buffer: &wgpu::Buffer| {
-        changes
-            .uploads
-            .iter()
-            .any(|(destination, ..)| destination == buffer)
-    };
-    let active: Vec<bool> = frames
-        .iter()
-        .enumerate()
-        .map(|(i, frame)| {
-            frame.as_ref().is_some_and(|frame| {
-                cached_bounds[i].is_none()
-                    || frame.params.iter().any(uploaded)
-                    || skin[i].as_ref().is_some_and(|skin| {
-                        uploaded(&skin.params) || uploaded(&skin.previous_params)
-                    })
-            })
-        })
-        .collect();
     for (i, frame) in frames.iter().enumerate() {
         if frame.is_some() && !active[i] {
             bounds[i] = cached_bounds[i];
@@ -582,58 +562,29 @@ pub(crate) fn evaluate(
             ),
         });
         pass.set_pipeline(stage);
-        for pose in 0..if std::ptr::eq(stage, &pipeline.initialize) {
-            1
-        } else {
-            3
-        } {
-            pass.set_bind_group(
-                1,
-                materials.map_or_else(|| s.material_table.bind(), |m| &m.bind),
-                &[],
-            );
-            for (_, frame) in frames
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| active[*i])
-                .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
-            {
-                pass.set_bind_group(2, &frame.bind[pose], &[]);
-                let groups = if std::ptr::eq(stage, &pipeline.initialize) {
-                    [1, 1]
-                } else if std::ptr::eq(stage, &pipeline.evaluate) && frame.point_vertices != 0 {
-                    let count = (frame.count / frame.point_vertices).div_ceil(constants::DEFORM_GROUP);
-                    [count.min(frame.groups[0]), count.div_ceil(frame.groups[0])]
-                } else {
-                    frame.groups
-                };
-                pass.dispatch_workgroups(groups[0], groups[1], 1);
-            }
+        pass.set_bind_group(1, materials.map_or_else(|| s.material_table.bind(), |m| &m.bind), &[]);
+        for batch in &batches {
+            pass.set_bind_group(2, &batch.bind, &[]);
+            let initialize = std::ptr::eq(stage, &pipeline.initialize);
+            let groups = if initialize { [1, 1] }
+                else if std::ptr::eq(stage, &pipeline.evaluate) && batch.point_vertices != 0 {
+                    let count = (batch.count / batch.point_vertices).div_ceil(constants::DEFORM_GROUP);
+                    [count.min(batch.groups[0]), count.div_ceil(batch.groups[0])]
+                } else { batch.groups };
+            pass.dispatch_workgroups(groups[0], groups[1], batch.jobs.len() as u32 * if initialize { 1 } else { 3 });
         }
     }
-    for (_, frame) in frames
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| active[*i])
-        .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
-    {
-        encoder.copy_buffer_to_buffer(&frame.bounds, 0, &frame.readback, 0, 32);
+    for batch in &batches {
+        encoder.copy_buffer_to_buffer(&batch.scratch, batch.bounds_offset, &batch.readback, 0, batch.jobs.len() as u64 * 32);
     }
     let submission = crate::command_finish::Segments::submit(&r.queue, encoder);
     r.errors.check()?;
     let (send, receive) = std::sync::mpsc::channel();
-    for (_, frame) in frames
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| active[*i])
-        .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
-    {
+    for batch in &batches {
         let send = send.clone();
-        frame
-            .readback
-            .map_async(wgpu::MapMode::Read, .., move |result| {
-                let _ = send.send(result);
-            });
+        batch.readback.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = send.send(result);
+        });
     }
     if !active.iter().any(|active| *active) {
         for (i, draw) in s.draws.iter().enumerate() {
@@ -650,24 +601,21 @@ pub(crate) fn evaluate(
         })
     };
     let mut invalid = None;
-    for (i, frame) in frames.iter().enumerate() {
-        let Some(frame) = frame else { continue };
-        if !active[i] {
-            continue;
-        }
+    for batch in &batches {
         receive.recv()??;
-        let bytes = frame.readback.get_mapped_range(..);
+        let bytes = batch.readback.get_mapped_range(..);
         let words: &[u32] = bytemuck::cast_slice(&bytes);
-        let valid = words[6] == 0;
-        let minimum = Vec3::new(decode(words[0]), decode(words[1]), decode(words[2]));
-        let maximum = Vec3::new(decode(words[3]), decode(words[4]), decode(words[5]));
-        drop(bytes);
-        frame.readback.unmap();
-        if valid && minimum.is_finite() && maximum.is_finite() {
-            bounds[i] = Some((minimum, maximum));
-        } else {
-            invalid.get_or_insert(i);
+        for (slot, &i) in batch.jobs.iter().enumerate().filter(|(_, i)| active[**i]) {
+            let words = &words[slot * 8..][..8];
+            let valid = words[6] == 0;
+            let minimum = Vec3::new(decode(words[0]), decode(words[1]), decode(words[2]));
+            let maximum = Vec3::new(decode(words[3]), decode(words[4]), decode(words[5]));
+            if valid && minimum.is_finite() && maximum.is_finite() {
+                bounds[i] = Some((minimum, maximum));
+            } else { invalid.get_or_insert(i); }
         }
+        drop(bytes);
+        batch.readback.unmap();
     }
     if let Some(i) = invalid {
         anyhow::bail!("material displacement produced nonfinite geometry for draw {i}");

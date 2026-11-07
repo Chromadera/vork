@@ -212,8 +212,9 @@ pub(crate) fn compiled(r: &Renderer, source: &str, origin: &Path) -> Result<Medi
     programs::cached(
         r,
         key,
-        |p: &MediumProgram| &p.dependencies,
-        || Compiler::discover().compile_medium(&abi, source, origin, &tag[..12]),
+        &Compiler::discover(),
+        &abi, &source, &origin,
+        |compiler| compiler.compile_medium(&abi, source, origin, &tag[..12]),
     )
 }
 

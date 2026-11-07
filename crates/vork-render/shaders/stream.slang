@@ -189,3 +189,19 @@ OpaqueDepth opaque_single_depth(float3 p, uint object) {
     o.mirrored=select(dot(cross(model[0].xyz,model[1].xyz),model[2].xyz)<0.,1u,0u);
     return o;
 }
+
+// Supplied smooth normals belong to the triangle's winding hemisphere.
+// Coverage and dielectric entry/exit continue to use winding, not authored normals.
+// Scale first: finite but tiny/large authored vectors must not under/overflow.
+float3 finite_unit_normal(float3 normal,float3 fallback) {
+    let scale=max(abs(normal.x),max(abs(normal.y),abs(normal.z)));
+    if(all(isfinite(normal)) && scale>0.) {return normalize(normal/scale);}
+    let fallback_scale=max(abs(fallback.x),max(abs(fallback.y),abs(fallback.z)));
+    if(all(isfinite(fallback)) && fallback_scale>0.) {return normalize(fallback/fallback_scale);}
+    // A fully collapsed primitive has no face; retain a finite placeholder.
+    return float3(0.,0.,1.);
+}
+float3 winding_normal(float3 normal,float3 face) {
+    let unit=finite_unit_normal(normal,face);
+    return dot(unit,face)<0. ? -unit : unit;
+}

@@ -6,7 +6,7 @@ Procedural textures: import std.procedurals; signatures: vork help std --all.
 <!-- all -->
 PROGRAM REFERENCE
 Slang modules: `import vork;`, one `struct Inputs {...}` whose initializers are
-defaults, and any of these stages:
+defaults; meshes require surface (lit/displace supplement surface):
   Closure|Blend|Hair surface(ShadingContext, Inputs)
     OpenPBR emission is shared by hits and light samples; lit output is authored shading.
     Light samples use zero differentials; hits retain their shading footprint.
@@ -21,6 +21,8 @@ defaults, and any of these stages:
   float3 sensor(SensorContext, Inputs)               per arriving contribution
   float3 display(DisplayContext, Inputs)
   void compute(ComputeContext, Inputs)               buffers: <binding>_load/_store/_count; dense grids also <binding>_dims (uint3)
+Initialized read-only global tables (including static const arrays) are allowed.
+Global resources and mutable globals are refused; use Inputs or compute buffers.
 Inputs bind numbers, bools and enum tokens directly; Image {"image"}, Aov {"aov"},
 FloatGrid/VectorGrid {"grid"}, Attribute<float..float4> {"attribute"}.
 [InputRange(min, max, min_closed, max_closed)] on numeric Inputs fields validates
@@ -37,7 +39,8 @@ DisplacementContext has only undisplaced object-local POSITION, NORMAL and time 
 Per-instance displacement values use bound Attribute<T> inputs.
 For topology:"points", displace evaluates once per undisplaced object-local point centre and translates the whole sphere without changing its width; NORMAL and generated surface UV/tangent inputs are unavailable.
 
-Procedural textures (wood, marble, stone, noise): import std.procedurals;
+Noise primitives: import std.procedurals; compose noise/ramps for wood, marble or stone.
+Wave and brick patterns: import blender.procedurals; vork help blender --all.
 signatures, case-sensitive enums and a surface example: vork help std --all.
 
 SIMULATION

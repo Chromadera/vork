@@ -88,8 +88,9 @@ pub(crate) fn compiled(r: &Renderer, source: &str, origin: &Path) -> Result<Envi
     let abi = programs::abi();
     let key = program_key(&abi, source, origin)?;
     let tag = key.to_hex();
-    programs::cached(r, key, |p: &EnvironmentProgram| &p.dependencies,
-        || Compiler::discover().compile_environment(&abi, source, origin, &tag[..12]))
+    programs::cached(r, key, &Compiler::discover(),
+        &abi, &source, &origin,
+        |compiler| compiler.compile_environment(&abi, source, origin, &tag[..12]))
 }
 
 /// Compile (cached) and evaluate an environment program with these input values.
@@ -115,7 +116,7 @@ fn bake_animated(
     let animation = animation_source.map(|(scene, base, name)|
         programs::InputAnimation::new(scene, base, name, &program.inputs, &mut words)).transpose()?.flatten();
     let spatial_fallback=program.spatial && animation_source.is_some_and(|(scene,_,_)|scene.media_disabled);
-    if spatial_fallback { eprintln!("warning: environment {}: ignored spatial origin dependence; evaluating the directional environment at the origin", origin.display()); }
+    if spatial_fallback { crate::warnings::dropped("spatial_environment", serde_json::json!({"program":origin,"inputs":values}), format!("warning: environment {}: ignored spatial origin dependence; evaluating the directional environment at the origin", origin.display())); }
     if program.spatial && !spatial_fallback {
         ensure!(!program.inputs.fields.iter().any(|f|f.ty==vork_slang::Type::Image),"spatial environments do not yet support image inputs");
         let (scene,_,material)=animation_source.context("spatial environment requires a scene")?;

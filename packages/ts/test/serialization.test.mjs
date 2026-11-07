@@ -6,6 +6,29 @@ import { mkdtemp, readFile, rm, rename, mkdir, writeFile, symlink, realpath, chm
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as sdk from '../dist/index.js';
+import {mkdtempSync, writeFileSync, readFileSync, rmSync} from 'node:fs';
+// Exercise argv through the public render wrapper and a child process.
+function renderArguments(scene, options) {
+  const dir = mkdtempSync(join(tmpdir(), 'vork-render-argv-'));
+  const binary = join(dir, 'vork');
+  const capture = join(dir, 'argv.json');
+  const previous = process.env.VORK_BIN;
+  writeFileSync(binary, '#!/usr/bin/env node\n' +
+    `require('node:fs').writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));`, {mode:0o755});
+  process.env.VORK_BIN = binary;
+  try {
+    // The child only captures arguments; reading absent exposure metadata then fails.
+    try { sdk.render(scene, options); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return JSON.parse(readFileSync(capture, 'utf8'));
+  } finally {
+    if (previous === undefined) delete process.env.VORK_BIN; else process.env.VORK_BIN = previous;
+    rmSync(dir, {recursive:true,force:true});
+  }
+}
+
+test('argv builders are absent from the public SDK', () => {
+  assert.equal('renderArguments' in sdk, false);
+});
 
 test('SDK resolves resource paths without mutating its input', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'vork-sdk-'));
@@ -15,6 +38,11 @@ test('SDK resolves resource paths without mutating its input', async () => {
   try {
     const path = await sdk.writeScene(scene, join(directory, 'scenes/shot.json'), directory);
     const saved = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(saved.$schema, undefined);
+    assert.equal(scene.$schema, undefined);
+    const annotated = {...scene, $schema: 'https://voyager.so/vork/schema/scene.schema.json'};
+    const annotatedPath = await sdk.writeScene(annotated, join(directory, 'annotated.json'), directory);
+    assert.equal(JSON.parse(await readFile(annotatedPath, 'utf8')).$schema, annotated.$schema);
     assert.equal(saved.nodes[0].children[0].file, '../model.glb');
     assert.equal(saved.images.sky.file, '../studio.hdr');
     assert.deepEqual(saved.animation, scene.animation);
@@ -177,20 +205,20 @@ test('SDK preserves the containing directory of symlinked resource files', async
 });
 
 test('SDK render options map to vork render flags', () => {
-  assert.deepEqual(sdk.renderArguments('shot.json', {out: 'a.png'}), ['render', 'shot.json', '--out', 'a.png']);
-  assert.deepEqual(sdk.renderArguments('shot.json', {out: 'a.png', channels: ['all']}), ['render', 'shot.json', '--out', 'a.png', '--channels', 'all']);
-  assert.deepEqual(sdk.renderArguments('shot.json', {out: 'a.png', at: 0, set: {'resolution': [64, 32]}}),
+  assert.deepEqual(renderArguments('shot.json', {out: 'a.png'}), ['render', 'shot.json', '--out', 'a.png']);
+  assert.deepEqual(renderArguments('shot.json', {out: 'a.png', channels: ['all']}), ['render', 'shot.json', '--out', 'a.png', '--channels', 'all']);
+  assert.deepEqual(renderArguments('shot.json', {out: 'a.png', at: 0, set: {'resolution': [64, 32]}}),
     ['render', 'shot.json', '--out', 'a.png', '--at', '0', '--set', 'resolution=[64,32]']);
-  for (const key of ['resolution','samples','previs']) assert.throws(() => sdk.renderArguments('shot.json', {out:'a.png', [key]:1}), /unknown option/);
-  assert.deepEqual(sdk.renderArguments('shot.json', {out: 'a.png', set: {samples: 7}}),
+  for (const key of ['resolution','samples','previs']) assert.throws(() => renderArguments('shot.json', {out:'a.png', [key]:1}), /unknown option/);
+  assert.deepEqual(renderArguments('shot.json', {out: 'a.png', set: {samples: 7}}),
     ['render', 'shot.json', '--out', 'a.png', '--set', 'samples=7']);
-  assert.ok(!sdk.renderArguments('shot.json', {out: ['a.mp4', 'b']}).includes('--previs'));
-  assert.deepEqual(sdk.renderArguments('shot.json', {out: 'a.png', profile: 'std/draft', set: {seed: 4}}),
+  assert.ok(!renderArguments('shot.json', {out: ['a.mp4', 'b']}).includes('--previs'));
+  assert.deepEqual(renderArguments('shot.json', {out: 'a.png', profile: 'std/draft', set: {seed: 4}}),
     ['render', 'shot.json', '--out', 'a.png', '--profile', 'std/draft', '--set', 'seed=4']);
-  assert.deepEqual(sdk.renderArguments('shot.json', {out: 'frames/', frameStart: 3, frameEnd: 7}),
+  assert.deepEqual(renderArguments('shot.json', {out: 'frames/', frameStart: 3, frameEnd: 7}),
     ['render', 'shot.json', '--out', 'frames/', '--frame-start', '3', '--frame-end', '7']);
   for (const key of ['render.camera','camera','render.background','render.resolution','settings.seed','exposure']) {
-    assert.throws(() => sdk.renderArguments('shot.json', {out:'a.png', set:{[key]:1}}), /unknown option/);
+    assert.throws(() => renderArguments('shot.json', {out:'a.png', set:{[key]:1}}), /unknown option/);
   }
   assert.throws(() => sdk.render('shot.json', {out: 'a.png', preview: true}));
 });
@@ -350,7 +378,7 @@ test('relocation preserves expanded text geometry and nested display images', {s
   const text = sdk.text('label',options);
   const display = {program:'blender/filmic',inputs:{lut:{image:{file:'lut.exr'}}}};
   const scene = {version:2,...text,nodes:[{type:'mesh',geometry:{...text.geometry.label}}],
-    render:{display},images:{capture:{render:{compositor:[{program:'post/glare',
+    render:{display},images:{capture:{render:{compositor:[{program:'post/white_balance',
       inputs:{texture:{image:{file:'nested.exr'}}}}]}}}};
   try {
     const path = await sdk.writeScene(scene,join(directory,'out/scene.json'),directory);
@@ -384,5 +412,5 @@ test('numeric program and material tracks preserve the shared scene IR', async (
 
 test('frame selection uses flags, never --set keys', () => {
   for (const key of ['frame_start','frame_end'])
-    assert.throws(() => sdk.renderArguments('shot.json', {out:'a.png', set:{[key]:1}}), /unknown option/);
+    assert.throws(() => renderArguments('shot.json', {out:'a.png', set:{[key]:1}}), /unknown option/);
 });

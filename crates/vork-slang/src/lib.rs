@@ -9,6 +9,8 @@
 //! programs can be concatenated into one scene shader. The kernel side of the
 //! boundary is described by [`Abi`]; see docs/PROGRAMS.md.
 mod image_native;
+mod identity;
+pub use identity::{InputIdentity, PreparedModules, PreparedProgram};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -83,6 +85,7 @@ mod declarations;
 mod hair;
 pub use hair::{HAIR_VEC4S, hair_fields};
 mod openpbr;
+pub mod progress;
 pub mod registry;
 pub mod renderer_registry;
 pub use openpbr::openpbr_fields;
@@ -169,6 +172,8 @@ pub const NO_IMAGE: u32 = u32::MAX;
 
 pub struct Compiler {
     executable: PathBuf,
+    expected: Option<InputIdentity>,
+    captured: Option<std::sync::Arc<Mutex<Option<InputIdentity>>>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -794,12 +799,27 @@ pub struct Program {
     /// Every Slang file read besides the program source (imports); callers
     /// caching a Program must revalidate these.
     pub dependencies: Vec<PathBuf>,
+    /// Install-local bytes from the identity snapshot, refreshed even on a
+    /// proof-cache hit. Native linking must not race ahead of those proofs.
+    #[serde(skip)]
+    pub install_identity: Option<InputIdentity>,
     pub warnings: String,
+    /// Authored stages that this closure cannot execute, independent of compiler diagnostics.
+    pub dropped_stages: Vec<String>,
     /// The closure-effect probe (`Compiler::surface_effects`) as WGSL.
     pub effects: String,
 }
 
 impl Program {
+    /// Refresh diagnostic locations when reusing a compiler-token-identical proof.
+    /// The owned wrapper follows the last marker, even if source comments quote it.
+    pub fn set_native_source(&mut self, source: &str, origin: &Path) -> Result<()> {
+        let generated = self.slang.rsplit_once("\n#line 1 \"<vork program wrapper>\"\n")
+            .context("program is missing its generated native wrapper")?.1;
+        self.slang = program_text(source, origin) + generated;
+        self.include = include_paths(origin);
+        Ok(())
+    }
     pub fn needs_spectral(&self, _abi: &Abi, words: &[Option<u32>]) -> Result<bool> {
         Ok(self.effect_probe()?.needs_spectral(words))
     }
@@ -818,6 +838,7 @@ impl std::fmt::Display for CompilerUnavailable {
     }
 }
 impl std::error::Error for CompilerUnavailable {}
+
 
 impl Compiler {
     /// Explicit override, installed companion toolchain, then developer PATH.
@@ -839,8 +860,22 @@ impl Compiler {
         Self::new(executable)
     }
     pub fn new(executable: impl Into<PathBuf>) -> Self {
+        let executable=executable.into();
+        // The executable directory is an implicit Slang module search path.
+        // An exact-input receipt must not survive selection of another compiler
+        // through PATH, even when both report the pinned version.
+        let name=if cfg!(windows) && executable.extension().is_none() {executable.with_extension("exe")} else {executable.clone()};
+        let resolved=if executable.components().count()==1 && !executable.is_absolute() {
+            std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths)
+                .map(|directory|directory.join(&name))
+                .find(|path|path.is_file()))
+        } else {Some(executable.clone())};
+        let resolved=resolved.map(|path|std::env::current_dir().map_or(path.clone(),|cwd|cwd.join(path)));
+        let executable=resolved.and_then(|path|if cfg!(windows) {Some(path)} else {path.canonicalize().ok()}).unwrap_or(executable);
         Self {
-            executable: executable.into(),
+            executable,
+            expected: None,
+            captured: None,
         }
     }
     pub fn version(&self) -> Result<String> {
@@ -886,6 +921,7 @@ impl Compiler {
             fs::write(path, source)?;
         }
         let output = work.0.join("out");
+        let _progress = progress::Job::start(false);
         let mut command = Command::new(&self.executable);
         command
             .arg(work.0.join(format!("{main}.slang")))
@@ -905,6 +941,8 @@ impl Compiler {
             command.args(["-line-directive-mode", "none"]);
         }
         let depfile = work.0.join("out.d");
+        let repro = work.0.join("native.repro");
+        if self.expected.is_some() || self.captured.is_some() { command.arg("-dump-repro").arg(&repro); }
         let result = compiler_output(command.arg("-depfile").arg(&depfile).arg("-o").arg(&output))
             .context("run Slang compiler")?;
         ensure!(
@@ -915,6 +953,9 @@ impl Compiler {
         );
         // Native-only branches (e.g. VORK_NATIVE_MEDIUM) may import authored modules the WGSL probe never saw.
         reject_reserved_dependencies(&work, &depfile_paths(&read_compiler_text(depfile)?))?;
+        if self.expected.is_some() || self.captured.is_some() {
+            identity::check_imports(self, &work, repro)?;
+        }
         let mut code=fs::read(output)?;
         // Slang emits MSL source; its fp-mode flag cannot configure the later
         // Metal compiler invocation in a passthrough API. Carry the precise
@@ -938,7 +979,7 @@ impl Compiler {
         origin: &Path,
         tag: &str,
     ) -> Result<Program> {
-        let mut ignored_stages = String::new();
+        let mut ignored_stages = Vec::new();
         let mut is_hair = false;
         let mut capabilities = ProgramCapabilities::default();
         let capacity = std::cell::Cell::new(openpbr::BLEND_LOBES);
@@ -965,9 +1006,9 @@ impl Compiler {
             if capabilities.lobes && capabilities.blend_lobes.is_none() {
                 wrapper = checked_blend_wrapper(wrapper, capacity.get());
             }
-            if is_hair && capabilities.lit { ignored_stages.push_str("warning: ignored lit stage on Hair\n"); capabilities.lit=false; }
+            if is_hair && capabilities.lit { ignored_stages.push("lit".into()); capabilities.lit=false; }
             if declarations.contains("aov") { wrapper.push_str(&abi.aov_function("export", inputs, tag)); }
-            if is_hair && capabilities.displacement { ignored_stages.push_str("warning: ignored displacement on Hair\n"); capabilities.displacement=false; }
+            if is_hair && capabilities.displacement { ignored_stages.push("displace".into()); capabilities.displacement=false; }
             if capabilities.displacement { wrapper.push_str(&abi.displacement_function("export", inputs, tag)); }
             if capabilities.lit { wrapper.push_str(&abi.lit_function("export", inputs, tag)); }
             Ok(wrapper)
@@ -1026,7 +1067,9 @@ impl Compiler {
             include: include_paths(origin),
             inputs,
             dependencies: pass.dependencies,
-            warnings: format!("{}{}", pass.diagnostics, ignored_stages),
+            install_identity: None,
+            warnings: pass.diagnostics,
+            dropped_stages: ignored_stages,
             effects,
         })
     }
@@ -1220,8 +1263,11 @@ impl Compiler {
             work.0.join("program.d"),
         );
         fs::write(&input, source)?;
+        let _progress = progress::Job::start(false);
         let mut command = Command::new(&self.executable);
         command.arg(&input).arg(INITIALIZATION).current_dir(&work.0);
+        let repro = work.0.join(if probe { "probe.repro" } else { "proof.repro" });
+        if self.expected.is_some() || self.captured.is_some() { command.arg("-dump-repro").arg(&repro); }
         // Image programs execute directly as WGSL; give their numeric loops
         // the same speed optimization level as the native renderer shaders.
         if optimize {command.arg("-O2");}
@@ -1258,6 +1304,9 @@ impl Compiler {
         );
         let dependencies = depfile_paths(&read_compiler_text(depfile)?);
         reject_reserved_dependencies(work, &dependencies)?;
+        if self.expected.is_some() || self.captured.is_some() {
+            identity::check_imports(self, work, repro)?;
+        }
         Ok(Output {
             wgsl: read_compiler_text(wgsl)?,
             reflection: serde_json::from_slice(&fs::read(reflection)?)?,
@@ -1537,6 +1586,54 @@ mod ast_tests {
     }
 
     #[test]
+    #[ignore = "requires pinned Slang toolchain"]
+    fn reused_native_source_refreshes_locations_without_changing_proofs() -> Result<()> {
+        let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: openpbr_fields() };
+        let compiler = Compiler::discover();
+        let source = "/*\n#line 1 \"<vork program wrapper>\"\n*/\nstruct Inputs {}; Closure surface(ShadingContext c, Inputs i) {return unlit(float3(1.));}";
+        let mut program = compiler.compile_surface(&abi, source, Path::new("first.slang"), "relocate")?;
+        let original_native = program.slang.clone();
+        program.set_native_source(source, Path::new("first.slang"))?;
+        assert_eq!(program.slang, original_native, "an unchanged source must keep identical native code");
+        let wgsl = program.wgsl.clone();
+        let moved = format!("// moved\n// twice\n{source}");
+        program.set_native_source(&moved, Path::new("author/second.slang"))?;
+        assert_eq!(program.wgsl, wgsl, "source locations must not change the reused proof");
+        assert_eq!(program.include, vec![PathBuf::from("author")]);
+        assert!(program.slang.starts_with(&format!("import vork;\n#line 1 \"author/second.slang\"\n{moved}\n")));
+        assert!(!program.slang.contains("first.slang"));
+        // Compile the refreshed native text too: quoting the owned marker in
+        // an authored comment must not duplicate or truncate its declarations.
+        let native = format!("{}\n[shader(\"compute\")][numthreads(1,1,1)] void vork_entry() {{}}", program.slang);
+        let work = Workspace::new()?;
+        write_modules(&work, &abi, "")?;
+        compiler.run(&work, &native, &[work.0.clone()], true)?;
+        Ok(())
+    }
+
+    #[test]
+    fn private_constant_tables_are_safe_but_writes_are_refused() -> Result<()> {
+        let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: openpbr_fields() };
+        let table = "var<private> table: array<f32,2> = array<f32,2>(1.,2.);";
+        validate(&format!("{table} fn lookup(i:u32)->f32 {{return table[i];}}"), &abi)?;
+        for body in ["table[0]=3.;", "write();"] {
+            let wgsl = format!("{table} fn write() {{table[1]=4.;}} fn use_table() {{{body}}}");
+            assert!(validate(&wgsl, &abi).unwrap_err().to_string().contains("read-only"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires pinned Slang toolchain"]
+    fn static_const_array_compiles_with_dynamic_index() -> Result<()> {
+        let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: openpbr_fields() };
+        Compiler::discover().compile_surface(&abi,
+            "struct Inputs {}; static const float3 colors[2]={float3(1,0,0),float3(0,1,0)}; Closure surface(ShadingContext c, Inputs i) {return unlit(colors[uint(c.time)%2]);}",
+            Path::new("author/palette.slang"), "palette")?;
+        Ok(())
+    }
+
+    #[test]
     fn optional_stage_probe_rejects_unrecognized_function_records() {
         let record = "\nFuncDecl:\n{\n parentDecl : ModuleDecl: module\n nameAndLoc : NameLoc{\"medium\"}\n}";
         assert!(ast_declarations(record).unwrap().contains("medium"));
@@ -1598,7 +1695,6 @@ fn depfile_paths(text: &str) -> Vec<PathBuf> {
 fn isolate(wgsl: &str, tag: &str, allow_workgroup: bool) -> Result<String> {
     ensure!(
         !wgsl.contains("@binding")
-            && !wgsl.contains("var<private>")
             && (allow_workgroup || !wgsl.contains("var<workgroup>")),
         "programs may not declare global resources or variables"
     );
@@ -1661,7 +1757,7 @@ fn validated_module(wgsl: &str, abi: &Abi) -> Result<naga::Module> {
     .unwrap();
     let parsed = naga::front::wgsl::parse_str(&module)
         .map_err(|e| anyhow::anyhow!(e.emit_to_string(&module)))?;
-    naga::valid::Validator::new(
+    let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         // Half packing is ordinary f32 arithmetic, also used by compositor
         // working images; it does not enable native f16 shader types.
@@ -1669,6 +1765,15 @@ fn validated_module(wgsl: &str, abi: &Abi) -> Result<naga::Module> {
     )
     .validate(&parsed)
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    for (global, variable) in parsed.global_variables.iter() {
+        if variable.space != naga::AddressSpace::Private { continue; }
+        let writes = naga::valid::GlobalUse::WRITE | naga::valid::GlobalUse::ATOMIC;
+        ensure!(variable.init.is_some()
+            && parsed.functions.iter().all(|(f, _)| !info[f][global].intersects(writes))
+            && (0..parsed.entry_points.len()).all(|e| !info.get_entry_point(e)[global].intersects(writes)),
+            "program global {:?} must be initialized and read-only; use Inputs or compute buffers for mutable state; see vork help programs",
+            variable.name);
+    }
     Ok(parsed)
 }
 

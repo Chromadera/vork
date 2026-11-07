@@ -276,7 +276,7 @@ impl Stage {
         Self {layout,pack,unpack}
     }
     pub(super) fn run(&self, stage: &super::Stage, r: &Renderer, encoder: &mut wgpu::CommandEncoder,
-        samples: usize, timing: &mut Timing, segments: &mut crate::command_finish::Segments) -> Result<()> {
+        samples: usize, input_scale: f32, timing: &mut Timing, segments: &mut crate::command_finish::Segments) -> Result<()> {
         use wgpu::util::DeviceExt;
         let mut engine=r.denoiser.lock().map_err(|_| anyhow::anyhow!("OIDN engine lock poisoned"))?;
         let engine=engine.as_mut().context("OIDN runtime not initialized")?;
@@ -324,7 +324,7 @@ impl Stage {
         let count=stage.size[0]*stage.size[1];
         for channel in 0..if stage.spectral {3} else {1} {
         let params=r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {label:Some("OIDN preparation parameters"),
-            contents:bytemuck::cast_slice(&[count,samples as u32,stage.guide_alpha as u32,stage.size[0],stage.spectral as u32,channel,0,0]),usage:wgpu::BufferUsages::UNIFORM});
+            contents:bytemuck::cast_slice(&[count,samples as u32,stage.guide_alpha as u32,stage.size[0],stage.spectral as u32,channel,input_scale.to_bits(),0]),usage:wgpu::BufferUsages::UNIFORM});
         let buffers=[&params,&stage.accumulation,&stage.guides,&workspace.shared.buffer,&stage.output];
         let entries:Vec<_>=buffers.iter().enumerate().map(|(i,b)|wgpu::BindGroupEntry {binding:i as u32,resource:b.as_entire_binding()}).collect();
         let bindings=r.device.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("OIDN preparation"),layout:&self.layout,entries:&entries});
@@ -394,13 +394,17 @@ mod tests {
         let r=Renderer::new()?;
         // Exercise non-workgroup widths, alpha, background, no guides, retained
         // filters, resolution changes, and repeated handoffs of shared memory.
-        for (size,guided,spectral) in [([73,31],true,false),([73,31],true,true),([19,41],false,true),([73,31],true,false)] {
+        // Force the host-staging fallback too; its pre-exposure must match the
+        // same independently filtered working-unit reference.
+        for cpu in [false, true] {
+        if cpu { *r.denoiser.lock().unwrap() = Some(Engine::new()?); }
+        for (size,guided,spectral,scale) in [([73,31],true,false,1_f32),([73,31],true,true,131072.),([19,41],false,true,0.03125),([73,31],true,false,131072.)] {
             let count=(size[0]*size[1]) as usize;
             let samples=4;
             let associated:Vec<[f32;4]>=(0..count).map(|i| {
                 let alpha=if i%13==0 {0.} else {0.5};
                 let rgb=if spectral {[-0.25,0.5,0.125]} else {[(i%17) as f32/17.,0.4,0.8]};
-                [alpha*rgb[0],alpha*rgb[1],alpha*rgb[2],alpha].map(|x| x*samples as f32)
+                [alpha*rgb[0]/scale,alpha*rgb[1]/scale,alpha*rgb[2]/scale,alpha].map(|x| x*samples as f32)
             }).collect();
             let guides:Vec<[f32;4]>=(0..count).flat_map(|i| {
                 let a=if i%7==0 {0.} else {2.};
@@ -414,7 +418,7 @@ mod tests {
             let mut stage=super::super::Stage::new(&r,&Denoiser::default(),&accumulation,&output,&guide_buffer,true,guided,size)?;
             stage.spectral=spectral;
             let device=r.denoiser.lock().unwrap().as_ref().unwrap().device.clone();
-            ensure!(device.gpu,"test requires GPU OIDN; CPU fallback cannot validate interop");
+            ensure!(device.gpu!=cpu,"test must exercise the requested OIDN backend");
             let mut bytes=bytemuck::cast_slice(&associated).to_vec();
             bytes.extend_from_slice(bytemuck::cast_slice(&guides));
             let Inputs {mut color,mut albedo,normals,..}=unpack_inputs(&bytes,samples,count,true);
@@ -422,11 +426,13 @@ mod tests {
             if spectral {
                 for rgb in color.iter_mut().chain(albedo.iter_mut()) { *rgb=spectral_color(*rgb,false); }
             }
+            for rgb in &mut color {for c in rgb {*c*=scale;}}
             if spectral {reference.denoise_spectral(&Denoiser::default(),size,&mut color,&albedo,&normals,guided)?;}
             else {reference.denoise(&Denoiser::default(),size,&mut color,&albedo,&normals,guided)?;}
+            for rgb in &mut color {for c in rgb.iter_mut() {*c/=scale;}}
             if spectral {for rgb in &mut color { *rgb=spectral_color(*rgb,true); }}
             let mut encoder=r.device.create_command_encoder(&Default::default());
-            stage.run(&r,&mut encoder,samples,&mut Timing::default(),&mut crate::command_finish::Segments::default())?;
+            stage.run(&r,&mut encoder,samples,scale,&mut Timing::default(),&mut crate::command_finish::Segments::default())?;
             let readback=r.device.create_buffer(&wgpu::BufferDescriptor {label:None,size:(count*16) as u64,
                 usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false});
             encoder.copy_buffer_to_buffer(&output,0,&readback,0,(count*16) as u64);
@@ -439,9 +445,10 @@ mod tests {
                 let actual:[f32;4]=std::array::from_fn(|c| f32::from_ne_bytes(pixel[c*4..c*4+4].try_into().unwrap()));
                 let mut expected=associated[i].map(|x|x/samples as f32);
                 if guides[2*i][3]>0. {for c in 0..3 {expected[c]=color[i][c]*expected[3];}}
-                for c in 0..4 {assert!((actual[c]-expected[c]).abs()<2e-4,"{size:?} guided={guided} pixel {i}: {actual:?} != {expected:?}");}
+                for c in 0..4 {assert!((actual[c]-expected[c]).abs()*(if c<3 {scale} else {1.})<2e-4,"{size:?} guided={guided} pixel {i}: {actual:?} != {expected:?}");}
             }
             drop(data);readback.unmap();
+        }
         }
         Ok(())
     }

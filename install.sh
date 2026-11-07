@@ -5,7 +5,7 @@
 set -eu
 repo=${VORK_REPO:-voyager-so/vork}
 # Default version is generated from Cargo.toml by scripts/sync-version.
-version=${VERSION:-0.1.0}
+version=${VERSION:-0.2.0}
 default_prefix=$HOME/.local
 prefix=${PREFIX:-"$default_prefix"}
 dry_run=false
@@ -30,8 +30,13 @@ esac
 archive="vork-${version}-${platform}.tar.gz"
 base=${VORK_DOWNLOAD_BASE:-"https://github.com/$repo/releases/download/v$version"}
 base=${base%/}
+# A downloaded installer can accompany an archive; piped installs still download.
+installer_dir=
+if [ -f "$0" ]; then installer_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P); fi
 if "$dry_run"; then
-    printf 'Archive: %s/%s\nChecksums: %s/SHA256SUMS\nBinary: %s/bin/vork\n' "$base" "$archive" "$base" "$prefix"
+    source_base=$base
+    if [ -n "$installer_dir" ] && [ -f "$installer_dir/$archive" ]; then source_base=$installer_dir; fi
+    printf 'Archive: %s/%s\nChecksums: %s/SHA256SUMS\nBinary: %s/bin/vork\n' "$source_base" "$archive" "$source_base" "$prefix"
     exit 0
 fi
 command -v curl >/dev/null 2>&1 || { echo 'vork install needs curl; install it and run this again.' >&2; exit 1; }
@@ -52,8 +57,15 @@ fetch() {
         exit 1
     }
 }
-fetch "$archive"
-fetch SHA256SUMS
+if [ -n "$installer_dir" ] && [ -f "$installer_dir/$archive" ]; then
+    echo "Using bundled archive: $installer_dir/$archive"
+    [ -f "$installer_dir/SHA256SUMS" ] || { echo 'Bundled archive requires SHA256SUMS beside install.sh' >&2; exit 1; }
+    cp "$installer_dir/$archive" "$work/$archive"
+    cp "$installer_dir/SHA256SUMS" "$work/SHA256SUMS"
+else
+    fetch "$archive"
+    fetch SHA256SUMS
+fi
 (
     cd "$work" || exit 1
     awk -v name="$archive" '$2 == name || $2 == "*" name {print}' SHA256SUMS > selected.sha256

@@ -2,11 +2,16 @@ COMPOSITOR
 render.compositor: ordered material-name|{material,name?,resolution?} entries; last image is output; material may be inline.
 resolution: [width,height] or positive output scale (floor, minimum 1); omitted = output; final image resampled to output.
 Image bindings: {node:earlier-name}, {image:name}, {channel:color|depth|view_normal|object_index|motion|shadow_catcher}, {aov:name}; names are local to each graph.
+For bloom, add these two entries to render.compositor:
+  {"name":"highlights","material":{"program":"std/bloom","inputs":{"stage":"prepare","original":{"channel":"color"}}}},
+  {"material":{"program":"std/bloom","inputs":{"stage":"combine","original":{"channel":"color"},"source":{"node":"highlights"}}}}
+This one-level bloom preserves alpha; adjust threshold on prepare and strength on combine.
+the authored glare example (examples/compositor-effects/glare.slang) reads the previous compositor result (first entry reads beauty); no Image input. Returns additive glare; merge with the original in a later entry.
 <!-- all -->
 COMPOSITOR PROGRAM REFERENCE
 float4 composite(CompositeContext,Inputs): scene-linear premultiplied RGBA; compositor_sample(uv) reads previous result (first reads accumulated beauty).
 compositor_sample(image,uv): clamped bilinear; compositor_load(image,int2): clamped pixel; compositor_size(image): pixels; compositor_size() reads previous extent. UV origin top left; ctx.size is working extent.
-Runs after shutter accumulation/denoising, before exposure/display. No history. std/bloom stages: prepare/downsample/upsample/combine; post/glare returns additive RGBA for a separate merge.
+Runs after shutter accumulation/denoising, before exposure/display. No history. std/bloom stages: prepare/downsample/upsample/combine; the authored glare example (examples/compositor-effects/glare.slang) returns additive RGBA for a separate merge.
 
 std/bloom follows Blender bloom arithmetic through an explicit image pyramid; no stages or bindings are inserted automatically.
 Inputs (defaults): stage=combine (prepare|downsample|upsample|combine); original, source, fine are Image bindings with no default.
@@ -23,3 +28,7 @@ threshold=1: nonnegative scene-linear highlight cutoff; smoothness=0.1: knee wid
 clamp=false, maximum=10: optional nonnegative highlight-magnitude ceiling in prepare.
 strength=1, saturation=1, tint=[1,1,1]: nonnegative combine controls; strength=0 preserves the nonnegative original.
 Missing stage-required Image bindings are scene errors, including zero-strength combine nodes.
+
+Copy the entire examples/compositor-effects directory; glare needs highlight.slang
+next to it. The shipped glare-streaks.json demonstrates the additive merge graph.
+See vork help upgrade for 0.1 program and Slang-import replacements.

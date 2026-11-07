@@ -1,0 +1,180 @@
+{
+  "version": 2,
+  "render": {
+    "resolution": [
+      384,
+      216
+    ],
+    "fps": 12,
+    "duration": 0.5,
+    "background": [
+      0,
+      0,
+      0
+    ],
+    "compositor": [
+      {"name":"glare0.original","material":{"program":{"source":"import vork; struct Inputs { Image source; }; float4 composite(CompositeContext c, Inputs i) { return compositor_load(i.source,int2(c.uv*c.size)); }"},"inputs":{"source":{"channel":"color"}}}},
+      "effect",
+      {"material":{"program":{"source":"import vork; struct Inputs { Image original; }; float4 composite(CompositeContext c, Inputs i) { return compositor_sample(i.original,c.uv)+compositor_sample(c.uv); }"},"inputs":{"original":{"node":"glare0.original"}}}},
+      {"program":"post/white_balance","inputs":{"temperature":6500,"tint":10}}
+    ]
+  },
+  "nodes": [
+    {"type":"camera","name":"camera","translation":[0,0,5],"material":{"program":"std/camera","inputs":{"lens":50,"projection":"persp"}}},
+    {
+      "type": "mesh",
+      "name": "amber",
+      "geometry": "panel",
+      "materials": [
+        "amber"
+      ],
+      "translation": [-0.9,0,0]
+    },
+    {
+      "type": "mesh",
+      "name": "white",
+      "geometry": "panel",
+      "materials": [
+        "white"
+      ],
+      "translation": [0.0,0,0]
+    },
+    {
+      "type": "mesh",
+      "name": "blue",
+      "geometry": "panel",
+      "materials": [
+        "blue"
+      ],
+      "translation": [0.9,0,0]
+    }
+  ],
+  "buffers": {
+    "position": {
+      "type": "vec3",
+      "data": [
+        [
+          -0.16,
+          -0.16,
+          0
+        ],
+        [
+          0.16,
+          -0.16,
+          0
+        ],
+        [
+          0.16,
+          0.16,
+          0
+        ],
+        [
+          -0.16,
+          0.16,
+          0
+        ]
+      ]
+    },
+    "normal": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ]
+    },
+    "index": {
+      "type": "u32",
+      "data": [
+        0,
+        1,
+        2,
+        0,
+        2,
+        3
+      ]
+    }
+  },
+  "geometry": {
+    "panel": {
+      "attributes": {
+        "POSITION": "position",
+        "NORMAL": "normal"
+      },
+      "indices": "index"
+    }
+  },
+  "materials": {
+    "amber": {
+      "inputs": {
+        "base_weight": 0,
+        "emission_luminance": 100,
+        "emission_color": [
+          1,
+          0.25,
+          0.03
+        ]
+      }
+    },
+    "white": {
+      "inputs": {
+        "base_weight": 0,
+        "emission_luminance": 100,
+        "emission_color": [
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    "blue": {
+      "inputs": {
+        "base_weight": 0,
+        "emission_luminance": 100,
+        "emission_color": [
+          0.03,
+          0.2,
+          1
+        ]
+      }
+    },
+    "effect": {
+      "program":{"file":"glare.slang"},
+      "inputs": {
+        "type": "fog_glow",
+        "strength": 2.0
+      }
+    }
+  },
+  "animation": [
+    {
+      "tracks": [
+        {
+          "path": [
+            "nodes",
+            "white",
+            "translation"
+          ],
+          "keys": [[0,[0,-0.3,0]],[0.5,[0,0.3,0]]]
+        }
+      ]
+    }
+  ]
+}

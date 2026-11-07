@@ -39,6 +39,9 @@ pub(crate) enum ChangeKey {
     ImageClock(String),
     /// The frame slot's acceleration structures have had their first build.
     RayStructures,
+    /// Logical displacement evaluation, independent of its packed control page.
+    Displacement(usize),
+    DisplacedPositions(usize),
     ComputedGeometry(usize),
     ComputedPositions(usize),
     /// Source publication consumed by an installed shared field index.
@@ -118,12 +121,23 @@ impl ChangeTracker {
     /// Canonical value history, independent of the frame slot's buffer identity.
     /// Validity matters: the first write of zero can replace a nonzero installed value.
     pub(crate) fn append_buffer_inputs(&self, buffer: &wgpu::Buffer, inputs: &mut Vec<u8>) {
-        let history = self.history.get(&ChangeKey::Buffer(buffer.clone()));
+        self.append_inputs(ChangeKey::Buffer(buffer.clone()), inputs);
+    }
+    pub(crate) fn append_inputs(&self, key: ChangeKey, inputs: &mut Vec<u8>) {
+        let history = self.history.get(&key);
         inputs.extend_from_slice(&(history.map_or(0, |h| h.bytes.len()) as u64).to_le_bytes());
         if let Some(history) = history {
             inputs.extend_from_slice(&history.bytes);
             inputs.extend(history.valid.iter().map(|v| u8::from(*v)));
         }
+    }
+    /// Publish a derived resource without inventing a second dirty mechanism.
+    pub(crate) fn publish(&mut self, key: ChangeKey) {
+        self.history.entry(key).or_default().stamp = self.sample;
+    }
+    /// Upload publication and logical changes share one sample generation.
+    pub(crate) fn buffer_dirty(&self, buffer: &wgpu::Buffer) -> bool {
+        self.dirty(ChangeKey::Buffer(buffer.clone()))
     }
     pub(crate) fn dirty(&self, key: ChangeKey) -> bool { self.history.get(&key).is_some_and(|h|h.stamp == self.sample) }
     pub(crate) fn changed(&mut self, key: ChangeKey, bytes: &[u8]) -> bool {
@@ -163,6 +177,7 @@ impl ChangeTracker {
         if !history.changed(offset as usize, bytes) {
             return;
         }
+        history.stamp = self.sample;
         self.record_upload(buffer, offset, bytes);
     }
     fn record_upload(&mut self, buffer: &wgpu::Buffer, offset: u64, bytes: &[u8]) {
@@ -1310,6 +1325,40 @@ mod orientation_tests {
 #[cfg(test)]
 mod upload_cache_tests {
     use super::UploadCache;
+    #[test]
+    fn upload_publication_survives_merging_and_drain_until_the_next_sample() {
+        let (device, _) = wgpu::Device::noop(&Default::default());
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None, size: 16, usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let other = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None, size: 16, usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut changes = super::ChangeTracker::default();
+        changes.sample = 1;
+        assert!(!changes.buffer_dirty(&buffer));
+        changes.upload(&buffer, 4, &[0; 4]); // First zero write is a publication.
+        changes.upload(&buffer, 8, &[1; 4]); // Adjacent ranges merge.
+        assert_eq!(changes.uploads.len(), 1);
+        assert!(changes.buffer_dirty(&buffer));
+        assert!(!changes.buffer_dirty(&other));
+        changes.uploads.clear(); // Submission takes the work list, not its history.
+        changes.bytes.clear();
+        assert!(changes.buffer_dirty(&buffer));
+        changes.sample += 1;
+        changes.upload(&buffer, 4, &[0; 4]);
+        assert!(!changes.buffer_dirty(&buffer));
+        assert!(changes.uploads.is_empty());
+        changes.upload(&buffer, 6, &[2; 4]); // Partial overlap.
+        changes.upload(&buffer, 6, &[2; 4]); // Unchanged write cannot clear dirty.
+        assert!(changes.buffer_dirty(&buffer));
+        assert_eq!(changes.uploads.len(), 1);
+        changes.sample += 1;
+        assert!(!changes.buffer_dirty(&buffer));
+    }
+
     #[test]
     fn partial_overlaps_and_first_zero_writes_remain_dirty() {
         let mut cache = UploadCache::default();

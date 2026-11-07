@@ -755,7 +755,7 @@ impl FrameSlot {
         outputs: ReadbackOutputs,
     ) -> Result<()> {
         if self.propagation_motion && (outputs.motion || outputs.float.motion) && !self.warned_propagation_motion {
-            eprintln!("warning: ignored image motion under authored curved propagation; motion output is zero, sampled shutter blur is retained");
+            crate::warnings::dropped("propagation_motion", serde_json::json!({"channel":"motion","propagation":"curved"}), format!("warning: ignored image motion under authored curved propagation; motion output is zero, sampled shutter blur is retained"));
             self.warned_propagation_motion=true;
         }
         self.gpu_check(r)?;
@@ -1338,7 +1338,7 @@ impl FrameSlot {
                         }
                     }
                     if let Some(stage) = &self.view.post.denoiser {
-                        stage.run(r, &mut encoder, self.view.sample_count, &mut self.denoise_ms, &mut self.sample_segments)?;
+                        stage.run(r, &mut encoder, self.view.sample_count, s.display_program.denoise_scale(frame_time), &mut self.denoise_ms, &mut self.sample_segments)?;
                     }
                 }
                 Pass::Readback => self.ring.encode(&mut encoder, self.view.readback_outputs),
@@ -1600,9 +1600,9 @@ impl FrameSlot {
         }
         if placement_errors!=0 {
             fail(self);
-            anyhow::bail!("computed placement rejected: {}{}",
+            return Err(anyhow::anyhow!("computed placement rejected: {}{}",
                 if placement_errors&1!=0 {"live count exceeds installed capacity; "} else {""},
-                if placement_errors&2!=0 {"nonfinite translation/scale or invalid unit rotation"} else {""});
+                if placement_errors&2!=0 {"nonfinite translation/scale or invalid unit rotation"} else {""}).context(crate::failure::FailureKind::Scene));
         }
         // The shader reports its largest band's evaluations; the frame estimate
         // gives every full band of the most finely banded view that many.

@@ -418,7 +418,7 @@ impl CaptureView {
                     if step.pass == crate::graph::Pass::Denoise {
                         if let Some(stage) = &view.post.reconstruction { stage.encode(encoder,None); }
                         if let Some(stage) = &view.post.denoiser {
-                            stage.run(renderer, encoder, view.sample_count, denoise_timing, segments)?;
+                            stage.run(renderer, encoder, view.sample_count, 1., denoise_timing, segments)?;
                         }
                     } else {
                         crate::graph::encode_view(encoder, view, step, renderer, segments)?;

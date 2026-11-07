@@ -777,6 +777,7 @@ mod tests {
     /// unwraps and `unreachable!` type matches, or vork's bufferView slice; each
     /// is now an error naming the problem.
     #[test]
+    #[cfg(vork_private_tests)]
     fn malformed_documents_are_errors() {
         let seeds = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vork-fuzz/seeds/gltf");
         for (seed, cause) in [
@@ -796,10 +797,12 @@ mod tests {
 
     #[test]
     fn short_accessor_stride_is_an_error() {
-        let bytes=include_bytes!("../../vork-fuzz/seeds/gltf/short-accessor-stride.gltf");
+        let bytes=br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteLength":12,"byteStride":4}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3","min":[0,0,0],"max":[0,0,0]}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+"#;
         let error=from_slice(bytes).unwrap_err().to_string();
         assert!(error.contains("byteStride 4 is smaller than its 12-byte element"),"{error}");
-        let bytes=include_bytes!("../../vork-fuzz/seeds/gltf/sparse-accessor-stride.gltf");
+        let bytes=br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":16,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAAAAAA=="}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":1},{"buffer":0,"byteOffset":4,"byteLength":12,"byteStride":4}],"accessors":[{"componentType":5126,"count":1,"type":"VEC3","min":[0,0,0],"max":[0,0,0],"sparse":{"count":1,"indices":{"bufferView":0,"componentType":5121},"values":{"bufferView":1}}}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+"#;
         let error=from_slice(bytes).unwrap_err().to_string();
         assert!(error.contains("sparse views must not declare byteStride"),"{error}");
     }

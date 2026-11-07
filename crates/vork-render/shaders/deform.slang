@@ -70,7 +70,12 @@ PoseVertex evaluate_vertex(uint i, uint pose, float4 header) {
     let determinant = dot(linear[0], cross(linear[1], linear[2]));
     // A collapsed skin still feeds displacement preparation while hidden.
     // Its normal has no inverse frame; retain the finite authored/morphed normal.
-    if (determinant!=0.) {n = normalize(mul(n, cofactor) * sign(determinant));}
+    if (determinant!=0.) {
+        let transformed=mul(n,cofactor)*sign(determinant);
+        let scale=max(abs(transformed.x),max(abs(transformed.y),abs(transformed.z)));
+        // Zero morph/leaf-tip normals remain finite until the surface's face fallback.
+        n=all(isfinite(transformed)) && scale>0. ? normalize(transformed/scale) : float3(0.);
+    }
     tangent = mul(tangent, linear);
     PoseVertex result;
     result.position=p; result.normal=n; result.tangent=float4(tangent,bind_tangent.w * sign(determinant));

@@ -1754,18 +1754,12 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.54.0"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0c168a474b95bfecfe908a65d4bdffc523144b649a74c09c286afb35d53e0bc"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "pin-project-lite",
 ]
-
-[[package]]
-name = "ttf-parser"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "unarray"
@@ -1805,7 +1799,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vork-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1820,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "vork-encode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1833,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "vork-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "glam",
@@ -1844,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "vork-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1878,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "vork-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "glam",
@@ -1889,9 +1883,10 @@ dependencies = [
 
 [[package]]
 name = "vork-slang"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "libc",
  "naga",
  "serde",
@@ -1901,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "vork-std"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1914,7 +1909,7 @@ dependencies = [
  "rquickjs",
  "serde",
  "serde_json",
- "ttf-parser",
+ "xberg-ttf-parser",
 ]
 
 [[package]]
@@ -2288,6 +2283,12 @@ checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
 ]
+
+[[package]]
+name = "xberg-ttf-parser"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92b07d4e7aae5dd7a6c145dfbce4f5dbec692b5e1bb56149841401c4f197956b"
 
 [[package]]
 name = "xml-rs"

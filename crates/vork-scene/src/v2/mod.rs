@@ -42,6 +42,10 @@ pub enum NameOr<T> {
 #[serde(deny_unknown_fields)]
 #[schemars(extend("x-help-extra" = "coordinates: glTF right-handed Y-up; cameras look along local -Z"))]
 pub struct Scene {
+    /// Editor JSON Schema address; metadata only, never fetched by the renderer.
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-help-path" = "scene.$schema", "x-help" = "string; editor schema URL"))]
+    pub schema: Option<String>,
     /// Internal release normalization; never scene content.
     #[serde(skip)]
     pub media_disabled: bool,
@@ -246,6 +250,15 @@ pub(super) fn validate_name(s: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn editor_schema_is_optional_metadata() {
+        let input = serde_json::json!({"version": 2, "nodes": [], "$schema": "https://voyager.so/vork/schema/scene.schema.json"});
+        let scene: Scene = serde_json::from_value(input).unwrap();
+        assert_eq!(scene.schema.as_deref(), Some("https://voyager.so/vork/schema/scene.schema.json"));
+        assert_eq!(serde_json::to_value(scene).unwrap()["$schema"], "https://voyager.so/vork/schema/scene.schema.json");
+        assert!(serde_json::from_value::<Scene>(serde_json::json!({"version": 2, "nodes": [], "$schem": "typo"})).is_err());
+    }
+
+    #[test]
     fn propagation_is_only_program_and_ordered_bounds() {
         let scene=serde_json::json!({"version":2,"nodes":[{"type":"camera"}],
             "programs":{"step":{"source":"struct Inputs {};"}},
@@ -391,7 +404,7 @@ mod tests {
         assert!(error.contains("unknown program \"blender/principled\"")
             && error.contains("use std/openpbr"), "{error}");
         assert!(crate::libraries::module_source("blender/principled").is_none());
-        assert!(crate::libraries::module_source("blender/principled_volume").is_some());
+        assert_eq!(crate::libraries::module_source("blender/principled_volume").is_some(), cfg!(feature="test-support"));
     }
     #[test]
     fn camera_material_uses_shared_inline_material() {
@@ -539,7 +552,7 @@ mod light_link_tests {
 mod launch_api_tests {
     #[test]
     fn legacy_world_medium_decodes_but_is_not_an_api_field() {
-        let scene=super::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"},{"type":"light","shape":"environment","medium":{"program":"std/fog"}}]}"#).unwrap();
+        let scene=super::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"},{"type":"light","shape":"environment","medium":{"program":{"source":"struct Inputs {}; MediumCoefficients medium(MediumContext c, Inputs i) { return MediumCoefficients(); }"}}}]}"#).unwrap();
         assert!(matches!(&scene.nodes[1].kind,super::NodeKind::Light {medium:Some(_),..}));
         let schema=super::schema().to_value().to_string();
         assert!(!schema.contains("light.medium"));

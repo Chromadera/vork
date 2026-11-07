@@ -1,0 +1,1 @@
+{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"parent","translation":[2,3,4],"children":[1,2]},{"name":"shot","camera":0,"translation":[0,0,5]},{"camera":1}],"cameras":[{"type":"perspective","perspective":{"yfov":1,"znear":0.2,"zfar":50}},{"type":"orthographic","orthographic":{"xmag":3,"ymag":2,"znear":0.1,"zfar":40}}]}

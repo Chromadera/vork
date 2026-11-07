@@ -113,6 +113,10 @@ export type AovType = "value" | "color";
 export type MotionBlurPosition = "start" | "center" | "end";
 
 export interface Scene {
+  /**
+   * Editor JSON Schema address; metadata only, never fetched by the renderer.
+   */
+  $schema?: string | null;
   animation?: Layer[];
   buffers?: {
     [k: string]: Buffer;

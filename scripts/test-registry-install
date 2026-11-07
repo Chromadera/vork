@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Check installed project packages without a global vork. Run inside a fresh
+npm project and venv after installing from the private registry/index.
+Rendering and setup require a supported real GPU; --gpu enables them.
+"""
+import argparse
+import json
+import ctypes
+import os
+import shutil
+from pathlib import Path
+import subprocess
+import sys
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--gpu', action='store_true')
+a = p.parse_args()
+
+def run(args):
+    print('+', *args, flush=True)
+    args[0] = shutil.which(args[0]) or args[0]
+    subprocess.run(args, check=True)
+
+run(['npx', '--no-install', 'vork', '--version'])
+run([sys.executable, '-c', 'from vork._engine import engine; import subprocess; subprocess.run([engine(), "--version"], check=True)'])
+run(['node', '--input-type=module', '-e', 'import {extrude} from "@voyager-so/vork"; console.log(Object.keys(extrude("shape", {outline:[[0,0],[1,0],[0,1]]})));'])
+run([sys.executable, '-c', 'from vork import std; print(list(std("sphere", name="ball")))'])
+from vork._engine import engine
+runtime = Path(engine()).parent
+run([str(runtime / 'slang/bin' / ('slangc.exe' if os.name == 'nt' else 'slangc')), '-version'])
+oidn = runtime / 'oidn' / ('bin/OpenImageDenoise.dll' if os.name == 'nt' else ('lib/libOpenImageDenoise.2.dylib' if sys.platform == 'darwin' else 'lib/libOpenImageDenoise.so.2'))
+ctypes.CDLL(str(oidn))
+print('Installed OIDN runtime loads:', oidn, flush=True)
+
+if a.gpu:
+    scene = {'version': 2, 'nodes': [
+        {'type': 'mesh', 'geometry': 'ball', 'name': 'ball'},
+        {'type': 'light', 'shape': 'point', 'translation': [2, 3, 4], 'energy': 100},
+        {'type': 'camera', 'translation': [0, 0, 4], 'target': [0, 0, 0]}],
+        'render': {'resolution': [128, 128]}}
+    from vork import std
+    scene.update(std('sphere', name='ball'))
+    Path('smoke.json').write_text(json.dumps(scene))
+    for i, command in enumerate([['npx', '--no-install', 'vork'], [str(Path(sys.executable).parent / ('vork.exe' if sys.platform == 'win32' else 'vork'))]]):
+        run(command + ['setup'])
+        run(command + ['render', 'smoke.json', '--out', ('npm.png' if i == 0 else 'pip.png')])
+    run(['node', '--input-type=module', '-e', 'import {render} from "@voyager-so/vork"; render("smoke.json", {out:"ts-api.png"});'])
+    run([sys.executable, '-c', 'from vork import render; render("smoke.json", "python-api.png")'])
+    run(['npx', '--no-install', 'vork', 'render', 'smoke.json', '--frame-start', '0', '--frame-end', '2', '--out', 'smoke.mp4'])
+    scene['programs'] = {'paint': {'source': 'import vork; struct Inputs {}; Closure surface(ShadingContext ctx, Inputs inputs) { Closure c = {}; c.base_color = float3(0.8, 0.15, 0.05); c.specular_roughness = 0.4; return c; }'}}
+    scene['materials'] = {'paint': {'program': 'paint'}}
+    scene['nodes'][0]['materials'] = ['paint']
+    Path('custom.json').write_text(json.dumps(scene))
+    run(['npx', '--no-install', 'vork', 'render', 'custom.json', '--out', 'custom.png'])

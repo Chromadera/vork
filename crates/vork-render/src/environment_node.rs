@@ -31,16 +31,16 @@ impl Settings {
                     ..
                 } = &node.kind
                 {
-                    let label = format!("node {index} ({:?})", node.name);
                     if let Some(first) = first.as_ref() {
-                        bail!("only one environment is supported; found {first} and {label}");
+                        crate::warnings::additional_environment(node, first, index);
+                    } else {
+                        *first = Some(format!("node {index} ({:?})", node.name));
+                        *found = Some(Settings {
+                            source: Some(index),
+                            material: material.clone(),
+                            medium: medium.clone(),
+                        });
                     }
-                    *first = Some(label);
-                    *found = Some(Settings {
-                        source: Some(index),
-                        material: material.clone(),
-                        medium: medium.clone(),
-                    });
                 }
                 visit(&node.children, next, found, scene, first)?;
             }
@@ -144,11 +144,16 @@ mod tests {
         let input = vork_scene::v2::from_test_value(
             json!({"version":2,"nodes":[{"type":"light","shape":"environment","name":"world_a"},{"type":"node","children":[{"type":"light","shape":"environment","name":"world_b","energy":0}]}]}),
         )?;
-        let error = Settings::from_scene(&input).unwrap_err().to_string();
-        for expected in ["only one", "world_a", "world_b", "node 0", "node 2"] {
-            assert!(error.contains(expected), "{error}");
-        }
-        assert!(!error.contains("raster"));
+        // Launch keeps the first environment and reports each dropped request.
+        let collector = crate::warnings::Collector::default();
+        let _scope = collector.enter();
+        assert_eq!(Settings::from_scene(&input)?.source, Some(0));
+        let warnings = collector.snapshot();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "additional_environment");
+        assert_eq!(warnings[0].requested["node_index"], 2);
+        assert_eq!(warnings[0].requested["node"]["name"], "world_b");
+        assert!(warnings[0].requested["retained_environment"].as_str().unwrap().contains("world_a"));
         Ok(())
     }
 }

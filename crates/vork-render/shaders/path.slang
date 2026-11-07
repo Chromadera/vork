@@ -633,7 +633,7 @@ float3 next_event<V:IVariant,P:IProgram>(HitSurface shading, Closure c, float3 v
     if(!source.delta && any(sample.weight>float3(0.)) && dot(sample.direction,sample.direction)>0.
         && (contribution&sample.event)!=0u
         && (shading.s.is_hair || path_event_hemisphere(c,sample.event,sample.direction,geometric,shading.s.geometric))
-        && !(c.geometry_thin_walled && !transport_rough_transmission(c) && sample.event==REG_RAY_TRANSMISSION)) {
+        && !(transport_null_event(c,media.incident.ior,sample))) {
         let optical=dot(shading.s.geometric,sample.direction)<0. ? media.transmitted : media.incident;
         let weight=sample.pdf>0. ? mis_power(sample.pdf,segment_light_pdf<V>(l,world,sample.direction)) : 1.;
         bsdf_endpoint=sample.weight*(weight/probability)*segment_analytic<V,P>(path_origin(shading,world,error,sample.direction),sample.direction,i,transparent,optical,optical_length,rng);
@@ -701,8 +701,8 @@ float3 next_event<V:IVariant,P:IProgram>(HitSurface shading, Closure c, float3 v
     // It also runs at the last scattering vertex, where NEE is still evaluated.
     let continuation=hair ? hair_lit
         : (contribution&sample.event)!=0u && path_event_hemisphere(c,sample.event,sample.direction,geometric,shading.s.geometric);
-    // Null sheets belong to the preceding connection, not another emitter strategy.
-    if (continuation && !(c.geometry_thin_walled && !transport_rough_transmission(c) && sample.event==REG_RAY_TRANSMISSION) && dot(sample.direction,sample.direction)>0.) {
+    // Null events belong to the preceding connection, not another emitter strategy.
+    if (continuation && !(transport_null_event(c,media.incident.ior,sample)) && dot(sample.direction,sample.direction)>0.) {
         let source=emitter_eval_li<V>(l,world,sample.direction);
         if (source.pdf>0.) {
             let weight=sample.pdf>0. ? mis_power(sample.pdf,source.pdf) : 1.;
@@ -1306,8 +1306,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         radiance+=clamp_sample(throughput*implicit_next_event<V,P>(shading,c,-direction,world,error,geometric,media,continuation_mask(bounce,diffuse,glossy,transmission),transparent,prepared,sampler,optical_length,rng),select(bounce==0u,path_settings.clamp.x,path_settings.clamp.y));
 #endif
 
-        if (!shading.s.is_hair && transport_null_boundary(c,media.incident.ior)
-            && sample.event==REG_RAY_TRANSMISSION && sample.pdf==0.) {
+        if (!shading.s.is_hair && transport_null_event(c,media.incident.ior,sample)) {
             if (transparent++>=path_settings.limits.z) {break;}
             throughput*=sample.weight;
             if (!all(isfinite(throughput))) {path_boundary_error(REG_RADIANCE_NONFINITE,hit.object);break;}

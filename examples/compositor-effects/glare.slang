@@ -23,7 +23,7 @@ public struct Inputs {
 };
 static const float GLARE_PI = 3.141592653589793;
 static const int GLARE_LINE_TAPS = 128;
-import std.highlight;
+import highlight;
 float3 glare_spectral(float3 c,float phase,float modulation) {
     float3 weights=0.5+0.5*cos(phase+float3(0.,2.*GLARE_PI/3.,4.*GLARE_PI/3.));
     return c*lerp(float3(1),weights*2.,saturate(modulation));

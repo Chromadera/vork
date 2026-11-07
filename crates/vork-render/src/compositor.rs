@@ -141,9 +141,10 @@ pub(crate) fn install(
         let compiled = programs::cached(
             r,
             key,
-            |p: &CompositeProgram| &p.dependencies,
-            || {
-                Compiler::discover().compile_composite_bound(
+            &Compiler::discover(),
+            &abi, &source, &origin,
+            |compiler| {
+                compiler.compile_composite_bound(
                     &abi,
                     &source,
                     &origin,

@@ -6,6 +6,8 @@
 //! compiles the pass order; frame.rs owns FrameSlot and walks it; values.rs
 //! prepares per-frame values;
 //! passes/ encodes each GPU pass.
+mod warnings;
+pub use warnings::RenderWarning;
 mod polygon;
 mod subdivision;
 mod displacement;
@@ -399,6 +401,7 @@ impl Renderer {
     }
 
     fn finish_shader_warmup(&self) -> Result<()> {
+        vork_slang::progress::phase("Setup: finishing driver pipelines and saving cache", 0);
         self.settle_pipelines()?;
         if self.cache.is_some() {
             let saved = self.saved.lock().unwrap();
@@ -418,49 +421,64 @@ impl Renderer {
     }
 
     /// Report actual device/tool availability before warming shaders.
-    pub fn setup_report(&self) -> Result<()> {
+    pub fn setup_report(&self, out: &mut impl std::io::Write) -> Result<()> {
+        macro_rules! report {
+            ($($arg:tt)*) => { writeln!(out, $($arg)*)? };
+        }
         let driver = self.adapter_info.driver_info.trim();
         if driver.is_empty() {
-            println!("GPU: {} ({:?}; driver version not reported)", self.adapter_info.name, self.adapter_info.backend);
+            report!("GPU: {} ({:?}; driver version unavailable through the graphics API; this does not indicate a missing driver)", self.adapter_info.name, self.adapter_info.backend);
         } else {
-            println!("GPU: {} ({:?}; driver {driver})", self.adapter_info.name, self.adapter_info.backend);
+            report!("GPU: {} ({:?}; driver {driver})", self.adapter_info.name, self.adapter_info.backend);
         }
         if self.adapter_info.device_type == wgpu::DeviceType::Cpu {
-            println!("GPU: software rendering on the CPU; expect slow renders. Install your GPU vendor's Vulkan driver for hardware rendering.");
+            report!("GPU: software rendering on the CPU; expect slow renders. Install your GPU vendor's Vulkan driver for hardware rendering.");
         }
-        println!("Ray queries: {}", if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) { "available; the renderer can select scene queries" } else { "unavailable; profiles refuse effects that need scene queries" });
+        report!("Ray queries: {}", if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) { "available; the renderer can select scene queries" } else { "unavailable; profiles refuse effects that need scene queries" });
         let mut failures = Vec::new();
         match vork_slang::Compiler::discover().version() {
-            Ok(version) => println!("Slang: {version} ready"),
-            Err(error) => { println!("Slang: {error:#}. Reinstall the complete vork archive or set VORK_SLANGC to the pinned slangc."); failures.push("Slang"); }
+            Ok(version) => report!("Slang: {version} ready"),
+            Err(error) => { report!("Slang: {error:#}. Reinstall the complete vork archive or set VORK_SLANGC to the pinned slangc."); failures.push("Slang"); }
         }
         match denoise::open_fast(self) {
-            Ok(()) => println!("Denoiser: OIDN on the GPU ({})", self.adapter_info.name),
+            Ok(()) => report!("Denoiser: OIDN on the GPU ({})", self.adapter_info.name),
             Err(reason) => match denoise::check_runtime() {
-                Ok(()) => println!("Denoiser: no fast GPU denoiser for {} ({reason}). std/draft and std/final turn denoising off and use more samples; --set denoise=true uses the slow CPU denoiser.", self.adapter_info.name),
-                Err(error) => { println!("Denoiser: {error:#}. Reinstall the complete archive, or set VORK_OIDN to the OIDN 2.5.1 library."); println!("Rendering will continue without OIDN; std/draft and std/final use more samples."); }
+                Ok(()) => report!("Denoiser: no fast GPU denoiser for {} ({reason}). std/draft and std/final turn denoising off and use more samples; --set denoise=true uses the slow CPU denoiser.", self.adapter_info.name),
+                Err(error) => { report!("Denoiser: {error:#}. Reinstall the complete archive, or set VORK_OIDN to the OIDN 2.5.1 library."); report!("Rendering will continue without OIDN; std/draft and std/final use more samples."); }
             }
         }
         if cfg!(target_os = "linux") {
-            println!("Video: native NVENC is attempted on NVIDIA; otherwise ffmpeg readback encoding. Encoder initialization is checked when opening a video output.");
+            report!("Video: native NVENC is attempted on NVIDIA; FFmpeg readback encoding is the fallback. Native encoder initialization is checked when opening video output.");
+        }
+        if cfg!(target_os = "windows") {
+            report!("Video: FFmpeg NVENC after readback when usable; otherwise software libx264. MOV uses software prores_ks.");
         }
         if cfg!(target_os = "macos") {
-            println!("Video: system VideoToolbox for MP4; MOV may need ffmpeg prores_ks as fallback.");
+            report!("Video: system VideoToolbox for MP4; MOV may need ffmpeg prores_ks as fallback.");
         }
         match std::process::Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output() {
             Ok(output) if output.status.success() => {
                 let listing = String::from_utf8_lossy(&output.stdout);
-                println!("FFmpeg: {}; {}", if listing.contains("libx264") { "libx264 fallback available" } else if cfg!(target_os = "macos") { "libx264 fallback absent (optional; native VideoToolbox MP4 needs no FFmpeg)" } else { "WARNING: libx264 missing; install ffmpeg with libx264 (Windows: ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/) and add bin to PATH" }, if cfg!(target_os = "linux") { "required for MP4 muxing, including native NVENC" } else if cfg!(target_os = "macos") { "optional for native VideoToolbox MP4" } else { "required for MP4/MOV" });
-                println!("MOV: {}", if listing.contains("prores_ks") { "ffmpeg prores_ks available" } else { "prores_ks unavailable; install an ffmpeg build with prores_ks" });
+                if cfg!(any(target_os = "linux", target_os = "windows")) && listing.contains("h264_nvenc") {
+                    match vork_encode::probe_ffmpeg_nvenc(256, 256) {
+                        Ok(()) => report!("FFmpeg NVENC: initialization ready"),
+                        Err(error) => {
+                            report!("FFmpeg NVENC: unusable with this driver; readback MP4 falls back to software libx264 if installed. Update the NVIDIA driver or install a compatible FFmpeg build. {error:#}");
+                            if cfg!(target_os = "linux") { report!("Native NVENC: checked separately at video output initialization; FFmpeg's NVENC API mismatch does not disable the native encoder."); }
+                        }
+                    }
+                }
+                report!("FFmpeg: {}; {}", if listing.contains("libx264") { "libx264 fallback available" } else if cfg!(target_os = "macos") { "libx264 fallback absent (optional; native VideoToolbox MP4 needs no FFmpeg)" } else { "WARNING: libx264 missing; install ffmpeg with libx264 (Windows: ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/) and add bin to PATH" }, if cfg!(target_os = "linux") { "required for MP4 muxing, including native NVENC" } else if cfg!(target_os = "macos") { "optional for native VideoToolbox MP4" } else { "required for MP4/MOV" });
+                report!("MOV: {}", if listing.contains("prores_ks") { "ffmpeg prores_ks available" } else { "prores_ks unavailable; install an ffmpeg build with prores_ks" });
             }
-            _ if cfg!(target_os = "macos") => println!("Video: native VideoToolbox MP4 is ready without FFmpeg; MOV fallback needs ffmpeg prores_ks (brew install ffmpeg). Encoder availability is checked when opening video output."),
-            _ => println!("FFmpeg: missing or unusable; required for MP4/MOV, including Linux native NVENC muxing. Install ffmpeg (Ubuntu: sudo apt install ffmpeg; Windows: winget install Gyan.FFmpeg, or extract ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/ and add its bin folder to PATH). PNG/EXR remain available."),
+            _ if cfg!(target_os = "macos") => report!("FFmpeg: missing or unusable; native VideoToolbox MP4 is ready without FFmpeg; MOV fallback needs ffmpeg prores_ks (brew install ffmpeg). Encoder availability is checked when opening video output."),
+            _ => report!("FFmpeg: missing or unusable; required for MP4/MOV, including Linux native NVENC muxing. Install ffmpeg (Ubuntu: sudo apt install ffmpeg; Windows: winget install Gyan.FFmpeg, or extract ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/ and add its bin folder to PATH). PNG/EXR remain available."),
         }
-        println!("Cache: {}", self.cache_path.parent().unwrap_or(&self.cache_path).display());
+        report!("Cache: {}", self.cache_path.parent().unwrap_or(&self.cache_path).display());
         match self.pipeline_cache_status {
-            "unsupported" if self.adapter_info.backend == wgpu::Backend::Metal => println!("Pipeline cache: managed by the Metal driver; setup warms it. Compiled shader assets use the cache above."),
-            "unsupported" => println!("Pipeline cache: driver does not expose persistent pipeline caching; compiled shader assets still use the cache above."),
-            status => println!("Pipeline cache: {status} for this build and GPU driver"),
+            "unsupported" if self.adapter_info.backend == wgpu::Backend::Metal => report!("Pipeline cache: managed by the Metal driver; setup warms it. Compiled shader assets use the cache above."),
+            "unsupported" => report!("Pipeline cache: driver does not expose persistent pipeline caching; compiled shader assets still use the cache above."),
+            status => report!("Pipeline cache: {status} for this build and GPU driver"),
         }
         anyhow::ensure!(failures.is_empty(), "setup tools failed: {}; follow the fixes above", failures.join(", "));
         Ok(())
@@ -942,6 +960,9 @@ impl Renderer {
         rt::resolve_reflections(&mut scene);
         rt::resolve_refraction(&mut scene, self.adapter_info.device_type, self.device.features());
         validate(&scene)?;
+        // Capability admission follows release normalization; loading must not
+        // reject requests that installation deliberately warns about and drops.
+        lights::validate_visibility(&scene)?;
         animation::fold_material_inputs(&mut scene, base)?;
         if scene.propagation.is_some() && !scene.render.settings.integrator.is_path() {
             eprintln!("warning: authored curved propagation uses std/path transport for this scene and its render-image captures");
@@ -951,7 +972,7 @@ impl Renderer {
         if !scene.render.settings.integrator.is_path() && camera_program::scene_spectral(self,&scene,base)? {rt::promote_indirect_to_path(&mut scene);}
         if scene.render.settings.integrator.denoiser().is_some() {
             if let Err(error) = denoise::ensure_runtime(self) {
-                eprintln!("warning: OIDN unavailable; rendering without denoising: {error:#}. Keep the bundled oidn runtime beside vork, or use --set denoise=false.");
+                crate::warnings::dropped("denoiser_unavailable", serde_json::json!({"denoise":true}), format!("warning: OIDN unavailable; rendering without denoising: {error:#}. Keep the bundled oidn runtime beside vork, or use --set denoise=false."));
                 scene.render.settings.disable_denoiser();
             }
         }
@@ -1029,7 +1050,6 @@ impl Renderer {
 /// Scene validation plus the checks for options this renderer does not implement yet.
 pub fn validate(scene: &Scene) -> Result<()> {
     scene.validate()?;
-    lights::validate_visibility(scene)?;
     buffers::validate_attributes(scene)?;
     attributes::names(scene)?;
     // One environment, without light links (not implemented yet).
@@ -1324,9 +1344,13 @@ fn metal_contract_renderer() -> Result<Renderer> {
     Ok(renderer)
 }
 
-/// GPU tests skip only adapter discovery failure; device and renderer errors still fail.
+/// GPU execution is explicit; after opting in, only adapter discovery failure skips.
 #[cfg(test)]
 fn test_renderer() -> Result<Option<Renderer>> {
+    if std::env::var("VORK_GPU_TESTS").as_deref() != Ok("1") {
+        eprintln!("SKIP GPU test: set VORK_GPU_TESTS=1 with a supported GPU and pinned Slang; see vork help build");
+        return Ok(None);
+    }
     match Renderer::new() {
         Ok(renderer) => Ok(Some(renderer)),
         Err(error)
@@ -1390,29 +1414,38 @@ mod scene_error_context_tests {
         let default = vork_scene::Profile::load(vork_scene::DEFAULT_PROFILE)?;
         let resolved = super::load_with_settings(&path, vork_scene::test_settings(&default.resolve(&Default::default())?, &explicit)?, &default.name, None);
         let authored = super::load_authored(&path);
-        let rejected = super::load_with_settings(&path, vork_scene::test_settings(&default.resolve(&Default::default())?, serde_json::json!({"refraction":"environment"}).as_object().unwrap())?, &default.name, None);
+        let deferred = super::load_with_settings(&path, vork_scene::test_settings(&default.resolve(&Default::default())?, serde_json::json!({"refraction":"environment"}).as_object().unwrap())?, &default.name, None);
         let repaired = super::load_with_settings(&path, vork_scene::test_settings(&default.resolve(&Default::default())?, serde_json::json!({"refraction":"environment"}).as_object().unwrap())?, &default.name, Some(|scene, _| {
             scene.nodes[1].visibility.transmission = true;
             Ok(())
         }));
         std::fs::remove_file(&path)?;
         std::fs::remove_file(&profile.name)?;
-        resolved?;
+        assert!(super::rt::ray_refraction(&resolved?));
         authored?;
-        assert!(rejected.is_err());
-        repaired?; // Edits still precede renderer checks that remain errors at launch.
+        // Loading preserves requests; installation checks capabilities after
+        // release normalization. The resolved profile still reaches the edit.
+        let deferred = deferred?;
+        assert!(!deferred.nodes[1].visibility.transmission);
+        assert!(!super::rt::ray_refraction(&deferred));
+        assert!(!deferred.media_disabled);
+        // Loading leaves installation-time capability checks deferred.
+        assert!(super::lights::validate_visibility(&deferred).is_err());
+        let repaired = repaired?;
+        assert!(repaired.nodes[1].visibility.transmission);
+        super::lights::validate_visibility(&repaired)?;
         Ok(())
     }
     #[test]
-    fn renderer_validation_retains_the_scene_filename() {
-        let path = std::env::temp_dir().join(format!("vork-invalid-transmission-mask-{}.json", std::process::id()));
+    fn scene_validation_retains_the_scene_filename() {
+        let path = std::env::temp_dir().join(format!("vork-invalid-resolution-{}.json", std::process::id()));
         vork_scene::v2::write_authored(&path, &serde_json::json!({"version":2,"nodes":[{"type":"camera"},{"type":"node","visible_transmission":false}],
-            "render":{"settings":{"integrator":"raster","refraction":"environment"}}})).unwrap();
+            "render":{"resolution":[0,1080],"settings":{"integrator":"raster","refraction":"environment"}}})).unwrap();
         let error = format!("{:#}", super::load_authored(&path).unwrap_err());
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(path.with_file_name(format!("{}.profile.json", path.file_stem().unwrap().to_string_lossy()))).unwrap();
         assert!(error.contains(path.to_str().unwrap()), "{error}");
-        assert!(error.contains("visible_transmission"), "{error}");
+        assert!(error.contains("positive dimensions"), "{error}");
     }
 }
 

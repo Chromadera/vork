@@ -50,7 +50,7 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
     assert!(!root.contains("rejects unsafe profile clearance"));
     assert!(!root.contains("round shapes use Y as axis"));
     // Deep library signatures and inputs remain one --all away.
-    for (library, detail) in [("std", "std.procedurals: noise"), ("blender", "blender/filmic look:"), ("post", "streaks_angle")] {
+    for (library, detail) in [("std", "std.procedurals: noise"), ("blender", "blender/filmic look:"), ("post", "source white to D65")] {
         assert!(!help(library).contains(detail), "{library} default shows {detail}");
         assert!(help_args(&[library, "--all"]).contains(detail), "{library} --all lost {detail}");
     }
@@ -59,7 +59,7 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
     for removed in ["absorption_color", "blender.volume", "blender/principled_volume"] {
         assert!(!blender_all.contains(removed), "blender --all advertises removed media: {removed}");
     }
-    assert!(std_all.contains("scatter: {on_geometry"));
+    assert!(!std_all.contains("scatter:"));
     // Common builders stay on root; specialist signatures remain in std --all.
     assert!(root.contains("sphere: {name?:string") && root.contains("Std builders return {buffers,geometry}"));
     assert!(std_all.contains("rounded_box:"));
@@ -248,4 +248,42 @@ fn camera_enum_tokens_come_from_program_reflection() {
             assert!(text.contains(&line),"missing {line} in {text}");
         }
     }
+}
+
+#[test]
+fn help_closed_pipe_exits_successfully() {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vork"))
+        .args(["help", "std", "--all"])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn optics_and_compositor_programs_are_directly_findable() {
+    let camera = help("std/camera");
+    assert!(camera.contains("std/camera.lens: number; mm; default 50"));
+    assert!(camera.contains("std/camera.shift: vec2; default [0,0]"));
+    for name in ["lens", "sensor_width", "ortho_scale", "shift", "clip_start", "use_dof", "aperture_ratio"] {
+        let line = format!("std/camera.{name}:");
+        assert!(camera.contains(&line), "{line}");
+        assert!(help_args(&["field", &format!("std/camera.{name}")]).contains(&line));
+    }
+    assert!(help_args(&["field", "camera.material"]).contains("node.material (camera)"));
+    let bloom = help("std/bloom");
+    for contract in ["prepare: requires original", "combine: requires original and source", "{channel:color}"] {
+        assert!(bloom.contains(contract), "{contract}");
+    }
+    assert!(!help("post").contains("post/glare"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stdout_filesystem_failure_keeps_io_category() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vork")).arg("help")
+        .stdout(std::fs::File::options().write(true).open("/dev/full").unwrap()).output().unwrap();
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
 }

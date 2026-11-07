@@ -571,7 +571,7 @@ mod compositor_tests {
         assert!(serde_json::from_str::<Render>(r#"{"glare":{}}"#).is_err());
         let mut scene: Scene = serde_json::from_value(serde_json::json!({
             "version":2,"nodes":[{"type":"camera"}],
-            "materials":{"bloom":{"program":"std/bloom","inputs":{"original":{"channel":"color"},"source":{"channel":"color"}}},"grade":{"program":"post/lens_distortion"}},
+            "materials":{"bloom":{"program":"std/bloom","inputs":{"original":{"channel":"color"},"source":{"channel":"color"}}},"grade":{"program":"post/white_balance"}},
             "render":{"compositor":["bloom","grade"]}
         })).unwrap();
         scene.validate().unwrap();

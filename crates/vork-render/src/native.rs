@@ -486,19 +486,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn gi_medium_accumulation_preserves_native_binding_slots() {
+    fn gi_accumulation_preserves_native_binding_slots() {
         let globals=crate::rt::gi_entries();let materials=crate::pipelines::material_entries(true);
-        for probes in [false,true] {for medium in [false,true] {
+        for probes in [false,true] {
             let read=if probes {crate::probes::read_entries(0,ShaderStages::COMPUTE).to_vec()} else {vec![]};
-            let hits=crate::rt::gi_read_entries(medium);
+            let hits=crate::rt::gi_read_entries();
             let slots=metal_slots(&[&globals,&materials,&read,&hits],ShaderStages::COMPUTE);
             let registers=crate::forward_variant::hit_kernel_registers("gi_ray",false,probes);
-            assert_eq!(hits.len(),if medium {2} else {1});
-            if medium {
-                let slot=slots.iter().find(|s|s.0==3 && s.1==1).unwrap().3;
-                assert!(registers.contains(&format!("-DVORK_GI_MEDIUM_REGISTER=u{slot}")));
-            }
-        }}
+            assert_eq!(hits.len(),2);
+            let slot=slots.iter().find(|s|s.0==3 && s.1==1).unwrap().3;
+            assert!(registers.contains(&format!("-DVORK_GI_QUERY_REGISTER=u{slot}")));
+        }
     }
 
     // Exported resource accessors can leave false-positive "used" flags in
@@ -795,7 +793,8 @@ pub(crate) mod tests {
         ]);
         let ray_material = material_entries(true);
         let gi = crate::rt::gi_entries();
-        let gi_groups: &[&[BindGroupLayoutEntry]] = &[&gi, &ray_material, &[], &hits];
+        let gi_hits = crate::rt::gi_read_entries();
+        let gi_groups: &[&[BindGroupLayoutEntry]] = &[&gi, &ray_material, &[], &gi_hits];
         checked.push((&GI_RAY_COMPUTE, gi_groups));
         let probe_update = crate::probes::update_entries();
         let probe_read = crate::probes::read_entries(0, ShaderStages::COMPUTE);
@@ -842,7 +841,11 @@ pub(crate) mod tests {
                     _=>unreachable!(),
                 };
                 let reads_probes=*probes || matches!(family,SurfaceKernel::Probes|SurfaceKernel::Directional);
-                let geometry=if *family==SurfaceKernel::Reflections {reflection_fields.clone()} else {hits.to_vec()};
+                let geometry=match family {
+                    SurfaceKernel::Reflections=>reflection_fields.clone(),
+                    SurfaceKernel::Gi=>gi_hits.clone(),
+                    _=>hits.to_vec(),
+                };
                 vec![entries,ray_material.clone(),if reads_probes {probe_read.to_vec()} else {vec![]},geometry]
             }
         }).collect();

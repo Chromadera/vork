@@ -88,6 +88,8 @@ pub(crate) fn base<T>(slot: &OnceLock<T>) -> &T {
 /// call that started them, so they cannot borrow the Renderer.
 #[derive(Clone)]
 pub(crate) struct Compiler {
+    #[cfg(test)]
+    pub(crate) hit_selections: std::sync::Arc<Mutex<Vec<(ProgramKernel, ProgramKernel)>>>,
     device: wgpu::Device,
     cache: Option<wgpu::PipelineCache>,
     /// Wall time per driver pipeline creation call; concurrent times overlap.
@@ -146,6 +148,8 @@ impl Compiler {
         known: Known,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            hit_selections: Default::default(),
             device: device.clone(),
             cache: cache.cloned(),
             timings: Default::default(),
@@ -235,6 +239,7 @@ impl Compiler {
     pub(crate) fn render(&self, descriptor: &wgpu::RenderPipelineDescriptor<'_>) -> wgpu::RenderPipeline {
         let _permit = self.permit(false);
         let start = std::time::Instant::now();
+        let _progress = vork_slang::progress::Job::start(true);
         let pipeline = crate::gpu_memory::render_pipeline(&self.device, descriptor);
         self.created.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.time(descriptor.label, start);
@@ -243,6 +248,7 @@ impl Compiler {
     pub(crate) fn compute(&self, descriptor: &wgpu::ComputePipelineDescriptor<'_>) -> wgpu::ComputePipeline {
         let _permit = self.permit(false);
         let start = std::time::Instant::now();
+        let _progress = vork_slang::progress::Job::start(true);
         let pipeline = crate::gpu_memory::compute_pipeline(&self.device, descriptor);
         self.created.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.time(descriptor.label, start);
@@ -334,6 +340,9 @@ pub(crate) enum VariantCompile {
     /// `vork setup`: Fallback's choices, and the hit kernels compile the superset
     /// key a later Fallback install draws with (CachedPipelines::drawn_kernel).
     Setup,
+    /// Startup's ordinary table configuration: retain material proofs while
+    /// sharing hit evaluators across light mixes. Other kernels use Setup.
+    SetupPlain,
     /// Compile every variant before install returns.
     Inline,
     /// Tests: background workers start only once the gate opens, regardless of warmth.
@@ -347,11 +356,11 @@ impl VariantCompile {
         match self {
             Self::Inline=>false,
             Self::Gated(_)=>true,
-            Self::Background|Self::Fallback|Self::Setup=>!warm && generic_ready,
+            Self::Background|Self::Fallback|Self::Setup|Self::SetupPlain=>!warm && generic_ready,
         }
     }
     /// One-frame choices: draw generics and compile no later variant.
-    pub(crate) fn fallback(&self)->bool {matches!(self,Self::Fallback|Self::Setup)}
+    pub(crate) fn fallback(&self)->bool {matches!(self,Self::Fallback|Self::Setup|Self::SetupPlain)}
 }
 /// A retained variant; the caller supplies a pipeline fallback or keeps its existing passes.
 #[derive(Clone)]
@@ -423,6 +432,21 @@ pub(crate) enum ProgramKernel {
     Decoupled { stage: ShadeStage, features: FeatureMask, subsurface: bool, emitter_profiles: bool, boundaries: u32 },
 }
 impl ProgramKernel {
+    /// Untextured, unlayered table materials share one hit evaluator across light
+    /// mixes. Keep runtime metalness, sidedness and every analytic light kind;
+    /// do not turn on unrelated texture/layer/transport capabilities.
+    pub(crate) fn plain_hit(self) -> Option<Self> {
+        use crate::forward_variant::*;
+        let lighting = FEATURE_LIGHT_TYPES | FEATURE_PUNCTUAL | FEATURE_FINITE
+            | FEATURE_RECTANGLE | FEATURE_ELLIPSE | FEATURE_SHADOW_RAYS;
+        let allowed = lighting | FEATURE_SPECIALIZED | FEATURE_LIT | FEATURE_SIDED
+            | FeatureMask::from(SHADING_METAL);
+        match self {
+            Self::Gi { features } if features & FEATURE_SPECIALIZED != 0 && features & !allowed == 0 => Some(Self::Gi { features: allowed }),
+            Self::Reflections { features } if features & FEATURE_SPECIALIZED != 0 && features & !allowed == 0 => Some(Self::Reflections { features: allowed }),
+            _ => None,
+        }
+    }
     /// The same kernel over the generic feature key (variant.slang Unspecialized:
     /// layered and metallic shading kept), for kernels that otherwise specialize to
     /// the scene and have no shipped generic: ray GI, reflection and probe hits,
@@ -958,10 +982,18 @@ impl CachedPipelines {
     /// Shipped late-specialization artifacts exist for every capability key;
     /// prefer a remembered device superset before consulting artifact presence.
     pub(crate) fn drawn_kernel(&self, kernel: ProgramKernel, mode: &VariantCompile, compiler: &Compiler) -> ProgramKernel {
+        if matches!(mode, VariantCompile::Background | VariantCompile::Fallback)
+            && !compiler.is_known(&self.kernel_content_key(kernel))
+        {
+            if let Some(plain) = kernel.plain_hit().filter(|plain| compiler.is_known(&self.kernel_content_key(*plain))) {
+                return plain;
+            }
+        }
         let Some(superset) = kernel.superset() else { return kernel };
         let stored = |kernel| self.shader.kernel_stored(kernel).unwrap_or(false);
         match mode {
             VariantCompile::Setup => superset,
+            VariantCompile::SetupPlain => kernel.plain_hit().unwrap_or(superset),
             VariantCompile::Fallback if !compiler.is_known(&self.kernel_content_key(kernel))
                 && compiler.is_known(&self.kernel_content_key(superset)) => superset,
             VariantCompile::Fallback if !stored(kernel) && stored(superset) => superset,
@@ -1743,6 +1775,23 @@ fn warm_geometry(r:&Renderer, p:&CachedPipelines, keys:Vec<GeometryKey>) -> Resu
 #[cfg(test)]
 mod registry_identity_tests {
     use super::*;
+
+    #[test]
+    fn plain_hit_preserves_capabilities_and_rejects_complex_materials() {
+        use crate::forward_variant::*;
+        for features in [FEATURE_SPECIALIZED, FEATURE_SPECIALIZED | FeatureMask::from(SHADING_METAL)
+            | FEATURE_SIDED | FEATURE_LIGHT_TYPES | FEATURE_FINITE | FEATURE_RECTANGLE] {
+            let ProgramKernel::Gi { features: plain } = (ProgramKernel::Gi { features }).plain_hit().unwrap() else { unreachable!() };
+            assert_eq!(features & !plain, 0, "a plain hit key may only add capabilities");
+            assert_eq!(plain & ((1 << (TEXTURE_FEATURES + 2)) - 4), 0, "no texture lookups");
+            assert_eq!(plain & FeatureMask::from(SHADING_LAYERS), 0, "no layered material evaluation");
+            assert_eq!((ProgramKernel::Reflections { features }).plain_hit(), Some(ProgramKernel::Reflections { features: plain }));
+        }
+        for features in [0, FEATURE_SPECIALIZED | FEATURE_COAT, FEATURE_SPECIALIZED | FEATURE_TRANSMISSION,
+            FEATURE_SPECIALIZED | FEATURE_LOBES, FEATURE_SPECIALIZED | (1 << 2)] {
+            assert!((ProgramKernel::Gi { features }).plain_hit().is_none());
+        }
+    }
     #[test]
     fn surface_warm_keys_ignore_display_denoise_and_camera_programs() {
         let base=crate::slang_forward::SlangScene::default();

@@ -612,6 +612,7 @@ fn node_property(path: &[String], index: usize) -> Result<NodeProperty> {
     use NodeProperty as P;
     let name = segment(path, index, "a node property")?;
     let property = match name {
+        "target" => anyhow::bail!("track {}: target is structural; aim at a named node and animate that node's translation instead", display_path(path)),
         "translation" => P::Translation,
         "rotation" => P::Rotation,
         "scale" => P::Scale,
@@ -661,6 +662,15 @@ mod tests {
     }
     fn path(segments: &[&str]) -> Vec<String> {
         segments.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn target_track_explains_animated_aim() {
+        let s = scene();
+        let error = s.resolve_target(&path(&["nodes", "cam", "target"]), &s.nodes_by_name()).unwrap_err().to_string();
+        assert!(error.contains(r#"["nodes","cam","target"]"#), "{error}");
+        assert!(error.contains("aim at a named node"), "{error}");
+        assert!(error.contains("animate that node's translation"), "{error}");
+        assert!(s.resolve_target(&path(&["nodes", "cam", "translation"]), &s.nodes_by_name()).is_ok());
     }
     #[test]
     fn camera_optics_are_not_node_track_properties() {

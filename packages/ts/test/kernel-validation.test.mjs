@@ -14,13 +14,20 @@ const validate = scenes => spawnSync('cargo', ['run','--quiet','-p','vork-scene'
 });
 const mesh = geometry => ({version:2,...geometry,nodes:[{type:'camera',name:'camera'},{type:'mesh',geometry:Object.keys(geometry.geometry)[0]}]});
 
+test('SDK no longer exports scatter', () => {
+  assert.equal('scatter' in sdk, false);
+});
+
 test('SDK geometry engines emit fragments accepted by the Rust kernel', async () => {
   const fixtures=[];
   for (const shape of ['box','sphere','cylinder','cone','torus','capsule','roundedBox','grid'])
     fixtures.push(mesh(sdk[shape](shape)));
   fixtures.push(mesh(sdk.revolve('revolve',{profile:[[0,0],[1,0],[0.5,1],[0,1.2]]})));
-  const geometry=sdk.grid('surface'), instances=sdk.scatter(geometry,3,7);
-  fixtures.push({version:2,...geometry,buffers:{...geometry.buffers,...instances.buffers},nodes:[{type:'camera',name:'camera'},{type:'mesh',geometry:'surface',instances:instances.instances}]});
+  const geometry=sdk.grid('surface'), instances={
+    buffers:{placements:{type:'vec3',data:[[0,0,0],[2,0,0],[4,0,0]]},live:{type:'u32',data:[2]}},
+    instances:{attributes:{TRANSLATION:'placements'},count:'live'},
+  };
+  fixtures.push({version:2,...geometry,programs:{live:{schedule:'install',dispatch:1,bindings:{live:'live'},source:'import vork; struct Inputs {} void compute(ComputeContext ctx, Inputs inputs) { live_store(0, 2u); }'}},buffers:{...geometry.buffers,...instances.buffers},nodes:[{type:'camera',name:'camera'},{type:'mesh',geometry:'surface',instances:instances.instances}]});
   const previousBinary=process.env.VORK_BIN;
   process.env.VORK_BIN=previousBinary ?? resolve(root,process.env.CARGO_TARGET_DIR ?? 'target','release','vork');
   const font = join(root,'crates/vork-std/tests/fonts/LiberationSans-Regular.ttf');

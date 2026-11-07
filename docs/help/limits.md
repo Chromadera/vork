@@ -3,11 +3,14 @@ Supported GPUs: Apple Silicon Metal and recent NVIDIA Vulkan with hardware ray
 tracing and storage buffer arrays. AMD, Intel and CPU/software rendering are
 unsupported. Run vork setup to check the adapter. Windows x64 ships install.ps1;
 macOS and Linux provide install.sh as a separate release asset.
-The 0.1.0 bundled Slang toolchain targets macOS 26; older macOS is unqualified.
+The 0.2 bundled Slang toolchain targets macOS 26; older macOS is unqualified.
 See README.md (Mac) for each companion binary's deployment target. See README.md (Install) for binary setup.
 
 Participating media (fog, smoke and volumes) are absent from this release's API.
-Legacy medium bindings are ignored with a warning; surface subsurface scattering
+The removed std/fog, blender/principled_volume and blender.volume programs fail
+with unknown-program errors, including unused material definitions. Remove those
+definitions and medium-only nodes/bindings; see vork help upgrade. Other legacy
+medium bindings may be ignored with a warning. Surface subsurface scattering
 is supported.
 
 std/final approximates indirect lighting and can darken interiors, including glossy
@@ -45,4 +48,7 @@ displacement on computed/implicit geometry and normal-dependent point displaceme
 are ignored. Computed instance material attributes retain authored values.
 Legacy spatial environments evaluate at the origin. Extra environment lights and
 unsupported light masks are ignored with warnings. Environment programs sampling
-render images fall back to the light colour. Inspect warnings and the image.
+render images fall back to the light colour. Inspect warnings and the image. Each dropped effect prints WARNING: REQUESTED EFFECT DROPPED,
+with its code, authored request and omitted/substituted behaviour. Every render
+meta.json sidecar and SDK render result returns the same structured warnings array;
+warning-and-render success does not mean every requested effect was applied.

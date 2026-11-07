@@ -30,11 +30,11 @@ fn hash_tree(path: &Path, hash: &mut blake3::Hasher) {
     }
 }
 fn main() {
-    // The private corpus and its test modules are intentionally absent from public exports.
+    // Explicit opt-in: directory layout must not change test admission.
     println!("cargo:rustc-check-cfg=cfg(vork_private_tests)");
     println!("cargo:rerun-if-changed=build.rs");
-    if std::path::Path::new("../../scenes").is_dir() {
-        println!("cargo:rerun-if-changed=../../scenes");
+    println!("cargo:rerun-if-env-changed=VORK_PRIVATE_TESTS");
+    if std::env::var("VORK_PRIVATE_TESTS").as_deref() == Ok("1") {
         println!("cargo:rustc-cfg=vork_private_tests");
     }
     // Texture bytes depend on codecs, not unrelated rendering changes or GPU IDs.
@@ -93,6 +93,7 @@ fn main() {
         closure.as_str(),
         "build_slang.rs",
         "src/slang_forward.rs",
+        "src/programs.rs",
         "src/forward_variant.rs",
         "src/surface_native.rs",
         "src/visibility_native.rs",

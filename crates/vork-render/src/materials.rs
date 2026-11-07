@@ -1838,7 +1838,7 @@ pub(crate) fn load_cached(
     decoders.finish()?;
     let gltf::Gltf { document, blob } = import::open(path)?;
     for warning in gltf_extension_warnings(&document) {
-        eprintln!("glTF {}: {warning}", path.display());
+        crate::warnings::dropped("gltf_extension", serde_json::json!({"file":path,"extension":warning.split(':').next(),"materials":document.materials().filter_map(|m| m.extensions().map(|e|serde_json::json!({"index":m.index(),"name":m.name(),"extensions":e}))).collect::<Vec<_>>(),"primitive_variants":document.meshes().flat_map(|m|m.primitives()).filter_map(|p|p.extension_value("KHR_materials_variants").cloned()).collect::<Vec<_>>()}), warning);
     }
     let base = path.parent().unwrap_or(Path::new("./"));
     let buffers = std::sync::Arc::new(import::buffers(&document, Some(base), blob)?);
@@ -2353,7 +2353,7 @@ pub(crate) fn openpbr_values(
     let mut b = RecordBuilder::openpbr();
     let default_material = ::vork_scene::v2::Material {
         program: "std/openpbr".into(),
-        inputs: [("specular_roughness".into(), Input::Number(0.5))].into(),
+        inputs: Default::default(),
         double_sided: true,
         opacity: None,
     };

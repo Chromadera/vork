@@ -20,7 +20,7 @@ position = [(radius+tube*cos(b))*cos(a), (radius+tube*cos(b))*sin(a), tube*sin(b
 Normal = [cos(b)*cos(a), cos(b)*sin(a), sin(b)]; connect adjacent rings with triangles.
 Duplicate UV seams, cap partial arcs, and reverse winding for a negative sweep.
 Procedural materials: write a Slang surface program (vork help programs --all);
-use world/object position and std/noise rather than loading a sample scene.
+use world/object position and std/procedurals rather than loading a sample scene.
 
 <!-- all -->
 IMPLICIT SURFACE REFERENCE

@@ -386,6 +386,17 @@ impl Scene {
                 }
             }
         }
+        // Camera materials must opt into a ray program before surface-input validation.
+        let mut camera_nodes: Vec<_> = self.nodes.iter().collect();
+        while let Some(node) = camera_nodes.pop() {
+            camera_nodes.extend(&node.children);
+            if let NodeKind::Camera { material: Some(name), .. } = &node.kind {
+                if let Some(material) = self.materials.get(name) {
+                    ensure!(material.program != "std/openpbr",
+                        "camera {:?}: material {name} selects std/openpbr; camera materials require a camera program. Set program:\"std/camera\" beside inputs (e.g. lens), or omit camera.material for default optics. See `vork help cameras`", node.name);
+                }
+            }
+        }
         // Report every misnamed OpenPBR input at once; authors guess several together.
         diagnostics::joined(
             self.materials
@@ -565,7 +576,7 @@ impl Scene {
                                     "instance count requires a compute binding"
                                 );
                             }
-                            ensure!(!i.attributes.is_empty(), "instances.attributes must contain at least one column");
+                            ensure!(!i.attributes.is_empty(), "instances.attributes must contain at least one buffer column (TRANSLATION vec3, ROTATION vec4 xyzw, SCALE vec3, or a custom attribute); columns must have equal lengths");
                             let count = i.attributes.values().filter_map(|name| scene.buffers.get(name).and_then(|b| b.len())).next();
                             for (attribute, b) in &i.attributes {
                                 let buffer = scene.buffers.get(b).with_context(|| {
@@ -581,7 +592,9 @@ impl Scene {
                                     "time_offset" => Some(BufferType::F32),
                                     "pass_index" => Some(BufferType::U32), _ => None,
                                 };
-                                ensure!(expected.is_none_or(|ty| ty == buffer.element_type), "instances.attributes.{attribute}: wrong buffer type");
+                                if let Some(expected) = expected {
+                                    ensure!(expected == buffer.element_type, "instances.attributes.{attribute}: buffer {b} has type {:?}; expected {:?}{}", buffer.element_type, expected, if attribute == "ROTATION" { " (xyzw)" } else { "" });
+                                }
                                 if let (Some(count), Some(len)) = (count, buffer.len()) {
                                     ensure!(
                                         len == count,
@@ -1285,6 +1298,16 @@ mod hemisphere_tests {
 #[cfg(test)]
 mod orthographic_sensor_tests {
     use super::*;
+    #[test]
+    fn camera_without_program_reports_camera_context() {
+        for name in ["eye", ""] {
+            let value = serde_json::json!({"version":2,"nodes":[{"type":"camera","name":name,"material":{"inputs":{"lens":35}}}]});
+            let scene = crate::v2::from_test_value::<Scene>(value).unwrap();
+            let error = format!("{:#}", scene.validate().unwrap_err());
+            assert!(error.contains("camera") && error.contains("std/camera"), "{error}");
+            assert!(!error.contains("unknown OpenPBR"), "{error}");
+        }
+    }
     #[test]
     fn orthographic_cameras_use_fit_and_reject_old_names() -> Result<()> {
         for fit in ["auto", "vertical", "horizontal"] {

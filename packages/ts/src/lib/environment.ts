@@ -1,3 +1,4 @@
+import { checkOptions } from './validate.js';
 import { stdCommand } from './cli.js';
 import type { Scene } from '../schema.js';
 
@@ -8,13 +9,17 @@ export interface EnvironmentImageOptions {
   name?: string;
   threshold?: number;
   fps?: number;
-  color_space?: 'sRGB' | 'Linear Rec.709' | 'Non-Color';
+  colorSpace?: 'sRGB' | 'Linear Rec.709' | 'Non-Color';
 }
 /** Preprocess HDR lighting into an ordinary image program and declared sun. */
 export function environmentImage(options: EnvironmentImageOptions): EnvironmentFragment {
-  return stdCommand('environment', options) as EnvironmentFragment;
+  checkOptions(options, ['file','output','name','threshold','fps','colorSpace']);
+  const {colorSpace, ...rest} = options;
+  return stdCommand('environment', {...rest, color_space: colorSpace}) as EnvironmentFragment;
 }
 /** Nishita atmosphere and an ordinary solar emitter. */
-export function sky(options: {name?: string; sun_elevation?: number; sun_rotation?: number; altitude?: number; air_density?: number; aerosol_density?: number; ozone_density?: number; sun_size?: number; sun_intensity?: number} = {}): EnvironmentFragment {
-  return stdCommand('sky', options) as EnvironmentFragment;
+export function sky(options: {name?: string; sunElevation?: number; sunRotation?: number; altitude?: number; airDensity?: number; aerosolDensity?: number; ozoneDensity?: number; sunSize?: number; sunIntensity?: number} = {}): EnvironmentFragment {
+  checkOptions(options, ['name','altitude','sunElevation','sunRotation','airDensity','aerosolDensity','ozoneDensity','sunSize','sunIntensity']);
+  const {sunElevation, sunRotation, airDensity, aerosolDensity, ozoneDensity, sunSize, sunIntensity, ...rest} = options;
+  return stdCommand('sky', {...rest, sun_elevation: sunElevation, sun_rotation: sunRotation, air_density: airDensity, aerosol_density: aerosolDensity, ozone_density: ozoneDensity, sun_size: sunSize, sun_intensity: sunIntensity}) as EnvironmentFragment;
 }

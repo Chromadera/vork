@@ -7,7 +7,7 @@ pub struct Node {
     /// glTF node TRS, written directly on the node (`translation`, `rotation`, `scale`).
     #[serde(default, flatten)]
     pub transform: Transform,
-    #[schemars(extend("x-source" = "Blender Track To constraint (vork target shorthand)", "x-help-path" = "node.target", "x-help" = "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top"))]
+    #[schemars(extend("x-source" = "Blender Track To constraint (vork target shorthand)", "x-help-path" = "node.target", "x-help" = "node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation"))]
     pub target: Option<AimTarget>,
     #[serde(default)]
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "node.children", "x-help" = "node[]"))]
@@ -93,7 +93,7 @@ pub enum NodeKind {
         #[schemars(with = "NameOr<Geometry>")]
         geometry: String,
         #[serde(default)]
-        #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "node.mesh.materials", "x-help" = "(material-name|inline material)[]; empty = default std/openpbr with roughness 0.5"))]
+        #[schemars(extend("x-source" = "OpenPBR Surface 1.1.1", "x-help-path" = "node.mesh.materials", "x-help" = "(material-name|inline material)[]; empty = default std/openpbr with roughness 0.3"))]
         #[schemars(with = "Vec<NameOr<Material>>")]
         materials: Vec<String>,
         #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "node.mesh.instances", "x-help" = "instances|null"))]

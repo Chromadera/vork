@@ -1,6 +1,14 @@
 //! Unstable, internal: all Rust APIs in this crate are free to change.
 
+// All command output is fallible; the process boundary treats a closed consumer as success.
+macro_rules! output {
+    ($($arg:tt)*) => { crate::output::line(format_args!($($arg)*))? };
+}
+mod output;
+
 mod constants;
+mod init;
+mod progress;
 mod help;
 mod std_command;
 use anyhow::Result;
@@ -23,6 +31,8 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Create a small offline project ready to render.
+    Init(init::Args),
     /// Warm default-profile shaders in this machine's driver cache.
     Setup {
         /// Also warm every bundled program/profile and built-in descriptor.
@@ -95,6 +105,7 @@ fn channel(value: &str) -> Result<String, String> {
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) if output::broken_pipe(&error) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error:#}");
             if vork_render::failure::suggests_setup(&error) { eprintln!("Run `vork setup` for this machine’s GPU and tools report."); }
@@ -105,7 +116,15 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<()> {
     let entry = std::time::SystemTime::now();
     let start = std::time::Instant::now();
-    let Args { command } = Args::parse();
+    let Args { command } = match Args::try_parse() {
+        Ok(args) => args,
+        Err(error) => {
+            let code = error.exit_code();
+            if error.use_stderr() { error.print()?; }
+            else { error.print().map_err(output::error)?; }
+            std::process::exit(code);
+        }
+    };
     if matches!(command, Command::Render { diagnostics: true, .. }) {
         eprintln!(
             "cli_entry_unix_ns: {}; cli_parse_ms: {:.3}",
@@ -117,21 +136,44 @@ fn run() -> Result<()> {
         return vork_render::Renderer::prepare_release_shaders();
     }
     if let Command::Setup { all } = &command {
+        output!("vork {}", env!("VORK_VERSION"));
+        output!("OS: {} ({})", std::env::consts::OS, std::env::consts::ARCH);
+        match std::process::Command::new("ffmpeg").arg("-version").output() {
+            Ok(output) if output.status.success() => {
+                if let Some(version) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                    output!("FFmpeg version: {version}");
+                }
+            }
+            _ => output!("FFmpeg version: unavailable"),
+        }
+        let progress = progress::Monitor::start("Setup: opening GPU and checking tools");
         let renderer=vork_render::Renderer::new().map_err(|error| {
             eprintln!("GPU: {error:#}. Install a supported GPU driver; in Docker enable GPU access with --gpus all.");
+            eprintln!("Rendering requires an NVIDIA GPU with Vulkan ray queries, or Apple Silicon. Docker does not provide a GPU on its own. On your own NVIDIA Linux machine, use the Docker runtime: docs/REMOTE-GPU.md. Hosted rendering: details will be added when available. Scene authoring and `vork help` work without a GPU.");
             error.context(vork_render::failure::FailureKind::Device)
         })?;
-        renderer.setup_report()?;
+        let device_s = start.elapsed().as_secs_f64();
+        let tools_start = std::time::Instant::now();
+        renderer.setup_report(&mut std::io::stdout().lock()).map_err(output::context)?;
+        let tools_s = tools_start.elapsed().as_secs_f64();
+        let warm_start = std::time::Instant::now();
+        vork_slang::progress::phase("Setup: warming shaders and driver pipelines", 0);
         if *all { renderer.warm_shaders()?; } else { renderer.warm_startup_shaders()?; }
-        println!("Shader setup completed in {:.3} s",start.elapsed().as_secs_f64());
+        progress.finish();
+        output!("Setup phases: device {:.3} s; tools {:.3} s; shaders/cache {:.3} s", device_s, tools_s, warm_start.elapsed().as_secs_f64());
+        output!("Shader setup completed in {:.3} s",start.elapsed().as_secs_f64());
         return Ok(());
     }
     if let Command::Help { topic, field, all } = &command {
         return help::run(topic.as_deref(), field.as_deref(), *all);
     }
+    if let Command::Init(args) = &command {
+        return args.run();
+    }
     if let Command::Std(args) = &command {
         return args.run();
     }
+    let progress = progress::Monitor::start("Render: loading scene and opening GPU");
     let diagnostics = matches!(command, Command::Render { diagnostics: true, .. });
     let (rendered, out) = match command {
         Command::Render {
@@ -160,8 +202,9 @@ fn run() -> Result<()> {
             start.elapsed().as_secs_f64() * 1000.
         );
     }
+    progress.finish();
     let report = &rendered.report;
-    println!(
+    output!(
         "Rendered {} frames in {:.3}s; outputs: {}",
         report["frames"],
         report["wall_ms"].as_f64().unwrap() / 1000.,
@@ -170,15 +213,22 @@ fn run() -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if let Some(sidecars) = report["sidecars"].as_array().filter(|paths| !paths.is_empty()) {
+        output!("Sidecars: {}", sidecars.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", "));
+    }
     let exposures = report["exposure"].as_array().map_or(&[][..], Vec::as_slice);
     for row in exposures {
         let line = exposure_line(&row["exposure"]);
-        if exposures.len() == 1 { println!("{line}"); } else { println!("{}: {line}", row["output"].as_str().unwrap_or_default()); }
+        if exposures.len() == 1 { output!("{line}"); } else { output!("{}: {line}", row["output"].as_str().unwrap_or_default()); }
+    }
+    if let Some(warnings) = report["warnings"].as_array().filter(|warnings| !warnings.is_empty()) {
+        eprintln!("\nWARNING: {} REQUESTED EFFECT(S) DROPPED: {}. Review the detailed warnings above and in render metadata before accepting this render.",
+            warnings.len(), warnings.iter().filter_map(|warning| warning["code"].as_str()).collect::<Vec<_>>().join(", "));
     }
     // Shot::render has joined file writers, reaped input decoders, finished muxing, saved idle caches and
     // written reports. Keep GPU owners alive: process exit discards unused variants
     // and reclaims resources without driver teardown. Errors still unwind.
-    std::io::stdout().flush()?;
+    std::io::stdout().flush().map_err(output::error)?;
     std::io::stderr().flush()?;
     // libc exit runs driver atexit hooks: CUDA/NVENC can block there when its
     // finished GPU owners are intentionally kept alive. Files and Rust streams are

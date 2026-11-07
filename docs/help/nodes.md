@@ -5,6 +5,7 @@ Assets load .glb/.gltf. Imported names: asset/node-name or asset/#index.
 Imported joints are not target, focus or attachment addresses.
 
 <!-- all -->
+Painted backdrops: disable visible_shadow; disable other ray visibility when the card should appear only to the camera.
 FROM BLENDER
   Y-up: Blender (x,y,z) -> vork (x,z,-y). Euler is Blender XYZ order about vork axes; a Blender Z
   turn is vork Y. Lights and cameras aim local -Z, so identity is horizontal; aim with target.

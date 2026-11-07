@@ -20,6 +20,7 @@ fn png_frame_patterns_are_usage_errors_even_for_one_still() {
 }
 
 #[test]
+#[ignore = "renders images; requires a supported GPU, pinned Slang and OIDN"]
 fn png_still_paths_preserve_literal_characters() {
     let dir = std::env::temp_dir().join(format!("vork-literal-output-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

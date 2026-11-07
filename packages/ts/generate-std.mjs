@@ -2,7 +2,7 @@
 import ts from 'typescript';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-const modules = ['validate', 'constants', 'math', 'random', 'shapes', 'scatter', 'text', 'extrude'];
+const modules = ['validate', 'constants', 'math', 'shapes', 'text', 'extrude'];
 // Native loaders in crates/vork-std: only their help is generated here.
 const native = ['text', 'extrude'];
 const paths = modules.map(name => fileURLToPath(new URL(`src/lib/${name}.ts`, import.meta.url)));
@@ -62,9 +62,9 @@ for (const [index, path] of paths.entries()) {
   const source = program.getSourceFile(path);
   if (!native.includes(modules[index])) output += ts.transpileModule(source.text, {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext}}).outputText
     .replace(/^import .*;\s*$/gm, '').replace(/^export \{\};\s*$/gm, '').replace(/\bexport /g, '') + '\n';
-  if (['validate', 'constants', 'math', 'random'].includes(modules[index])) continue;
+  if (['validate', 'constants', 'math'].includes(modules[index])) continue;
   for (const declaration of source.statements) {
-    if (ts.isTypeAliasDeclaration(declaration) && ['GeometryFragment','InstanceFragment'].includes(declaration.name.text)) {
+    if (ts.isTypeAliasDeclaration(declaration) && ['GeometryFragment'].includes(declaration.name.text)) {
       const type = checker.getTypeAtLocation(declaration);
       help += `${declaration.name.text}: {${checker.getPropertiesOfType(type).map(symbol => field(symbol.name,
         checker.getTypeOfSymbolAtLocation(symbol,symbol.valueDeclaration ?? symbol.declarations[0]),
@@ -115,7 +115,7 @@ for (const [index, path] of paths.entries()) {
 }
 output += `const stdFunctions = {${entries.join(',\n')}};\nfunction stdEvaluate(name,args) {\n  if (!Object.hasOwn(stdFunctions,name)) throw new Error('unknown standard-library function '+name+'; see vork help std');\n  const fn=stdFunctions[name];\n  if (fn.keys === null) { if (!Array.isArray(args)) throw new TypeError('argument must be an array'); }\n  else { checkOptions(args,fn.keys); for (const key of fn.required) if (!Object.hasOwn(args,key)) throw new TypeError('missing option: '+key); }\n  return fn.invoke(args);\n}\n`;
 // The starting page keeps three builders; all other signatures live in the advanced std reference.
-const shapeLines = help.split('\n').filter(line => /^(box|sphere|cylinder|cone|torus|capsule|rounded_box|grid|revolve|text|extrude|scatter):/.test(line));
+const shapeLines = help.split('\n').filter(line => /^(box|sphere|cylinder|cone|torus|capsule|rounded_box|grid|revolve|text|extrude):/.test(line));
 const apiShapeLines = shapeLines.filter(line => /^(box|sphere|grid):/.test(line));
 const indexPath = new URL('../../docs/help/index.md', import.meta.url);
 const index = readFileSync(indexPath, 'utf8').replace(

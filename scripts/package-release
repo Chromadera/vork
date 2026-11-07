@@ -23,6 +23,7 @@ p.add_argument('--slang-toolchain', type=Path, required=True, help='Pinned Slang
 p.add_argument('--oidn-toolchain', type=Path, required=True, help='Pinned OIDN distribution from scripts/install-oidn; its runtime libraries and notices ship')
 p.add_argument('--msvc-runtime', type=Path, help='windows-x64: Visual Studio redist folder (VC\\Redist\\MSVC\\<version>\\x64\\Microsoft.VC14x.CRT); the VC++ runtime DLLs that shipped DLLs import are copied beside them')
 a = p.parse_args()
+subprocess.run([sys.executable, str(ROOT / 'scripts/sync-version'), '--check'], check=True)
 cargo_version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
 try:
     reported = subprocess.check_output([str(a.binary.resolve()), '--version'], text=True).split()
@@ -159,7 +160,19 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
     for f in ['LICENSE', 'NOTICE', 'README.md']:
         shutil.copy2(ROOT / f, stage / f)
     shutil.copytree(ROOT / 'dist/licenses', stage / 'licenses')
-    shutil.copytree(ROOT / 'examples', stage / 'examples')
+    # Match the public source payload, never sweep the private checkout or downloads.
+    for relative in (ROOT / 'dist/example-payload.txt').read_text().splitlines():
+        if not relative or relative.startswith('#'):
+            continue
+        path = Path(relative)
+        if path.is_absolute() or '..' in path.parts or path.parts[0] != 'examples':
+            p.error(f'invalid example payload path: {relative}')
+        source = ROOT / path
+        if source.is_symlink() or not source.is_file():
+            p.error(f'missing or symlink example payload input: {relative}')
+        target = stage / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
     copy_selected(ROOT, stage, ['libraries/blender/filmic.exr'])
     sdk = ROOT / 'packages/ts'
     if not (sdk / 'dist/index.js').exists():
@@ -168,10 +181,16 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
     shutil.copy2(sdk / 'scene.schema.json', stage / 'sdk/scene.schema.json')
     shutil.copy2(ROOT / 'LICENSE', stage / 'sdk/LICENSE')
     metadata = json.loads((sdk / 'package.json').read_text(encoding='utf-8'))
-    (stage / 'sdk/package.json').write_text(json.dumps({
-        'name': metadata['name'], 'version': metadata['version'], 'type': 'module',
-        'license': metadata['license']
-    }, indent=2) + '\n', encoding='utf-8')
+    # Archives flatten dist/ into sdk/; keep the canonical public entry points.
+    def archive_exports(value):
+        if isinstance(value, dict):
+            return {key: archive_exports(entry) for key, entry in value.items()}
+        if isinstance(value, list):
+            return [archive_exports(entry) for entry in value]
+        return './' + value[len('./dist/'):] if isinstance(value, str) and value.startswith('./dist/') else value
+    archive_metadata = {key: metadata[key] for key in ('name', 'version', 'type', 'license', 'engines')}
+    archive_metadata['exports'] = archive_exports(metadata['exports'])
+    (stage / 'sdk/package.json').write_text(json.dumps(archive_metadata, indent=2) + '\n', encoding='utf-8')
     # Python SDK: a pip-installable source tree (pip install PREFIX/lib/vork/python).
     shutil.copytree(ROOT / 'packages/python', stage / 'python',
                     ignore=shutil.ignore_patterns('generate.py', 'test_*.py', '__pycache__', '*.egg-info', 'build'))

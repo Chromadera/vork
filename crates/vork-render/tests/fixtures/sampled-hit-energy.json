@@ -1,0 +1,175 @@
+{
+  "version": 2,
+  "render": {
+    "resolution": [
+      16,
+      16
+    ],
+    "background": [
+      0,
+      0,
+      0
+    ]
+  },
+  "buffers": {
+    "p": {
+      "type": "vec3",
+      "data": [
+        [
+          -2,
+          -2,
+          0
+        ],
+        [
+          2,
+          -2,
+          0
+        ],
+        [
+          2,
+          2,
+          0
+        ],
+        [
+          -2,
+          2,
+          0
+        ]
+      ]
+    },
+    "n": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ]
+    },
+    "i": {
+      "type": "u32",
+      "data": [
+        0,
+        1,
+        2,
+        0,
+        2,
+        3
+      ]
+    }
+  },
+  "geometry": {
+    "quad": {
+      "attributes": {
+        "POSITION": "p",
+        "NORMAL": "n"
+      },
+      "indices": "i"
+    }
+  },
+  "programs": {
+    "receiver": {
+      "source": "struct Inputs {}; Closure surface(ShadingContext ctx,Inputs i) {Closure c={}; c.base_color=float3(0.7); c.specular_roughness=1.; c.subsurface_weight=1.; c.subsurface_color=float3(0.8); c.geometry_thin_walled=true; return c;}"
+    }
+  },
+  "materials": {
+    "receiver": {
+      "program": "receiver"
+    },
+    "mirror": {
+      "inputs": {
+        "base_color": [
+          1,
+          1,
+          1
+        ],
+        "base_metalness": 1,
+        "specular_roughness": 0
+      }
+    }
+  },
+  "nodes": [
+    {
+      "type": "camera",
+      "translation": [
+        0,
+        0,
+        3
+      ],
+      "material": {
+        "program": "std/camera",
+        "inputs": {
+          "projection": "ortho",
+          "ortho_scale": 0.2
+        }
+      }
+    },
+    {
+      "type": "mesh",
+      "geometry": "quad",
+      "materials": [
+        "mirror"
+      ],
+      "scale": [
+        0.06,
+        0.06,
+        1
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "quad",
+      "materials": [
+        "receiver"
+      ],
+      "translation": [
+        0,
+        0,
+        4
+      ],
+      "rotation": [
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "type": "light",
+      "shape": "rectangle",
+      "size": 2,
+      "size_y": 2,
+      "energy": 10,
+      "translation": [
+        0,
+        0,
+        6
+      ]
+    },
+    {
+      "type": "light",
+      "shape": "environment",
+      "color": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

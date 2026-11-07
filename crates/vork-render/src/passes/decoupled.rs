@@ -1028,7 +1028,7 @@ impl View {
             for band in 0..bands {
                 let first=(band*installed.materials) as usize*config_stride as usize;
                 let template:CameraConfig=bytemuck::pod_read_unaligned(&configs[first..first+config_size]);
-                let ray_batch=if s.pipelines.resolve_native.is_some() {vork_slang::registry::MEDIUM_GI_RAY_BATCH} else {32};
+                let ray_batch=if s.pipelines.resolve_native.is_some() {vork_slang::registry::GI_RAY_BATCH} else {32};
                 for word in 0..samples.div_ceil(ray_batch) {
                     let mut blocks=Vec::new();
                     for (sampled,capacity,size) in [(false,centroid_capacity,vork_slang::registry::CAMERA_INDIRECT_BLOCK),(true,sampled_capacity,sampled_block)] {
@@ -1729,6 +1729,7 @@ mod tests {
     #[cfg(all(test, vork_private_tests))]
     include!("decoupled_dielectric_occupancy_bands_preserve_mixed_glass_scene_private.rs");
     /// Per-sample program and blended shading at 96x64, 8 samples.
+    #[cfg(vork_private_tests)]
     fn program_transparency() -> Result<(Scene,std::path::PathBuf)> {
         let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
         let mut scene=crate::load_test_fixture(&root.join("program-transparency.json"), include_str!("../../tests/presets/program-transparency-874d5753.json"))?;
@@ -1738,6 +1739,7 @@ mod tests {
     /// Per-sample program and blended shading split into bands reproduces the
     /// one-band image exactly: each band classifies, evaluates and composes its rows.
     #[test]
+    #[cfg(vork_private_tests)]
     fn shading_bands_reproduce_the_single_band_image() -> Result<()> {
         let Some(mut r) = crate::test_renderer()? else {return Ok(());};
         let (scene,root)=program_transparency()?;
@@ -1792,6 +1794,7 @@ mod tests {
     /// A frame whose evaluations overflow the view's estimate redoes with the
     /// reported demand, destroys the outgrown storage, and keeps its pixels.
     #[test]
+    #[cfg(vork_private_tests)]
     fn evaluation_overflow_redoes_and_destroys_the_outgrown_storage() -> Result<()> {
         let Some(mut r) = crate::test_renderer()? else {return Ok(());};
         let (scene,root)=program_transparency()?;
@@ -1822,6 +1825,7 @@ mod tests {
     /// Recovery preserves an accepted successor's pixels and GPU-only fence,
     /// but releases the saved result when a different request uses that slot.
     #[test]
+    #[cfg(vork_private_tests)]
     fn recovery_retains_an_accepted_queued_exposure() -> Result<()> {
         let Some(mut r) = crate::test_renderer()? else { return Ok(()); };
         let (scene, root) = program_transparency()?;
@@ -1912,6 +1916,7 @@ mod tests {
     // Empty SIMD lanes must never reach descriptor loads in either the direct
     // opaque walk or the grouped one-sample transparent walk.
     #[test]
+    #[cfg(vork_private_tests)]
     fn single_sample_shading_preserves_sparse_pixel_execution() -> Result<()> {
         let Some(r) = crate::test_renderer()? else {return Ok(());};
         let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");

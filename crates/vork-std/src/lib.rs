@@ -1,6 +1,6 @@
 //! Unstable, internal: all Rust APIs in this crate are free to change.
 //!
-//! Language-independent JSON fragments from the same implementation as @usevoyager/vork.
+//! Language-independent JSON fragments from the same implementation as @voyager-so/vork.
 //! The embedded engine has no host bindings, filesystem or network access.
 mod expand;
 pub use expand::{expand_scene, load_scene};
@@ -65,6 +65,12 @@ pub fn evaluate(function: &str, argument: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scatter_is_not_a_standard_library_function() {
+        let error = evaluate("scatter", "{}").unwrap_err().to_string();
+        assert!(error.contains("unknown standard-library function scatter"), "{error}");
+    }
 
     #[test]
     fn geometry_names_default_to_builder() {

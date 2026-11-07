@@ -3,26 +3,22 @@ Supported GPUs: Apple Silicon (Metal) and recent NVIDIA (Vulkan).
 Unknown fields are errors; omit anything at its default.
 
 FIRST IMAGE
-Save this as shot.json:
-```json
-{"version":2,"nodes":[
-  {"type":"mesh","geometry":{"std":"sphere","radius":1},
-   "materials":[{"inputs":{"base_color":[0.12,0.35,0.65],"specular_roughness":0.3}}]},
-  {"type":"mesh","translation":[0,-1,0],"geometry":{"std":"grid","size":[10,10]},
-   "materials":[{"inputs":{"base_color":[0.35,0.35,0.35]}}]},
-  {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0,0],
-   "energy":700,"size":4,"color":[1,0.92,0.8]},
-  {"type":"camera","translation":[3,2,5],"target":[0,0,0]}
-],"render":{"resolution":[640,480]}}
-```
-vork render shot.json --out shot.png --profile std/previs
+vork init my-shot
+cd my-shot
+vork render scene.json --out shot.png --profile std/draft
+vork help
+Creates an offline scene from sphere, box and grid primitives; no assets to fetch.
+vork init [DIR] [--language json|typescript|python] (default DIR: ., language: json).
+Always writes scene.json and README.md; language adds scene.ts or scene.py.
+Existing files are never overwritten. Source authoring requires the matching SDK;
+scene.json renders immediately. Edit the source, regenerate JSON, then render again.
 Inspect framing, scale and shadows. Adjust camera target, light position and material colour.
-vork render shot.json --out shot.png --profile std/final
+vork render scene.json --out shot.png --profile std/final
 Use std/path for accurate indirect lighting, glass and caustics. For glass panes set
 geometry_thin_walled: true. RGB background changes the backdrop, not the lighting.
 To import a textured model, replace the first mesh with
 {"type":"asset","name":"model","file":"model.glb"}. Keep .gltf files with their referenced buffers and textures.
-Adjust the camera target and distance to the asset's size. Paths are relative to shot.json.
+Adjust the camera target and distance to the asset's size. Paths are relative to scene.json.
 
 Supported features and known limits: vork help limits. Source builds: vork help build.
 
@@ -65,6 +61,7 @@ COMMON FIELDS (advanced fields: vork help TOPIC --all; exact field: vork help fi
 <!-- generated-api:start -->
 
 Scene {
+  $schema: string; editor schema URL
   animation: layer[] = []
   buffers: {name:buffer} = {}
   geometry: {name:geometry} = {}
@@ -81,7 +78,7 @@ Node {
   name: string = ""; globally unique, including imported nodes
   rotation: [x,y,z,w] quaternion | {euler:[x,y,z]} (Blender XYZ) = [0,0,0,1]
   scale: [x,y,z] = [1,1,1]; any zero world-scale component hides geometry, including children
-  target: node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top
+  target: node-name|[x,y,z]|null; aims -Z, world Y up; rotation is an offset on top; structural, not animatable: aim at a named node and animate its translation
   translation: [x,y,z] = [0,0,0]; parent frame
   visible: bool = true; false hides the subtree and disables its lights; animatable (step)
   visible_camera: bool = true
@@ -90,7 +87,7 @@ Node {
 
 Mesh (type: mesh) {
   geometry: geometry-name|inline geometry
-  materials: (material-name|inline material)[] = []; empty = default std/openpbr with roughness 0.5
+  materials: (material-name|inline material)[] = []; empty = default std/openpbr with roughness 0.3
 }
 
 Asset (type: asset) {
@@ -144,7 +141,7 @@ Asset nodes also take materials and nodes overrides (vork help nodes).
 LIBRARIES
 Std builders return {buffers,geometry}; author loaders expand {std: NAME, ...options} before scene decoding.
 Shapes are centred; dimensions are metres. Inline geometry uses {std: NAME, ...options}.
-Common builders (all shapes, text, extrusion and scatter: vork help std --all):
+Common builders (all shapes, text and extrusion: vork help std --all):
 <!-- generated-shapes:start -->
 box: {name?:string="box",size?:vec3=[2,2,2]} → GeometryFragment
 sphere: {name?:string="sphere",radius?:number=1,segments?:number=32,rings?:number=16} → GeometryFragment
@@ -156,6 +153,7 @@ Environment: light.material evaluates radiance; std/environment_image reads ordi
 vork std environment preprocesses HDR lighting; vork std sky declares atmosphere and an ordinary sun.
 
 Topics (vork help TOPIC [--all]):
+upgrade: breaking changes and replacements by release
 contract: when scenes are validated; what is fixed after install
 nodes: glTF asset overrides and imported-node addresses, skins, morph targets, object ID assignment
 cameras: sampled depth of field; OpenCV export
@@ -176,8 +174,12 @@ sdk: TypeScript and Python helpers
 std: full std/sky and std/hair inputs; Slang modules (noise, ramps, bump)
 blender: Filmic display, Blender node functions for Slang
 fluid: APIC/FLIP liquid, Yu–Turk surfaces, wetting and whitewater
-post: glare, vignette, lens distortion and white balance inputs
+post: white balance colour adaptation inputs
 errors: exit codes
 diagnostics: timing files, benchmark flags, environment variables
 limits: supported hardware, lighting approximations and scene-size limits
 build: source prerequisites, pinned toolchains and tests on macOS, Linux and Windows
+
+Scene JSON supports `"$schema": "https://voyager.so/vork/schema/scene.schema.json"` for editor
+completion and validation. `vork init` and SDK scene writers include it; vork
+accepts this metadata without fetching it or changing the render.

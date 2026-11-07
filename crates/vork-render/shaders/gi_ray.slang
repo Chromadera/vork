@@ -1,7 +1,8 @@
 #ifdef VORK_DIFFUSE_MEDIUM
 import diffuse_medium;
+#endif
 // Preparation is retained with the incident accumulator for this exposure.
-struct GiMediumQuery {
+struct GiQuery {
     float4 accumulation;
     float4 position_depth;
     float4 normal_view;
@@ -9,10 +10,9 @@ struct GiMediumQuery {
     float4 error;
 };
 #ifdef VORK_METAL
-[[vk::binding(1,3)]] RWStructuredBuffer<GiMediumQuery> gi_medium_accumulation : register(VORK_GI_MEDIUM_REGISTER);
+[[vk::binding(1,3)]] RWStructuredBuffer<GiQuery> gi_accumulation : register(VORK_GI_QUERY_REGISTER);
 #else
-[[vk::binding(1,3)]] RWStructuredBuffer<GiMediumQuery> gi_medium_accumulation;
-#endif
+[[vk::binding(1,3)]] RWStructuredBuffer<GiQuery> gi_accumulation;
 #endif
 // Ray diffuse indirect shades off-screen hits through the raster surface
 // evaluation (hit.slang) and the shared BSDF evaluator.
@@ -48,13 +48,9 @@ import probes;
 [[vk::binding(14,0)]] RaytracingAccelerationStructure ray_scene : register(t5);
 [[vk::binding(15,0)]] StructuredBuffer<uint> ray_alpha : register(t6);
 [[vk::binding(16,0)]] [[vk::image_format("rgba32f")]] RWTexture2D<float4> cell_receivers : register(u8);
-#ifdef VORK_DIFFUSE_MEDIUM
 struct GiSources {uint4 topology;uint4 batch;};
 [[vk::binding(17,0)]] ConstantBuffer<GiSources> gi_source_data : register(b7);
 #define gi_sources gi_source_data.topology
-#else
-[[vk::binding(17,0)]] ConstantBuffer<uint4> gi_sources : register(b7);
-#endif
 [[vk::binding(18,0)]] StructuredBuffer<float> gi_emitter_weights : register(t8);
 
 // Raster geometry buffers ray hits read in place (rt::hit_record, rt::hits_layout).
@@ -216,53 +212,44 @@ bool gi_consumed(uint2 cell) {
 }
 // Scenes with programs compile their own entry with their Programs (SlangForward::program_kernel).
 void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
-    if (any(gid.xy>=image_size(output))) {return;}
-#ifdef VORK_DIFFUSE_MEDIUM
+    if(gid.y>=gi_source_data.batch.z) return;
     let at=gid.y*image_size(output).x+gid.x;
+    gid.y+=gi_source_data.batch.y;
+    if (any(gid.xy>=image_size(output))) {return;}
     let begin=gi_source_data.batch.x;
-    GiMediumQuery prepared;
+    let rays=uint(frame.ao.z)*max(frame.sampling.w,1u);
+    if(begin>=rays) return;
+    GiQuery prepared;
     if(begin==0u) {
-#endif
     let surface=ao_surface(receivers,normals,gid.xy,int(frame.ao.w),frame.view);
     if(surface.depth<1.) {cell_receivers[gid.xy]=float4(surface.position,surface.depth);}
     let active=surface.depth<1. && gi_consumed(gid.xy);
     let ng=active ? screen_geometric_normal(receivers,surface.pixel,surface.position,surface.normal) : surface.normal;
     let position_error=active ? surface_position_error(surface.object,surface.position) : float3(0.);
-#ifdef VORK_DIFFUSE_MEDIUM
     prepared.accumulation=float4(0.);
     prepared.position_depth=float4(surface.position,surface.depth);
     prepared.normal_view=float4(surface.normal,surface.view_depth);
     prepared.geometric_active=float4(ng,active ? 1. : 0.);
     prepared.error=float4(position_error,0.);
-    gi_medium_accumulation[at]=prepared;
-#endif
+    gi_accumulation[at]=prepared;
     if(!active) {
         output[gid.xy]=surface.depth>=1. ? float4(1.,0.,0.,0.) : float4(1.,surface.view_depth,encode_octahedron(surface.normal));
         incident_output[gid.xy]=float4(0.);return;
     }
-#ifdef VORK_DIFFUSE_MEDIUM
-    } else {prepared=gi_medium_accumulation[at];}
+    } else {prepared=gi_accumulation[at];}
     // Inactive cells skip every later batch before receiver reconstruction or
     // the support-aware demand scan. Their first batch published filter guides.
     if(prepared.geometric_active.w==0.) {return;}
     let position=prepared.position_depth.xyz;let n=prepared.normal_view.xyz;
     let view_depth=prepared.normal_view.w;
     let ng=prepared.geometric_active.xyz;let position_error=prepared.error.xyz;
-#else
-    let position=surface.position;let n=surface.normal;let view_depth=surface.view_depth;
-    let begin=0u;
-#endif
-    let rays=uint(frame.ao.z)*max(frame.sampling.w,1u);let count=rays*uint(max(frame.temporal.y,1.));let first=uint(frame.temporal.x)*rays;
+    let count=rays*uint(max(frame.temporal.y,1.));let first=uint(frame.temporal.x)*rays;
     let basis=ray_basis(n);
     // Replacement and radiance estimate the same clipped cosine measure.
     // The signed residual may be negative at finite sample counts.
     var hits=0.;var incident=float3(0.);
-#ifdef VORK_DIFFUSE_MEDIUM
-    let end=min(begin+REG_MEDIUM_GI_RAY_BATCH,rays);
+    let end=min(begin+REG_GI_RAY_BATCH,rays);
     incident=prepared.accumulation.xyz;hits=prepared.accumulation.w;
-#else
-    let end=rays;
-#endif
     for(var k=begin;k<end;k++) {
         incident+=gi_source<V,P>(position,n,ng,position_error,gid.xy,first+k,count);
         incident+=gi_field_source<V,P>(position,n,ng,position_error,gid.xy,first+k,count);
@@ -326,9 +313,7 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
 #endif
         incident+=radiance*direction_weight;
     }
-#ifdef VORK_DIFFUSE_MEDIUM
-    if(end<rays) {gi_medium_accumulation[at].accumulation=float4(incident,hits);return;}
-#endif
+    if(end<rays) {gi_accumulation[at].accumulation=float4(incident,hits);return;}
     let total=float(max(rays,1u));
     var estimate=incident/total;
     output[gid.xy]=float4(1.-hits/total,view_depth,encode_octahedron(n));

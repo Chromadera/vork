@@ -2,11 +2,11 @@
 use std::{env, fmt::Write, fs, path::Path};
 
 fn main() {
-    // The private corpus and its test modules are intentionally absent from public exports.
+    // Explicit opt-in: directory layout must not change test admission.
     println!("cargo:rustc-check-cfg=cfg(vork_private_tests)");
     println!("cargo:rerun-if-changed=build.rs");
-    if std::path::Path::new("../../scenes").is_dir() {
-        println!("cargo:rerun-if-changed=../../scenes");
+    println!("cargo:rerun-if-env-changed=VORK_PRIVATE_TESTS");
+    if std::env::var("VORK_PRIVATE_TESTS").as_deref() == Ok("1") {
         println!("cargo:rustc-cfg=vork_private_tests");
     }
     let source = "openpbr-params.md";

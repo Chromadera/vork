@@ -256,7 +256,7 @@ fn read_with_shaders(path: &Path, shaders: Option<&Path>) -> Option<Vec<u8>> {
         let name = path.file_name()?.to_str()?;
         let (key, kind) = name.split_once('.')?;
         if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit())
-            || !matches!(kind, "slang-variant-v1.entry" | "slang-program-v1.entry"
+            || !matches!(kind, "slang-variant-v1.entry" | "slang-program-v2.entry"
                 | "slang-resolve-v2.entry" | "aov-resolve-v1.entry") {
             return None;
         }
@@ -460,7 +460,7 @@ mod tests {
         let store = Store::for_test(root.join("cache"));
         let shaders = root.join("shaders");
         for kind in ["slang-variant", "slang-program", "slang-resolve", "aov-resolve", "pipeline", "pipeline-keys", "shader-warm"] {
-            let version = if kind == "slang-resolve" {2} else {1};
+            let version = if matches!(kind, "slang-resolve" | "slang-program") {2} else {1};
             let path = store.path(kind, version, blake3::hash(b"fixture"));
             let shipped = shaders.join(path.file_name().unwrap());
             write(&shipped, b"shipped").unwrap();

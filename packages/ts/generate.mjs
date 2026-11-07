@@ -35,6 +35,8 @@ for (const [file, value] of [['scene.schema.json', schemaText], ['src/schema.ts'
   } else writeFileSync(new URL(file, import.meta.url), value);
 }
 
+execFileSync(process.execPath, ['packages/ts/generate-resource-slots.mjs', ...(process.argv.includes('--check') ? ['--check'] : [])], {cwd: new URL('../..', import.meta.url), stdio: 'inherit'});
+
 // Rust owns field documentation and defaults as well as the input schema.
 execFileSync('cargo', ['run', '--quiet', '-p', 'vork-scene', '--example', 'generate-docs', ...(process.argv.includes('--check') ? ['--', '--check'] : [])], {
   cwd: new URL('../..', import.meta.url), stdio: 'inherit',

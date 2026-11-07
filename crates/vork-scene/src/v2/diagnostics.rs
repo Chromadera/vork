@@ -36,7 +36,7 @@ pub fn unknown<'a>(kind: &str, name: &str, valid: impl IntoIterator<Item = &'a s
         ("value", "Filmic", "render.display with the blender/filmic display program"),
         ("value", "ORTHO", "ortho (lowercase)"),
         ("field", "extension", "wrap_s/wrap_t on the image"),
-        ("token", "bloom", "std/bloom instead of post/glare type bloom"),
+        ("token", "bloom", "std/bloom"),
         ("program", "blender/principled", "std/openpbr"),
     ];
     if let Some((_, _, hint)) = BLENDER_HINTS.iter().find(|(k, n, _)| *k == kind && *n == name) {
@@ -631,7 +631,7 @@ mod blender_hints {
             ("value", "Filmic", "AgX", "blender/filmic"),
             ("value", "ORTHO", "ortho", "ortho (lowercase)"),
             ("field", "extension", "wrap_s", "wrap_s/wrap_t"),
-            ("token", "bloom", "fog_glow", "std/bloom instead of post/glare type bloom"),
+            ("token", "bloom", "fog_glow", "std/bloom"),
         ] {
             let error = unknown(kind, name, [valid]);
             assert!(error.contains(expected), "{error}");

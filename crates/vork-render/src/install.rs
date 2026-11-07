@@ -65,20 +65,30 @@ pub(crate) fn ignore_participating_media(r: &Renderer, scene: &mut Scene, base: 
             clear(&mut node.children, stages, geometry);
         }
     }
+    let medium_request = serde_json::json!({"sites":sites,"materials":media.iter().filter_map(|name| scene.materials.get(name).map(|m|(name,m))).collect::<std::collections::BTreeMap<_,_>>()});
     clear(&mut scene.nodes, &stages, &scene.geometry);
-    fn one_world(nodes:&mut [Node],found:&mut bool,ignored:&mut std::collections::BTreeSet<String>) {
+    fn one_world(nodes:&mut [Node],found:&mut Option<String>,ignored:&mut std::collections::BTreeSet<String>,next:&mut usize) {
         for node in nodes {
+            let index = *next; *next += 1;
             if matches!(node.kind,NodeKind::Light {shape:vork_scene::LightShape::Environment,..}) {
-                if *found {
-                    eprintln!("warning: ignored additional environment light {:?}; retaining the first environment",node.name);
+                if let Some(first) = found.as_ref() {
+                    crate::warnings::additional_environment(node, first, index);
                     ignored.insert(node.name.clone());node.kind=NodeKind::Node {};
-                } else {*found=true;}
+                } else {*found=Some(format!("node {index} ({:?})", node.name));}
             }
-            one_world(&mut node.children,found,ignored);
+            one_world(&mut node.children,found,ignored,next);
         }
     }
     let mut ignored_worlds=std::collections::BTreeSet::new();
-    one_world(&mut scene.nodes,&mut false,&mut ignored_worlds);
+    one_world(&mut scene.nodes,&mut None,&mut ignored_worlds,&mut 0);
+    // Report the exact authored keys as well as the dropped light itself.
+    for layer in &scene.animation {
+        for track in layer.tracks.iter().flatten() {
+            if matches!(track.path.as_slice(),[root,name,field,..] if root=="nodes" && ignored_worlds.contains(name) && !matches!(field.as_str(),"translation"|"rotation"|"scale"|"visible")) {
+                crate::warnings::dropped("additional_environment_track", serde_json::json!({"track":track}), "additional environment light-property animation; retaining the first environment".into());
+            }
+        }
+    }
     for layer in &mut scene.animation {
         if let Some(tracks)=&mut layer.tracks {tracks.retain(|t|!matches!(t.path.as_slice(),[root,name,field,..] if root=="nodes" && ignored_worlds.contains(name) && !matches!(field.as_str(),"translation"|"rotation"|"scale"|"visible")));}
     }
@@ -89,10 +99,14 @@ pub(crate) fn ignore_participating_media(r: &Renderer, scene: &mut Scene, base: 
         scene.materials.insert(name.clone(), serde_json::from_value(serde_json::json!({"program":"std/openpbr","inputs":{"geometry_opacity":0}}))?);
     }
     for layer in &mut scene.animation {
-        if let Some(tracks)=&mut layer.tracks { tracks.retain(|t| !(t.path.first().is_some_and(|p|p=="materials") && t.path.get(1).is_some_and(|p|pure.contains(p)))); }
+        if let Some(tracks)=&mut layer.tracks { tracks.retain(|t| {
+            let dropped = t.path.first().is_some_and(|p|p=="materials") && t.path.get(1).is_some_and(|p|pure.contains(p));
+            if dropped { crate::warnings::dropped("participating_media_track", serde_json::json!({"track":t}), "participating-medium material animation; medium transport is disabled".into()); }
+            !dropped
+        }); }
     }
     scene.media_disabled=true;
-    if !sites.is_empty() { eprintln!("warning: ignored participating media for this release: {}", sites.join(", ")); }
+    if !sites.is_empty() { crate::warnings::dropped("participating_media", medium_request, format!("warning: ignored participating media for this release: {}", sites.join(", "))); }
     Ok(sites)
 }
 
@@ -1231,7 +1245,7 @@ impl InstalledScene {
             if let NodeKind::Mesh { geometry, skin, .. } = &node.kind {
                 draw.computed = crate::computed_geometry::dynamic(input, &input.geometry[geometry]);
                 if draw.computed && (skin.is_some() || materials[draw.material].record.extra[1]>0. || materials[draw.material].transmissive) {
-                    eprintln!("warning: node {:?}: ignored computed geometry updates combined with skinning, opacity or transmission; using authored geometry",node.name);
+                    crate::warnings::dropped("computed_geometry", serde_json::json!({"node":node}), format!("warning: node {:?}: ignored computed geometry updates combined with skinning, opacity or transmission; using authored geometry",node.name));
                     draw.computed=false;
                 }
             }
@@ -1868,7 +1882,7 @@ impl InstalledScene {
                                 .copied().unwrap_or(u64::from(vertex));
                             if let Some(&material) = assignments.get(&identity) {
                                 if material!=draw.material && displacement_seam_nodes.insert(roots[draw.object as usize].node) {
-                                    eprintln!("warning: node {:?}: ignored conflicting displacement materials on shared geometry",nodes[roots[draw.object as usize].node].node.name);
+                                    crate::warnings::dropped("conflicting_displacement", serde_json::json!({"node":nodes[roots[draw.object as usize].node].node}), format!("warning: node {:?}: ignored conflicting displacement materials on shared geometry",nodes[roots[draw.object as usize].node].node.name));
                                 }
                             }
                             if displaced_pass { assignments.insert(identity, draw.material); }
@@ -1936,7 +1950,7 @@ impl InstalledScene {
                     let key = (root.node, root.instance_index, draw.gltf_node.0, identity);
                     if let Some(before) = displacement_seams.insert(key, values.clone()) {
                         if before!=values && displacement_seam_nodes.insert(root.node) {
-                            eprintln!("warning: node {:?}: ignored displacement across inconsistent attributes at shared vertex {identity}",nodes[root.node].node.name);
+                            crate::warnings::dropped("displacement_attributes", serde_json::json!({"node":nodes[root.node].node,"vertex":identity}), format!("warning: node {:?}: ignored displacement across inconsistent attributes at shared vertex {identity}",nodes[root.node].node.name));
                         }
                     }
                 }
@@ -1952,7 +1966,7 @@ impl InstalledScene {
                     let point_normal=draw.exit_geometry.as_ref().is_some_and(|g|!g.point_centers.is_empty()) && programs.as_ref().unwrap().displacement_uses_normal(records[draw.material].tag[0]);
                     if displacement_seam_nodes.contains(&roots[draw.object as usize].node) {continue;}
                     if draw.computed || implicit || point_normal {
-                        eprintln!("warning: node {:?}: ignored displacement on computed/implicit geometry or points using NORMAL",node.name);
+                        crate::warnings::dropped("displacement_geometry", serde_json::json!({"node":node}), format!("warning: node {:?}: ignored displacement on computed/implicit geometry or points using NORMAL",node.name));
                         continue;
                     }
                     ensure!(
@@ -2053,7 +2067,7 @@ impl InstalledScene {
             .filter_map(|(i, node)| {
                 if !crate::compute::places_instances(input,&node.node) {return None;}
                 if draws.iter().any(|d| roots[d.object as usize].node==i && materials[d.material].transparent) {
-                    eprintln!("warning: node {:?}: ignored computed instance placement on transparent material; using authored placements",node.node.name);
+                    crate::warnings::dropped("computed_instances", serde_json::json!({"node":node.node}), format!("warning: node {:?}: ignored computed instance placement on transparent material; using authored placements",node.node.name));
                     None
                 } else {Some(i)}
             })

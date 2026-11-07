@@ -14,7 +14,7 @@ Surface fibre_surface<P:IProgram>(Varying v,bool front) {
     let entering=material_front(v,front);
     if (!entering) {discard;}
     let view=fibre_light_view(v.world);
-    let k=raster_coordinates(v,surface_geometric(v,entering),view);
+    let k=raster_coordinates(v,entering,view);
     let s=surface_at<Unspecialized,P>(v,entering,view,k);
     if (!s.is_hair || s.discarded) {discard;}
     return s;

@@ -198,6 +198,8 @@ impl Shot {
     }
 
     pub(crate) fn render_scoped<'scope>(self, scope: &'scope std::thread::Scope<'scope, '_>) -> Result<RenderedShot> {
+        let warnings = crate::warnings::Collector::default();
+        let _warning_scope = warnings.enter();
         let wall = Instant::now();
         let Self {
             scene: scene_path,
@@ -437,6 +439,7 @@ impl Shot {
                         Ok((prepared, start.elapsed().as_secs_f64() * 1000.))
                     })
                 });
+                vork_slang::progress::phase("Render: preparing scene, shaders and encoder", 0);
                 let renderer = match device_worker
                     .join()
                     .map_err(|_| anyhow::anyhow!("device creation worker panicked"))
@@ -452,9 +455,6 @@ impl Shot {
                         return Err(error);
                     }
                 };
-                if renderer.shader_cache_cold() {
-                    eprintln!("Shader cache is cold for this vork/GPU driver; first renders compile shaders. Run `vork setup` once to precompile (about a minute on Linux).");
-                }
                 if diagnostics {
                     eprintln!(
                         "device: {:?}; pipeline cache supported: {}",
@@ -467,6 +467,7 @@ impl Shot {
                 let (installed, encoders, encoder_prepare_ms, encoder_attach_ms) =
                     std::thread::scope(|scope| -> Result<_> {
                         let install = scope.spawn(|| {
+                            let _warning_scope = warnings.enter();
                             let mut scene = scene;
                             if let Some((profile, level, keep_samples)) = &default_denoise {
                                 crate::denoise::resolve_default(&renderer, &mut scene, profile, *level, *keep_samples);
@@ -592,6 +593,7 @@ impl Shot {
         let png_workers: usize = png_outputs.iter().map(|p| p.worker_count).sum();
         let mut foreground = Some(foreground);
         let ready_ms = wall.elapsed().as_secs_f64() * 1000.;
+        vork_slang::progress::phase("Rendering frames", frames);
         let loop_start = Instant::now();
         let mut samples = Vec::new();
         let mut metadata_frames = Vec::new();
@@ -694,7 +696,9 @@ impl Shot {
                 for writer in &png_outputs { writer.push(index(frame), p.clone())?; }
             }
             frame += 1;
+            vork_slang::progress::completed(frame);
         }
+        vork_slang::progress::phase("Render: finishing encoders and writing files", 0);
         let finish_start = Instant::now();
         for encoder in &mut encoders {
             encoder.finish().map_err(device)?;
@@ -705,6 +709,7 @@ impl Shot {
             0.
         };
         if still_pass {
+            vork_slang::progress::phase("Rendering selected still", 1);
             let still_frame = (at.unwrap() * fps).round() as usize;
             let pixels = loop {
                 let slot = &mut slots[0];
@@ -721,6 +726,7 @@ impl Shot {
                     }
                 }
             };
+            vork_slang::progress::completed(1);
             still_exposure = pixels.exposure;
             still_camera = Some(pixels.camera);
             for writer in &png_outputs {
@@ -730,6 +736,7 @@ impl Shot {
         Ok((encoder_finish_ms, memory_frames))
         })();
         let mut output_result = Ok(());
+        vork_slang::progress::phase("Render: writing files and reports", 0);
         for writer in png_outputs {
             let result = writer.finish();
             if output_result.is_ok() { output_result = result; }
@@ -742,11 +749,14 @@ impl Shot {
         let save_start = Instant::now();
         renderer.save_idle_pipelines().map_err(device)?;
         let pipeline_save_ms = save_start.elapsed().as_secs_f64() * 1000.;
+        let mut sidecars = Vec::new();
         for path in &video_paths {
+            let camera_path = sidecar(path, "camera.json");
             std::fs::write(
-                sidecar(path, "camera.json"),
+                &camera_path,
                 serde_json::to_vec_pretty(&crate::camera::clip(&camera_frames, fps, Some(first_frame))?)?,
             )?;
+            sidecars.push(camera_path);
         }
         if outputs.has(Output::Camera) && !no_write && !gpu_only {
             let frames = still_camera
@@ -763,7 +773,8 @@ impl Shot {
                 if let Some(parent) = camera_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(camera_path, &bytes)?;
+                std::fs::write(&camera_path, &bytes)?;
+                sidecars.push(camera_path);
             }
         }
         if implicit_still && !no_write && !gpu_only {
@@ -788,6 +799,7 @@ impl Shot {
         let metadata = |frames: &[serde_json::Value]| serde_json::json!({
             "version": 1, "fps": fps, "frames": frames,
             "object_ids": &*installed.object_ids,
+            "warnings": warnings.snapshot(),
             "profile": profile_record, "settings": installed.render().settings,
             "denoiser": installed.render().settings.integrator.denoiser().and_then(|_| crate::denoise::device_kind(&renderer)),
         });
@@ -816,11 +828,16 @@ impl Shot {
                 meta["exposure"] = summary.clone();
                 exposures.push(serde_json::json!({"output": path, "exposure": summary}));
             }
-            std::fs::write(meta_path, serde_json::to_vec_pretty(&meta)?)?;
+            std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)?;
+            sidecars.push(meta_path);
             if diagnostics {
-                std::fs::write(file_path("timings.json"), serde_json::to_vec_pretty(&report)?)?;
+                let timing_path = file_path("timings.json");
+                std::fs::write(&timing_path, serde_json::to_vec_pretty(&report)?)?;
+                sidecars.push(timing_path);
             }
         }
+        report["warnings"] = serde_json::to_value(warnings.snapshot())?;
+        report["sidecars"] = serde_json::to_value(sidecars)?;
         report["exposure"] = exposures.into();
         Ok(RenderedShot {
             report,

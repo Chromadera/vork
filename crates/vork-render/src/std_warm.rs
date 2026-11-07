@@ -220,16 +220,26 @@ fn prepare(mut value: serde_json::Value, mut settings: v2::Settings) -> Result<v
 /// sampled world medium) is one no render compiles: setup skips it.
 fn run(r: &Renderer, jobs: impl Iterator<Item = (serde_json::Value, v2::Settings)>, options: InstallOptions) -> Result<()> {
     let jobs = std::sync::Mutex::new(jobs.collect::<Vec<_>>().into_iter());
+    vork_slang::progress::phase("Setup: warming configurations", jobs.lock().unwrap().len());
+    let completed = std::sync::atomic::AtomicUsize::new(0);
     let workers = std::thread::available_parallelism().map_or(1, usize::from).min(4);
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..workers).map(|_| scope.spawn(|| -> Result<()> {
             loop {
                 let Some((scene, integrator)) = jobs.lock().unwrap().next() else { break };
                 let name = scene["materials"]["std"]["program"].as_str().unwrap_or("built-in materials").to_owned();
+                let explicit_camera = scene["nodes"].as_array().unwrap().iter()
+                    .any(|node| node["type"] == "camera" && !node["material"].is_null());
+                // The explicit standard-camera jobs retain the broad hit keys.
+                // Ordinary table jobs warm the smaller material-compatible keys
+                // through the same install constructors, without extra installs.
+                let variants = if explicit_camera && matches!(options.variants, pipelines::VariantCompile::SetupPlain) {
+                    pipelines::VariantCompile::Setup
+                } else { options.variants.clone() };
                 let compile = || -> Result<()> {
                     let scene = prepare(scene, integrator)?;
                     let installed = r.install_with_options(scene, Path::new("."), InstallOptions {
-                        variants: options.variants.clone(), ..Default::default() })?;
+                        variants, ..Default::default() })?;
                     // Volume, resolve and composite pipelines belong to the frame slot.
                     let _frame = installed.create_frame_slot(r, Default::default())?;
                     Ok(())
@@ -238,6 +248,7 @@ fn run(r: &Renderer, jobs: impl Iterator<Item = (serde_json::Value, v2::Settings
                     Err(error) if crate::failure::is_scene(&error) => {}
                     result => result.with_context(|| format!("setup pipelines for {name}"))?,
                 }
+                vork_slang::progress::completed(completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
             }
             Ok(())
         })).collect();
@@ -273,10 +284,11 @@ pub(crate) fn warm_startup(r: &Renderer) -> Result<()> {
         (scene,settings.clone())
     }).collect();
     jobs.extend(camera_jobs);
-    run(r,jobs.into_iter(), InstallOptions {variants:pipelines::VariantCompile::Setup,..Default::default()})
+    run(r,jobs.into_iter(), InstallOptions {variants:pipelines::VariantCompile::SetupPlain,..Default::default()})
 }
 
 pub(crate) fn warm(r: &Renderer) -> Result<()> {
+    warm_startup(r)?;
     let mut all = table_scenes(r);
     all.extend(scenes(r, vork_scene::libraries::prebuilt_programs())?);
     compile(r, &all)
@@ -285,6 +297,55 @@ pub(crate) fn warm(r: &Renderer) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_plain_hits_match_exact_specializations() -> Result<()> {
+        for metalness in [0., 1.] {
+            // Adapter-free runners skip with test_renderer's diagnostic; renderer
+            // failures and actual hit-selection/pixel assertions still fail on a GPU.
+            let Some(mut r) = crate::test_renderer()? else { return Ok(()) };
+            // Isolate the device-key catalogue from disk and other tests. Setup
+            // must be the sole source of known keys for the first install.
+            let keys=r.disk_cache.path("test-plain-hit-keys",1,blake3::hash(b""));
+            r.compiler = pipelines::Compiler::new(&r.device, r.cache.as_ref(), pipelines::Known::load(keys,false));
+            r.warm_startup_shaders()?;
+            let mut scene = crate::test_scene(serde_json::json!({"version":2,
+                "render":{"resolution":[64,48]},
+                "nodes":[
+                    {"type":"mesh","geometry":{"std":"sphere"},"materials":[{"inputs":{"base_color":[0.2,0.4,0.7],"base_metalness":metalness,"specular_roughness":0.3}}]},
+                    {"type":"mesh","translation":[0,-1,0],"geometry":{"std":"grid","size":[8,8]}},
+                    {"type":"camera","translation":[3,2,5],"target":[0,0,0]},
+                    {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0,0],"energy":500,"size":3},
+                    {"type":"light","shape":"sun","energy":0.1},
+                    {"type":"light","shape":"point","translation":[2,3,2],"energy":10},
+                    {"type":"light","shape":"spot","translation":[0,4,0],"target":[0,0,0],"energy":10}
+                ]}), Path::new("."))?;
+            scene.render.settings = v2::Profile::load(v2::DEFAULT_PROFILE)?.resolve(
+                &serde_json::from_value(serde_json::json!({"denoise":false}))?)?;
+            let draw = |mode, expect_plain| -> Result<Vec<[f32;4]>> {
+                r.compiler.hit_selections.lock().unwrap().clear();
+                let mut installed = r.install_with_options(scene.clone(), Path::new("."), InstallOptions { variants: mode, ..Default::default() })?;
+                let selections = r.compiler.hit_selections.lock().unwrap().clone();
+                for is_gi in [true,false] {
+                    let hits: Vec<_> = selections.iter().filter(|(requested,_)| if is_gi {
+                        matches!(requested,pipelines::ProgramKernel::Gi {..})
+                    } else {matches!(requested,pipelines::ProgramKernel::Reflections {..})}).collect();
+                    assert_eq!(hits.len(),1,"must observe the installed hit pipeline: {selections:?}");
+                    let (requested,selected)=*hits[0];
+                    let plain=requested.plain_hit().expect("plain-compatible scene");
+                    assert_ne!(requested,plain,"scene must distinguish exact and plain keys");
+                    assert_eq!(selected,if expect_plain {plain} else {requested},"actual installed hit selection");
+                }
+                let mut slot = installed.create_frame_slot(&r, ReadbackPrecision::Float)?;
+                installed.render_frame(&r, &mut slot, 0.)?.linear_rgba.context("float readback")
+            };
+            let plain = draw(pipelines::VariantCompile::Background, true)?;
+            r.settle_pipelines()?;
+            let exact = draw(pipelines::VariantCompile::Inline, false)?;
+            assert_eq!(plain, exact, "metalness {metalness}: setup hit evaluator changed the frame");
+        }
+        Ok(())
+    }
 
     #[test]
     fn setup_covers_draft_and_final_oidn_and_off_at_shipped_camera_budgets() -> Result<()> {
@@ -366,10 +427,13 @@ mod tests {
     fn every_std_program_has_a_role() {
         let roles: Vec<_> = vork_scene::libraries::prebuilt_programs()
             .map(|name| (name, role(vork_slang::module_source(name).unwrap()))).collect();
-        for (name, expected) in [("std/sky", Role::Environment), ("std/fog", Role::Medium), ("std/bloom", Role::Composite),
+        for (name, expected) in [("std/sky", Role::Environment), ("std/bloom", Role::Composite),
             ("std/hair", Role::Hair), ("std/camera",Role::Camera), ("std/environment_image",Role::Environment)] {
             assert!(roles.contains(&(name, expected)), "{name}: {roles:?}");
         }
+        // Medium programs are authored on demand and absent from the shipped
+        // catalog; role detection must still recognize their entry signature.
+        assert_eq!(role("MediumCoefficients medium(MediumContext ctx) {}"), Role::Medium);
         // blender and post programs compile on first use.
         assert!(roles.iter().all(|(name, _)| name.starts_with("std/")), "{roles:?}");
     }
@@ -474,7 +538,7 @@ mod tests {
         // Any std/sky world now finds its compiled program; only its input words differ.
         let source = vork_slang::module_source("std/sky").context("std/sky module")?;
         let key = environment_program::program_key(&programs::abi(), source, Path::new("std/sky.slang"))?;
-        programs::cached(&r, key, |p: &vork_slang::EnvironmentProgram| &p.dependencies, || bail!("std/sky compiled again"))?;
+        let _:vork_slang::EnvironmentProgram=programs::cached(&r, key, &vork_slang::Compiler::discover(), &programs::abi(), source, Path::new("std/sky.slang"), |_| bail!("std/sky compiled again"))?;
         let scene: v2::Scene = serde_json::from_value(serde_json::json!({"version": 2,
             "nodes": [{"type": "light", "shape": "environment", "material": "sky"}],
             "materials": {"sky": {"program": "std/sky", "inputs": {"sun_elevation": 0.5, "altitude": 10}}}}))?;

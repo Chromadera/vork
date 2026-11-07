@@ -218,7 +218,7 @@ impl Engine {
     /// Positive tristimulus channels are scalar signals, not RGB chroma.
     /// Replicate each into neutral RGB so the learned RGB colour prior cannot
     /// mix physically unrelated matching functions. Retain the network's local
-    /// reconstruction and its fixed scene-linear scale; no energy gain follows.
+    /// reconstruction in the caller's pre-exposed units; no energy gain follows.
     fn denoise_spectral(&mut self, settings: &Denoiser, size: [u32;2], color: &mut [[f32;3]],
         albedo: &[[f32;3]], normals: &[[f32;3]], use_guides: bool) -> Result<()> {
         let mut scalar=vec![[0.;3];color.len()];
@@ -278,8 +278,8 @@ impl Engine {
         for (name, buffer) in &guides {filter.image(name, buffer, size);}
         unsafe {
             (self.device.api.boolean)(filter.handle, c"hdr".as_ptr(), true);
-            // Scene-linear radiance has a fixed physical scale. Per-image HDR
-            // autoexposure couples every pixel to unrelated sampling roundoff.
+            // Beauty is already in authored pre-exposure units. Per-image HDR
+            // autoexposure would couple pixels to unrelated sampling roundoff.
             (self.device.api.float)(filter.handle, c"inputScale".as_ptr(), 1.);
             (self.device.api.boolean)(filter.handle, c"cleanAux".as_ptr(), true);
             (self.device.api.integer)(filter.handle, c"quality".as_ptr(), quality);
@@ -546,6 +546,7 @@ impl Stage {
         r: &Renderer,
         encoder: &mut wgpu::CommandEncoder,
         samples: usize,
+        input_scale: f32,
         timing: &mut Timing,
         segments: &mut crate::command_finish::Segments,
     ) -> Result<()> {
@@ -564,7 +565,7 @@ impl Stage {
                 timing.wait_ms += start.elapsed().as_secs_f64()*1000.;
                 if feedback.rejected() { return Ok(()); }
             }
-            return gpu.run(self, r, encoder, samples, timing, segments);
+            return gpu.run(self, r, encoder, samples, input_scale, timing, segments);
         }
         let staging = self.staging.as_ref().context("OIDN CPU staging missing")?;
         let start = std::time::Instant::now();
@@ -607,6 +608,7 @@ impl Stage {
         if self.spectral {
             for rgb in color.iter_mut().chain(albedo.iter_mut()) { *rgb=spectral_color(*rgb,false); }
         }
+        for rgb in &mut color { for c in rgb { *c *= input_scale; } }
         let pack_ms = pack_start.elapsed().as_secs_f64() * 1000.;
         let filter_start = std::time::Instant::now();
         let mut engine=r.denoiser.lock().map_err(|_| anyhow::anyhow!("OIDN engine lock poisoned"))?;
@@ -614,6 +616,7 @@ impl Stage {
         if self.spectral {engine.denoise_spectral(&self.settings,self.size,&mut color,&albedo,&normals,self.use_guides)?;}
         else {engine.denoise(&self.settings,self.size,&mut color,&albedo,&normals,self.use_guides)?;}
         let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.;
+        for rgb in &mut color { for c in rgb.iter_mut() { *c /= input_scale; } }
         if self.spectral { for rgb in &mut color { *rgb=spectral_color(*rgb,true); } }
         let upload_start = std::time::Instant::now();
         for ((p, rgb), surface) in associated.iter_mut().zip(color).zip(surface) {

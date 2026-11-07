@@ -24,6 +24,12 @@ class WriteScene(unittest.TestCase):
         }, 'animation': animation}
         with tempfile.TemporaryDirectory() as directory:
             saved = self.read(write_scene(scene, os.path.join(directory, 'scene.json')))
+            self.assertNotIn('$schema', saved)
+            self.assertNotIn('$schema', scene)
+            annotated = dict(scene, **{'$schema': 'https://voyager.so/vork/schema/scene.schema.json'})
+            annotated_path = write_scene(annotated, os.path.join(directory, 'annotated.json'), directory)
+            with open(annotated_path) as f:
+                self.assertEqual(json.load(f)['$schema'], annotated['$schema'])
             self.assertEqual(saved['animation'], animation)
             self.assertEqual(saved['materials'], scene['materials'])
 

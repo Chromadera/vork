@@ -244,8 +244,8 @@ registry! {
     REFLECTION_DISPATCH_PIXELS: u32 => u32, "REG_REFLECTION_DISPATCH_PIXELS" = 16384;
     /// One u32 visibility mask word per pixel invocation.
     REFLECTION_BATCH_SAMPLES: u32 => u32, "REG_REFLECTION_BATCH_SAMPLES" = 32;
-    /// Secondary medium rays retain all samples across bounded invocations.
-    MEDIUM_GI_RAY_BATCH: u32 => u32, "REG_MEDIUM_GI_RAY_BATCH" = 1;
+    /// Diffuse GI retains all samples across bounded invocations, with or without media.
+    GI_RAY_BATCH: u32 => u32, "REG_GI_RAY_BATCH" = 1;
     MEDIUM_REFLECTION_RAY_BATCH: u32 => u32, "REG_MEDIUM_REFLECTION_RAY_BATCH" = 1;
     /// Retain boundary cursors only across a short primary-lighting depth batch.
     MEDIUM_LIGHTING_DEPTH_BATCH: u32 => u32, "REG_MEDIUM_LIGHTING_DEPTH_BATCH" = 4;

@@ -5,6 +5,7 @@ pub(super) fn authored_schema() -> schemars::Schema {
         .for_deserialize()
         .into_generator()
         .into_root_schema_for::<super::Scene>();
+    schema.as_object_mut().unwrap().insert("$id".into(), serde_json::json!("https://voyager.so/vork/schema/scene.schema.json"));
     schema.get_mut("properties").unwrap()["version"]["const"] = serde_json::json!(2);
     schema.as_object_mut().unwrap().insert(
         "x-standards".into(),

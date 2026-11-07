@@ -273,7 +273,7 @@ pub fn hit_kernel_registers(module: &str, adaptive: bool, probes: bool) -> Vec<S
     let mut defines = material_registers(material);
     defines.push("-DVORK_HIT_KERNEL".to_owned());
     defines.push(format!("-DVORK_HIT_REGISTER=b{}",material+5+if probes {3} else {0}));
-    if module == "gi_ray" {defines.push(format!("-DVORK_GI_MEDIUM_REGISTER=u{}",material+6+if probes {3} else {0}));}
+    if module == "gi_ray" {defines.push(format!("-DVORK_GI_QUERY_REGISTER=u{}",material+6+if probes {3} else {0}));}
     if module == "reflections_hits" {
         defines.push(format!("-DVORK_REFLECTION_FIELDS_REGISTER=b{}",material+6+if probes {3} else {0}));
         defines.push(format!("-DVORK_REFLECTION_MEDIUM_REGISTER=b{}",material+7+if probes {3} else {0}));

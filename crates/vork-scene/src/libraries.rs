@@ -48,9 +48,9 @@ pub const LIBRARIES: &[Library] = &[
         help: include_str!("../../../libraries/std/HELP.txt"),
         modules: modules!("std":
             "openpbr_core" false, "texture" false, "normal_filter" false, "hair" true, "hair_bsdf" false,
-            "camera" true, "fog" true, "sky" true, "environment_image" true, "grid" false, "pnanovdb" false, "vector" false,
+            "camera" true, "sky" true, "environment_image" true, "grid" false, "pnanovdb" false, "vector" false,
             "color" false, "procedurals" false, "particles" false,
-            "highlight" false, "bloom" true, "agx" true, "standard" true, "display" false),
+            "bloom" true, "agx" true, "standard" true, "display" false),
         profiles: &[
             ("std/previs", include_str!("../../../libraries/std/profiles/previs.json")),
             ("std/draft", include_str!("../../../libraries/std/profiles/draft.json")),
@@ -64,7 +64,7 @@ pub const LIBRARIES: &[Library] = &[
         name: "blender",
         help: include_str!("../../../libraries/blender/HELP.txt"),
         modules: modules!("blender":
-            "principled_volume" true, "volume" false, "nodes" false,
+            "nodes" false,
             "texture_coordinate" false, "color" false, "procedurals" false, "filmic" true, "display_lut" false),
         profiles: &[],
         images: &[("blender/filmic", "lut", ProgramImage::File("libraries/blender/filmic.exr"))],
@@ -80,7 +80,7 @@ pub const LIBRARIES: &[Library] = &[
     Library {
         name: "post",
         help: include_str!("../../../libraries/post/HELP.txt"),
-        modules: modules!("post": "glare" true, "vignette" true, "lens_distortion" true, "white_balance" true),
+        modules: modules!("post": "white_balance" true),
         profiles: &[],
         images: &[],
     },
@@ -112,7 +112,7 @@ pub fn library(name: &str) -> Option<&'static Library> {
 }
 /// Every bundled module of every library.
 pub fn modules() -> impl Iterator<Item = &'static Module> {
-    LIBRARIES.iter().flat_map(|library| library.modules)
+    LIBRARIES.iter().flat_map(|library| library.modules).chain(test_modules())
 }
 pub fn module_source(name: &str) -> Option<&'static str> {
     modules().find(|module| module.name == name).map(|module| module.source)
@@ -125,4 +125,17 @@ pub fn program_image(program: &str, input: &str) -> Option<ProgramImage> {
 /// The built-in table material and every bundled material program.
 pub fn material_programs<'a>() -> impl Iterator<Item = &'a str> {
     std::iter::once("std/openpbr").chain(modules().filter(|module| module.material).map(|module| module.name))
+}
+
+// Disabled release conveniences remain available only to internal media tests.
+fn test_modules() -> impl Iterator<Item = &'static Module> {
+    #[cfg(feature = "test-support")]
+    let modules = modules!("std": "fog" true);
+    #[cfg(not(feature = "test-support"))]
+    let modules: &[Module] = &[];
+    #[cfg(feature = "test-support")]
+    let blender = modules!("blender": "principled_volume" true, "volume" false);
+    #[cfg(not(feature = "test-support"))]
+    let blender: &[Module] = &[];
+    modules.iter().chain(blender)
 }

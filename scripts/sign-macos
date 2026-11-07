@@ -4,11 +4,11 @@ set -euo pipefail
 missing=0
 for name in APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_TEAM_ID APPLE_ID APPLE_APP_SPECIFIC_PASSWORD; do
   if [ -z "${!name:-}" ]; then
-    echo "::warning::macOS signing and notarisation skipped: $name is absent. Artifact is unsigned."
+    echo "::error::macOS signing and notarisation required: $name is absent. Refusing unsigned release artifact."
     missing=1
   fi
 done
-if [ "$missing" = 1 ]; then exit 0; fi
+if [ "$missing" = 1 ]; then exit 1; fi
 work=$(mktemp -d)
 keychain="$work/signing.keychain-db"
 password=$(openssl rand -hex 32)

@@ -1,0 +1,262 @@
+{
+  "version": 2,
+  "render": {
+    "resolution": [96,64],
+    "fps": 4,
+    "duration": 0.75
+  },
+  "nodes": [
+    {"name":"camera","type":"camera","translation":[0,0,5],"rotation":[0,0,0,1],"children":[],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":6.0,"clip_start":1,"clip_end":10}}},
+    {
+      "name": "box",
+      "type": "mesh",
+      "children": [],
+      "geometry": "shape_box"
+    },
+    {
+      "name": "sphere",
+      "type": "mesh",
+      "translation": [1.5,0,-1],
+      "scale": [0.5,0.5,0.5],
+      "children": [],
+      "geometry": "shape_sphere"
+    },
+    {
+      "name": "plane",
+      "type": "mesh",
+      "translation": [0,0,-2],
+      "rotation": [0.70710678,0,0,0.70710678],
+      "scale": [4,1,2],
+      "children": [],
+      "geometry": "shape_plane"
+    },
+    {"type":"light","rotation":[-0.27465674831720593,0.1538564517177697,0.044570654466371644,0.9481061752931873],"name":"node","children":[],"shape":"sun","energy":3}
+  ],
+  "buffers": {
+    "shape_box_indices": {
+      "type": "u32",
+      "data": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35]
+    },
+    "shape_box_normal": {
+      "type": "vec3",
+      "data": [
+        [1,0,0],
+        [1,0,0],
+        [1,0,0],
+        [1,0,0],
+        [1,0,0],
+        [1,0,0],
+        [-1,0,0],
+        [-1,0,0],
+        [-1,0,0],
+        [-1,0,0],
+        [-1,0,0],
+        [-1,0,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,-1,0],
+        [0,-1,0],
+        [0,-1,0],
+        [0,-1,0],
+        [0,-1,0],
+        [0,-1,0],
+        [0,0,1],
+        [0,0,1],
+        [0,0,1],
+        [0,0,1],
+        [0,0,1],
+        [0,0,1],
+        [0,0,-1],
+        [0,0,-1],
+        [0,0,-1],
+        [0,0,-1],
+        [0,0,-1],
+        [0,0,-1]
+      ]
+    },
+    "shape_box_position": {
+      "type": "vec3",
+      "data": [
+        [0.5,-0.5,0.5],
+        [0.5,-0.5,-0.5],
+        [0.5,0.5,-0.5],
+        [0.5,-0.5,0.5],
+        [0.5,0.5,-0.5],
+        [0.5,0.5,0.5],
+        [-0.5,-0.5,-0.5],
+        [-0.5,-0.5,0.5],
+        [-0.5,0.5,0.5],
+        [-0.5,-0.5,-0.5],
+        [-0.5,0.5,0.5],
+        [-0.5,0.5,-0.5],
+        [-0.5,0.5,0.5],
+        [0.5,0.5,0.5],
+        [0.5,0.5,-0.5],
+        [-0.5,0.5,0.5],
+        [0.5,0.5,-0.5],
+        [-0.5,0.5,-0.5],
+        [-0.5,-0.5,-0.5],
+        [0.5,-0.5,-0.5],
+        [0.5,-0.5,0.5],
+        [-0.5,-0.5,-0.5],
+        [0.5,-0.5,0.5],
+        [-0.5,-0.5,0.5],
+        [-0.5,-0.5,0.5],
+        [0.5,-0.5,0.5],
+        [0.5,0.5,0.5],
+        [-0.5,-0.5,0.5],
+        [0.5,0.5,0.5],
+        [-0.5,0.5,0.5],
+        [0.5,-0.5,-0.5],
+        [-0.5,-0.5,-0.5],
+        [-0.5,0.5,-0.5],
+        [0.5,-0.5,-0.5],
+        [-0.5,0.5,-0.5],
+        [0.5,0.5,-0.5]
+      ]
+    },
+    "shape_box_uv0": {
+      "type": "vec2",
+      "data": [
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0],
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0],
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0],
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0],
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0],
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0]
+      ]
+    },
+    "shape_sphere_indices": {
+      "type": "u32",
+      "file": "geometry.bin",
+      "offset": 0,
+      "count": 4416
+    },
+    "shape_sphere_normal": {
+      "type": "vec3",
+      "file": "geometry.bin",
+      "offset": 17664,
+      "count": 4416
+    },
+    "shape_sphere_position": {
+      "type": "vec3",
+      "file": "geometry.bin",
+      "offset": 17664,
+      "count": 4416
+    },
+    "shape_sphere_uv0": {
+      "type": "vec2",
+      "file": "geometry.bin",
+      "offset": 70656,
+      "count": 4416
+    },
+    "shape_plane_indices": {
+      "type": "u32",
+      "data": [0,1,2,3,4,5]
+    },
+    "shape_plane_normal": {
+      "type": "vec3",
+      "data": [
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0],
+        [0,1,0]
+      ]
+    },
+    "shape_plane_position": {
+      "type": "vec3",
+      "data": [
+        [-0.5,0,0.5],
+        [0.5,0,0.5],
+        [0.5,0,-0.5],
+        [-0.5,0,0.5],
+        [0.5,0,-0.5],
+        [-0.5,0,-0.5]
+      ]
+    },
+    "shape_plane_uv0": {
+      "type": "vec2",
+      "data": [
+        [0,1],
+        [1,1],
+        [1,0],
+        [0,1],
+        [1,0],
+        [0,0]
+      ]
+    }
+  },
+  "geometry": {
+    "shape_box": {
+      "attributes": {
+        "NORMAL": "shape_box_normal",
+        "POSITION": "shape_box_position",
+        "TEXCOORD_0": "shape_box_uv0"
+      },
+      "indices": "shape_box_indices"
+    },
+    "shape_sphere": {
+      "attributes": {
+        "NORMAL": "shape_sphere_normal",
+        "POSITION": "shape_sphere_position",
+        "TEXCOORD_0": "shape_sphere_uv0"
+      },
+      "indices": "shape_sphere_indices"
+    },
+    "shape_plane": {
+      "attributes": {
+        "NORMAL": "shape_plane_normal",
+        "POSITION": "shape_plane_position",
+        "TEXCOORD_0": "shape_plane_uv0"
+      },
+      "indices": "shape_plane_indices"
+    }
+  },
+  "animation": [
+    {
+      "tracks": [
+        {
+          "path": ["nodes","box","translation"],
+          "keys": [[0,[-1,0,0]],[1,[0,0,0]]],
+          "interpolation": "LINEAR"
+        }
+      ]
+    }
+  ]
+}

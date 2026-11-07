@@ -4,14 +4,33 @@ use wgpu::util::DeviceExt;
 /// Retain one GI hit-shading specialization over every installed material.
 pub(crate) fn ray_pipeline(r: &Renderer, cached: &crate::pipelines::CachedPipelines, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<wgpu::ComputePipeline> {
     let kernel=cached.drawn_kernel(crate::pipelines::ProgramKernel::Gi { features }, mode,&r.compiler);
+    #[cfg(test)]
+    r.compiler.hit_selections.lock().unwrap().push((crate::pipelines::ProgramKernel::Gi { features },kernel));
     let (module, entry)=cached.program_kernel(kernel)?;
-    let layout=crate::rt::gi_layout(&r.device,&cached.mat_layout,probes,cached.resolve_native.is_some());
+    let layout=crate::rt::gi_layout(&r.device,&cached.mat_layout,probes);
     let pipeline=r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label:Some("ray-traced diffuse indirect"),layout:Some(&layout),module:&module,entry_point:Some(entry),
         compilation_options:Default::default(),cache:r.cache.as_ref(),
     });
     r.compiler.remember(cached.kernel_content_key(kernel));
     Ok(pipeline)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GI_LIMIT: std::cell::Cell<Option<u64>> = const {std::cell::Cell::new(None)};
+    static TEST_GI_BYTES: std::cell::Cell<u64> = const {std::cell::Cell::new(0)};
+}
+
+// Retain complete rows, reusing their records only after every ray batch finishes.
+fn accumulation_band(limits: &wgpu::Limits, width: u32, height: u32) -> Result<(u32, u64)> {
+    let row = u64::from(width) * constants::GI_QUERY_BYTES;
+    gpu_memory::storage_binding(limits, "GI prepared queries: one row", row)?;
+    let rows = (limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / row)
+        .min(u64::from(height)) as u32;
+    let bytes = row * u64::from(rows);
+    gpu_memory::storage_binding(limits, "GI prepared queries and accumulation", bytes)?;
+    Ok((rows, bytes))
 }
 
 pub(crate) struct Resources {
@@ -74,21 +93,36 @@ impl Resources {
                 1,
             ];
             let frame_rays = rays.context("diffuse GI needs the scene TLAS")?;
-            let medium=s.pipelines.resolve_native.is_some();
-            let batch=vork_slang::registry::MEDIUM_GI_RAY_BATCH;
-            let batches=if medium {(visibility_samples.max(1)*constants::GI_RAYS_PER_SAMPLE).div_ceil(batch)} else {1};
-            let hits=if medium {
-                let accumulation=s.transients.buffer(d,"GI medium prepared queries and accumulation",u64::from(aw)*u64::from(ah)*constants::GI_MEDIUM_QUERY_BYTES,wgpu::BufferUsages::STORAGE);
+            let batch=vork_slang::registry::GI_RAY_BATCH;
+            let batches=(visibility_samples.max(1)*constants::GI_RAYS_PER_SAMPLE).div_ceil(batch);
+            let limits = d.limits();
+            #[cfg(test)]
+            let limits = TEST_GI_LIMIT.with(|cap| {
+                let mut limits=limits;
+                if let Some(bytes)=cap.get() {limits.max_storage_buffer_binding_size=bytes;}
+                limits
+            });
+            let (band_rows, accumulation_bytes) = accumulation_band(&limits, aw, ah)?;
+            let bands = ah.div_ceil(band_rows);
+            let hits={
+                let accumulation=s.transients.buffer(d,"GI prepared queries and accumulation",accumulation_bytes,wgpu::BufferUsages::STORAGE);
+                #[cfg(test)]
+                TEST_GI_BYTES.with(|bytes|bytes.set(accumulation.size()));
                 let geometry=frame_rays.hit_bindings();
                 d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label:Some("GI hit and accumulation buffers"),layout:&crate::rt::gi_read_layout(d,true),
+                    label:Some("GI hit and accumulation buffers"),layout:&crate::rt::gi_read_layout(d),
                     entries:&[entry(0,wgpu::BindingResource::BufferArray(&geometry)),entry(1,accumulation.as_entire_binding())],
                 })
-            } else {frame_rays.hits_bind(d)};
-            let mut source_words=vec![0u32;if medium {batches as usize*64} else {4}];
+            };
+            let mut source_words=vec![0u32;(bands*batches) as usize*64];
             let topology=s.rays.as_ref().unwrap();
-            for i in 0..batches {source_words[i as usize*64..i as usize*64+4].copy_from_slice(&[topology.emitters,topology.implicit[2],topology.implicit[3],0]);}
-            if medium {for i in 0..batches {source_words[i as usize*64+4]=i*batch;}}
+            for band in 0..bands {
+                for batch_index in 0..batches {
+                    let at=((band*batches+batch_index)*64) as usize;
+                    source_words[at..at+4].copy_from_slice(&[topology.emitters,topology.implicit[2],topology.implicit[3],0]);
+                    source_words[at+4..at+8].copy_from_slice(&[batch_index*batch,band*band_rows,(ah-band*band_rows).min(band_rows),0]);
+                }
+            }
             let sources=d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label:Some("diffuse source topology"),
                     contents:bytemuck::cast_slice(&source_words),
@@ -143,10 +177,11 @@ impl Resources {
             stages.push(reconstruction(s.pipelines.ao_blur_horizontal_pipeline.get(),"AO horizontal blur",false));
             stages.push(reconstruction(s.pipelines.ao_blur_vertical_pipeline.get(),"AO vertical blur",true));
             for (pipeline, label, entries, material) in stages {
+              for band in 0..if material.is_some() {bands} else {1} {
               for batch in 0..if material.is_some() {batches} else {1} {
                 let mut entries=entries.clone();
                 if material.is_some() {
-                    entries.iter_mut().find(|e|e.binding==17).unwrap().resource=wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&sources,offset:u64::from(batch)*256,size:std::num::NonZeroU64::new(if medium {32} else {16})});
+                    entries.iter_mut().find(|e|e.binding==17).unwrap().resource=wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&sources,offset:u64::from(band*batches+batch)*256,size:std::num::NonZeroU64::new(32)});
                 }
                 let pipeline = pipeline.context("incomplete installed AO plan")?;
                 let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -154,7 +189,8 @@ impl Resources {
                     layout: &pipeline.get_bind_group_layout(0),
                     entries: &entries,
                 });
-                let mut dispatch = crate::graph::Dispatch::new(pipeline, bind, groups);
+                let dispatch_groups = if material.is_some() {[groups[0],(ah-band*band_rows).min(band_rows).div_ceil(8),1]} else {groups};
+                let mut dispatch = crate::graph::Dispatch::new(pipeline, bind, dispatch_groups);
                 if material.is_some() {
                     // Ray GI hits read the irradiance volume for further bounces.
                     let probes = (s.plan.effects.ray_indirect).then(|| s.probes.as_ref().map(|p| p.read_bind(d))).flatten();
@@ -164,6 +200,7 @@ impl Resources {
                     Some(material) => dispatch.with_material(material),
                     None => dispatch,
                 });
+              }
               }
             }
         }
@@ -244,6 +281,71 @@ mod prepared_query_tests {
                 eprintln!("prepared queries active={active} repetition={repetition} max_error={error} gpu_ms={} spans={:?}",image.timing.gpu_ms,image.timing.gpu_spans_ms);
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod accumulation_tests {
+    use super::*;
+    #[test]
+    fn gi_bands_preserve_float_output_with_independent_storage_limit() -> Result<()> {
+        // Adapter-free runners skip with test_renderer's diagnostic; renderer
+        // failures and every pixel/allocation assertion still fail on a GPU.
+        let Some(r)=crate::test_renderer()? else {return Ok(())};
+        let mut scene=crate::test_scene(serde_json::json!({"version":2,
+            "render":{"resolution":[66,50]},
+            "nodes":[
+                {"type":"mesh","geometry":{"std":"sphere"},"materials":[{"inputs":{"base_color":[0.2,0.4,0.7]}}]},
+                {"type":"mesh","translation":[0,-1,0],"geometry":{"std":"grid","size":[8,8]}},
+                {"type":"camera","translation":[3,2,5],"target":[0,0,0]},
+                {"type":"light","shape":"environment","color":[0.4,0.6,0.8]},
+                {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0,0],"energy":500,"size":3}
+            ]}),Path::new("."))?;
+        scene.render.settings=vork_scene::v2::Profile::load(vork_scene::v2::DEFAULT_PROFILE)?.resolve(
+            &serde_json::from_value(serde_json::json!({"denoise":false}))?)?;
+        let draw=|limit| -> Result<Vec<[f32;4]>> {
+            // Only GI sees this limit: reflection and visibility admission use
+            // the actual device limits. Seven-row bands include partial groups
+            // and a partial final band; every band retains all sample batches.
+            TEST_GI_LIMIT.with(|cap|cap.set(limit));
+            TEST_GI_BYTES.with(|bytes|bytes.set(0));
+            struct Reset;
+            impl Drop for Reset {fn drop(&mut self) {TEST_GI_LIMIT.with(|cap|cap.set(None));}}
+            let _reset=Reset;
+            let mut installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {
+                variants:crate::pipelines::VariantCompile::Inline,..Default::default()})?;
+            assert!(installed.plan.effects.ray_indirect);
+            let mut slot=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
+            let image=installed.render_frame(&r,&mut slot,0.)?;
+            if let Some(limit)=limit {
+                TEST_GI_BYTES.with(|bytes|assert!(bytes.get()>0 && bytes.get()<=limit,
+                    "GI allocation {} exceeds independent limit {limit}",bytes.get()));
+            }
+            image.linear_rgba.context("float readback")
+        };
+        let whole=draw(None)?;
+        let banded=draw(Some(33*7*constants::GI_QUERY_BYTES))?;
+        assert!(whole.iter().any(|p|p[0]>0.01 && p[1]>0.01));
+        assert_eq!(whole,banded,"GI partition changed scene-linear pixels");
+        Ok(())
+    }
+
+    #[test]
+    fn gi_accumulation_bands_follow_both_device_limits() -> Result<()> {
+        let mut limits=wgpu::Limits::default();
+        for (binding, allocation) in [(128<<20, 1<<30), (1<<30,128<<20), (1<<30,1<<30)] {
+            limits.max_storage_buffer_binding_size=binding;
+            limits.max_buffer_size=allocation;
+            let (rows,bytes)=accumulation_band(&limits,1920,1080)?;
+            assert_eq!(bytes,u64::from(rows)*1920*constants::GI_QUERY_BYTES);
+            assert!(bytes<=binding.min(allocation));
+            assert_eq!(rows,(binding.min(allocation)/(1920*constants::GI_QUERY_BYTES)).min(1080) as u32);
+            // Every full-resolution GI cell is processed exactly once, including the tail.
+            assert_eq!((0..1080u32.div_ceil(rows)).map(|b|(1080-b*rows).min(rows)).sum::<u32>(),1080);
+        }
+        limits.max_buffer_size=1920*constants::GI_QUERY_BYTES-1;
+        assert!(accumulation_band(&limits,1920,1080).unwrap_err().to_string().contains("GI prepared queries"));
         Ok(())
     }
 }

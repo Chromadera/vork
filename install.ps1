@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $repo = if ($env:VORK_REPO) { $env:VORK_REPO } else { 'voyager-so/vork' }
 # Default version is generated from Cargo.toml by scripts/sync-version.
-$version = if ($env:VERSION) { $env:VERSION } else { '0.1.0' }
+$version = if ($env:VERSION) { $env:VERSION } else { '0.2.0' }
 $prefix = if ($env:PREFIX) { $env:PREFIX } else { Join-Path $env:LOCALAPPDATA 'Programs\vork' }
 if ($version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid VERSION' }
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }

@@ -96,8 +96,9 @@ pub(crate) fn install(r: &Renderer, scene: &v2::Scene, nodes: &mut [EvalNode], b
         let mut hash=blake3::Hasher::new();
         hash.update(b"camera-optics-v3");hash.update(abi.cache_identity()?.as_bytes());hash.update(source.as_bytes());hash.update(origin.to_string_lossy().as_bytes());
         let key=hash.finalize();let tag=key.to_hex();
-        let program=programs::cached(r,key,|p:&vork_slang::CameraProgram|&p.dependencies,
-            ||vork_slang::Compiler::discover().compile_camera(&abi,&source,&origin,&tag[..12]))?;
+        let program=programs::cached(r,key,&vork_slang::Compiler::discover(),
+        &abi, &source, &origin,
+            |compiler|compiler.compile_camera(&abi,&source,&origin,&tag[..12]))?;
         let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?))).collect::<Result<BTreeMap<_,_>>>()?;
         let words=program.inputs.pack(&values,|name,_|bail!("camera input {name} must be numeric"))?;
         let varying=program.inputs.varying_words(&words,dynamic.get(&name).unwrap_or(&BTreeSet::new()));
@@ -231,18 +232,18 @@ pub(crate) fn scene_spectral(r: &Renderer, scene: &v2::Scene, base: &Path) -> Re
         let (source,origin)=if let Some(source)=vork_slang::module_source(&material.program) {
             (source.to_owned(),PathBuf::from(format!("{}.slang",material.program)))
         } else {programs::program_source(base,&material.program,&scene.programs[&material.program])?};
-        let mut hash=blake3::Hasher::new();hash.update(b"spectral-surface-v1");hash.update(abi.cache_identity()?.as_bytes());hash.update(source.as_bytes());hash.update(origin.to_string_lossy().as_bytes());
-        let key=hash.finalize();let tag=key.to_hex();
         if medium {
+            let mut hash=blake3::Hasher::new();hash.update(b"spectral-surface-v1");hash.update(abi.cache_identity()?.as_bytes());hash.update(source.as_bytes());hash.update(origin.to_string_lossy().as_bytes());
+            let tag=hash.finalize().to_hex();
             let mut medium_key=hash.clone();medium_key.update(b"medium");
-            let program=programs::cached(r,medium_key.finalize(),|p:&vork_slang::MediumProgram|&p.dependencies,
-                ||vork_slang::Compiler::discover().compile_medium(&abi,&source,&origin,&tag[..12]))?;
+            let program=programs::cached(r,medium_key.finalize(),&vork_slang::Compiler::discover(),
+            &abi, &source, &origin,
+                |compiler|compiler.compile_medium(&abi,&source,&origin,&tag[..12]))?;
             let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?))).collect::<Result<BTreeMap<_,_>>>()?;
             if program.needs_spectral(&abi,&program.inputs.effect_words(&values,&varying)?)? {return Ok(true);}
             if !surface {continue;}
         }
-        let program=programs::cached(r,key,|p:&vork_slang::Program|&p.dependencies,
-            ||vork_slang::Compiler::discover().compile_surface(&abi,&source,&origin,&tag[..12]))?;
+        let program=programs::compile(r,&vork_slang::Compiler::discover(),&abi,&source,&origin)?;
         let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?))).collect::<Result<BTreeMap<_,_>>>()?;
         if program.needs_spectral(&abi,&program.inputs.effect_words(&values,&varying)?)? {return Ok(true);}
     }

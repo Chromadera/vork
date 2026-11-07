@@ -613,3 +613,16 @@ fn std_display_programs_own_grading_and_pixel_context() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn hair_dropped_stages_survive_compiler_cache_serialization() {
+    let source = format!("{}\nClosure lit(ShadingContext ctx, Inputs inputs, Lighting lighting) {{Closure c={{}};return c;}}\nfloat3 displace(DisplacementContext ctx, Inputs inputs) {{return float3(1);}}",
+        vork_slang::module_source("std/hair").unwrap());
+    let program = Compiler::discover().compile_surface(&abi(), &source, Path::new("hair-stages.slang"), "hairstages").unwrap();
+    assert!(program.capabilities.hair);
+    assert!(!program.capabilities.lit && !program.capabilities.displacement);
+    assert_eq!(program.dropped_stages, ["lit", "displace"]);
+    let cached: vork_slang::Program = serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
+    assert_eq!(cached.dropped_stages, program.dropped_stages);
+}

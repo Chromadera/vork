@@ -1,2 +1,1 @@
 expand: scene JSON → scene JSON with buffer geometry; font paths relative to working directory
-InstanceFragment: {buffers:{ [k: string]: Buffer; },instances:Instances}

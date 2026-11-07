@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Check that both native registry artifacts preserve every runtime file byte."""
+import argparse
+import hashlib
+from pathlib import Path
+import tarfile
+import zipfile
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--tree', required=True, type=Path)
+p.add_argument('--dist', required=True, type=Path)
+p.add_argument('--platform', required=True)
+a = p.parse_args()
+expected = {}
+for f in a.tree.rglob('*'):
+    rel = f.relative_to(a.tree)
+    if f.is_file() and rel.parts[0] not in ('sdk', 'python', 'examples', 'README.md'):
+        expected[rel.as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
+with tarfile.open(next(a.dist.glob(f'voyager-so-vork-{a.platform}-*.tgz'))) as t:
+    actual = {f.name.removeprefix('package/runtime/'): hashlib.sha256(t.extractfile(f).read()).hexdigest()
+              for f in t if f.isfile() and f.name.startswith('package/runtime/')}
+    if a.platform != 'windows-x64':
+        for name in ['vork', 'slang/bin/slangc']:
+            assert t.getmember('package/runtime/' + name).mode & 0o111, name
+assert actual == expected, 'npm changed runtime bytes or file set'
+with zipfile.ZipFile(next(a.dist.glob(f'vork_native_{a.platform.replace("-", "_")}-*.whl'))) as z:
+    actual = {n.split('/runtime/', 1)[1]: hashlib.sha256(z.read(n)).hexdigest()
+              for n in z.namelist() if '/runtime/' in n}
+    if a.platform != 'windows-x64':
+        for name in ['vork', 'slang/bin/slangc']:
+            info = z.getinfo('vork_native_' + a.platform.replace('-', '_') + '/runtime/' + name)
+            assert (info.external_attr >> 16) & 0o111, name
+assert actual == expected, 'wheel changed runtime bytes or file set'
+print(f'{a.platform}: {len(expected)} runtime files preserved byte for byte in npm and wheel')

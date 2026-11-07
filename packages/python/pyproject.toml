@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vork"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
 description = "Generated scene types and shared standard library for vork"
 license = "LicenseRef-vork-Preview"
@@ -13,4 +13,4 @@ license = "LicenseRef-vork-Preview"
 packages = ["vork"]
 
 [tool.setuptools.package-data]
-vork = ["py.typed"]
+vork = ["py.typed", "_resource_slots.json"]

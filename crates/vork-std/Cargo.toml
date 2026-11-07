@@ -14,7 +14,8 @@ rquickjs = "0.12.2"
 serde_json = "1"
 
 serde = { version = "1", features = ["derive"] }
-ttf-parser = "0.25.1"
+# Maintained 0.25.1 fork; preserves the outline, metric and legacy kern APIs.
+ttf-parser = { package = "xberg-ttf-parser", version = "1.1" }
 lyon_path = "1"
 lyon_tessellation = "1"
 

@@ -21,7 +21,7 @@ everything else that moves is rendered.
 
 [Install vork](#install), then paste:
 
-> Read `vork help`. Make a small scene, render a preview and inspect the image.
+> Run `vork init my-shot`, read `vork help`, render a preview and inspect the image.
 > Refine the camera and lighting before rendering at final quality. Read the
 > relevant help topic when you need a feature the first page doesn't explain.
 
@@ -40,6 +40,31 @@ propagation, simulation and compositing. Ordinary shots need only scene data;
 the programming hooks are there when the shot needs something unusual.
 
 Source-available and free during the research preview.
+
+## Start here
+
+After [installing vork](#install), create a working project:
+
+```sh
+vork init my-shot
+cd my-shot
+vork render scene.json --profile std/draft --out render.png
+vork help
+```
+
+Open `render.png`, change a colour or camera position in `scene.json`, and render
+again. The starter uses only bundled sphere, box and grid primitives: no downloads,
+no GPU needed to initialize. Use `vork init my-shot --language typescript` or
+`--language python` for editable `scene.ts` or `scene.py` alongside the ready-to-render
+JSON. The generated README explains regeneration and SDK requirements. Existing
+files are never overwritten. Use `--profile std/final` for a cleaner image.
+
+With the candidate npm packages (not yet published), `npm create vork my-shot`
+creates the same project and installs its matching native engine and TypeScript SDK
+from npm's cache, without network access during initialization. Then use
+`npx vork render scene.json --profile std/draft --out render.png` and `npx vork help`
+in the new directory. Pass `-- --language typescript` or `-- --language python`
+to select source authoring. Python source needs the Python SDK as well.
 
 ## What you can make
 
@@ -139,20 +164,24 @@ A GPU liquid simulation implemented as Slang compute programs in vork's fluid li
 It uses published APIC/FLIP and surface-reconstruction methods, with an authored
 initial impulse and limited secondary spray.
 
+## No suitable GPU?
+
+Rendering requires Apple Silicon or an NVIDIA GPU with Vulkan ray queries.
+Scene authoring and `vork help` work without a GPU. On your own NVIDIA Linux
+machine, you can use the [Docker runtime](docs/REMOTE-GPU.md).
+Hosted rendering: details will be added here when available.
+
 ## Give it to an agent
 
-Start with `vork help`. The getting-started help is about **2,500 tokens**,
-including a complete first scene. Root, topic and command help total about
-**19,500 tokens**; detailed field lookups add more. These are release 0.1.0
-counts with the o200k_base tokenizer, not a measure of the whole API. The aggregate
-concatenates `vork help`, each listed topic except `field` with `--all`, and `--help` for
-render/std/setup/help. `vork help field material.inputs` includes another 38
-lookup-only records (about 1,800 tokens).
+Start with `vork init`, then `vork help`. Scene JSON uses the stable
+[editor schema](https://voyager.so/vork/schema/scene.schema.json).
+Use `vork help` for the starting scene and concepts, `vork help TOPIC --all`
+for topic fields, and `vork help field PATH` for an exact field reference.
 
 Use the [prompt above](#paste-this-to-your-agent) to start.
 
 Python and TypeScript can author ordinary scene JSON through the SDKs. You can
-also write JSON directly. Save this as `shot.json` (also available as
+also write JSON directly. For example, save this as `scene.json` (also available as
 [examples/first-scene.json](examples/first-scene.json)):
 
 ```json
@@ -168,8 +197,8 @@ also write JSON directly. Save this as `shot.json` (also available as
 ```
 
 ```sh
-vork render shot.json --profile std/previs --out preview.png
-vork render shot.json --profile std/final --out final.png
+vork render scene.json --profile std/previs --out preview.png
+vork render scene.json --profile std/final --out final.png
 vork help sdk
 vork help programs --all
 ```
@@ -206,7 +235,7 @@ exact.
 ## Speed, with the qualifications
 
 These are timings, **not equal-quality speedups**. The draft/final results
-come from the frozen `81ae2b075` build on an NVIDIA L4: final uses eight samples
+come from the build identified by SHA-256 in the results report on an NVIDIA L4: final uses eight samples
 and OIDN, draft four and OIDN. All 152 planned jobs were accounted for. The broader
 sweep delivered 583 of 585 images; the million-stars stress scene ran out of GPU
 memory in both profiles. Visual review found softer edges, grainier defocus,
@@ -255,9 +284,9 @@ Different quality and timing boundaries still apply.
 
 ### Path tracing: carried-forward measurements
 
-These 1080p still timings were measured in an earlier freeze, not on that
-build. Adaptive sampling up to 4,096, threshold 0.01, minimum 64; stopping
-implementations differ. vork is slower in both cases below.
+These 1080p still timings were measured in an earlier build, rather than the
+measured final build. Adaptive sampling up to 4,096, threshold 0.01, minimum 64;
+stopping implementations differ. vork is slower in both cases below.
 
 | Scene input | Cycles (s) | vork path (s) | Comparison |
 |---|---:|---:|---|
@@ -274,7 +303,7 @@ first final still took 82.057 s, versus its 1.787 s warm median.
 
 ### Previews: carried-forward measurements
 
-These are prior-freeze `std/previs` results, not measured on `81ae2b075`. Previews
+These are earlier-build `std/previs` results, not measured on the final build identified in [RESULTS.md](benchmarks/RESULTS.md). Previews
 use different lighting and shadows; these are not final-quality comparisons.
 Complete 240-frame, 1080p24 movies, median of three warm commands:
 
@@ -291,7 +320,7 @@ Complete 240-frame, 1080p24 movies, median of three warm commands:
 | [B-turntable.json](benchmarks/B-turntable.json) | 4.612 |
 | [B-walking.json](benchmarks/B-walking.json) | 2.190 |
 
-Across the seven simple preview clips in that prior freeze, EEVEE/vork was
+Across the seven simple preview clips on that earlier build, EEVEE/vork was
 14.63–36.40× and Workbench/vork 3.99–11.24×. Those ranges use retained Blender
 baselines and different rendering settings and timing boundaries. They do not
 describe default final rendering.
@@ -365,6 +394,8 @@ and performance on demanding scenes. There is no release date promised for those
 features. Read `vork help limits` before committing to a shot.
 
 ## Install
+
+Upgrading scenes or scripts? Run `vork help upgrade` ([upgrade guide](docs/help/upgrade.md)).
 
 Binary packages are available from [GitHub Releases](https://github.com/voyager-so/vork/releases)
 once a release is published. Keep the entire install folder together: Slang, OIDN,
@@ -456,8 +487,6 @@ vork --version
 vork help
 ```
 
-These dependency commands are for Ubuntu with sudo. In a root container, omit
-`sudo`; without administrator access, arrange for the dependencies to be installed.
 The installer itself runs in your user account without root.
 
 The installer verifies SHA256SUMS, installs under `%LOCALAPPDATA%\Programs\vork`,
@@ -474,8 +503,8 @@ Download the Windows `.zip` and `SHA256SUMS` from the release page. Compare
 `Get-FileHash .\vork-*-windows-x64.zip -Algorithm SHA256` with its entry in
 `SHA256SUMS`, then unzip the entire contents into `%LOCALAPPDATA%\Programs\vork`.
 Add that folder to your user PATH, open a new PowerShell window, and run
-`vork setup`. It prints its report right away, then compiles for up to about 3 minutes
-with no output until `Shader setup completed`; that isn't a hang. Keep all bundled
+`vork setup`. It prints its report right away, then reports compilation progress until
+`Shader setup completed`. Setup can take several minutes. Keep all bundled
 runtime companions beside the executable.
 
 The separately downloadable `install.sh` downloads the release from GitHub; to install an archive you already
@@ -508,27 +537,34 @@ vork --version
 vork setup
 ```
 
-`vork setup` prints its report right away, then compiles for up to about 3 minutes
-with no output until `Shader setup completed`; that isn't a hang.
+`vork setup` prints its report right away, then reports compilation progress until
+`Shader setup completed`. Setup can take several minutes.
+
+### npm and pip installation candidate
+
+Registry packaging is being validated privately and has not been published.
+Use the archive installers above and their bundled SDKs. npm and PyPI installation
+will become available only after separate release approval.
+These commands are not yet the default installation instructions.
 
 ### First render and SDKs
 
-Save the first scene above as `shot.json`, then:
+Start with `vork init my-shot` and enter `my-shot`, then:
 
 ```sh
-vork render shot.json --profile std/previs --out preview.png
-vork render shot.json --profile std/final --out final.png
-vork render shot.json --profile std/final --frame-start 0 --frame-end 47 --out clip.mp4
+vork render scene.json --profile std/previs --out preview.png
+vork render scene.json --profile std/final --out final.png
+vork render scene.json --profile std/final --frame-start 0 --frame-end 23 --out clip.mp4
 vork help animation
 vork help outputs
 ```
 
-The first render of a scene with new programs can compile for several minutes and
-prints nothing while it does (about 3–4 minutes with custom programs on NVIDIA in our
-tests, under 20 seconds on a Mac). It isn't hung, so don't kill it or give it a short
-timeout. Later renders of the same programs take seconds.
+The first render of a scene with new programs can compile for several minutes.
+Progress reports show shader and driver pipeline preparation; allow time for it to
+finish. Later renders reuse compiled programs and driver caches. Compilation time
+depends on the scene, GPU and cache state.
 
-Frame ranges include both endpoints: `0` through `47` writes 48 frames. The simple scene
+Frame ranges include both endpoints: `0` through `23` writes 24 frames. The simple scene
 is static; animation tracks make a moving clip. To try glTF import, save a model
 as `model.glb` beside this scene as `model.json`:
 
@@ -548,8 +584,8 @@ Adjust the camera and light for your model's scale. glTF files can refer to
 textures and buffers beside them; keep those files together.
 
 Run `vork setup` again after upgrading or changing GPU drivers. It prints its report
-right away, then compiles for up to about 3 minutes with no output until
-`Shader setup completed`; that isn't a hang. Vulkan persists
+right away, then reports compilation progress until `Shader setup completed`.
+Setup can take several minutes. Vulkan persists
 its pipeline cache when supported; Metal warms the system driver cache. New scene
 programs can still require compilation on their first render. `VORK_CACHE_DIR`
 overrides the cache location.
@@ -568,7 +604,7 @@ The SDKs install from your vork folder, not from npm or PyPI. The npm package na
 
 On Windows use `py -m pip install "$env:LOCALAPPDATA\Programs\vork\python"` and
 `npm install "$env:LOCALAPPDATA\Programs\vork\sdk"`. Import as `vork` in Python or
-`@usevoyager/vork` in TypeScript; keep the native executable on PATH.
+`@voyager-so/vork` in TypeScript; keep the native executable on PATH.
 For source builds, see [`vork help build`](docs/help/build.md).
 
 ## Licence

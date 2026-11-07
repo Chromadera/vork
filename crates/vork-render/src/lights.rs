@@ -256,7 +256,7 @@ pub(super) fn import(
             let lens = match camera.projection() {
                 gltf::camera::Projection::Perspective(p) => {
                     let far = p.zfar();
-                    if far.is_none() {eprintln!("warning: camera {name}: ignored infinite far clip; using the camera default");}
+                    if far.is_none() {crate::warnings::dropped("camera_far_clip", serde_json::json!({"camera":name,"clip_end":"infinite"}), format!("warning: camera {name}: ignored infinite far clip; using the camera default"));}
                     let mut inputs=serde_json::json!({"lens":24. / (2. * (p.yfov() * 0.5).tan()),"fit":"vertical","clip_start":p.znear()});
                     if let Some(far)=far {inputs["clip_end"]=far.into();}
                     inputs
@@ -264,7 +264,7 @@ pub(super) fn import(
                 gltf::camera::Projection::Orthographic(o) => {
                     let mut inputs=serde_json::json!({"projection":"ortho", "fit":"vertical", "ortho_scale":2. * o.ymag(),"clip_end":o.zfar()});
                     if o.znear()>0. {inputs["clip_start"]=o.znear().into();}
-                    else {eprintln!("warning: camera {name}: ignored zero near clip; using the camera default");}
+                    else {crate::warnings::dropped("camera_near_clip", serde_json::json!({"camera":name,"clip_start":0}), format!("warning: camera {name}: ignored zero near clip; using the camera default"));}
                     inputs
                 }
             };
@@ -516,7 +516,7 @@ pub(crate) fn validate_visibility(scene: &::vork_scene::v2::Scene) -> Result<()>
             for node in nodes {
                 let transmission=inherited && node.visibility.transmission;
                 if matches!(node.kind,NodeKind::Light {..}) && (!transmission || !node.visibility.shadow) {
-                    eprintln!("warning: light {:?}: ignored visible_shadow/visible_transmission contribution masks; use shadowed_by or supported light visibility fields",node.name);
+                    crate::warnings::dropped("light_visibility", serde_json::json!({"node":node,"inherited_transmission":inherited}), format!("warning: light {:?}: ignored visible_shadow/visible_transmission contribution masks; use shadowed_by or supported light visibility fields",node.name));
                 }
                 ignored(&node.children,transmission);
             }
@@ -525,7 +525,7 @@ pub(crate) fn validate_visibility(scene: &::vork_scene::v2::Scene) -> Result<()>
         for target in scene.track_targets()?.into_iter().flatten() {
             if let ::vork_scene::TrackTarget::Node {node,property: ::vork_scene::NodeProperty::Visibility(::vork_scene::Ray::Shadow|::vork_scene::Ray::Transmission)}=target {
                 fn light(nodes:&[::vork_scene::v2::Node],name:&str)->bool {nodes.iter().any(|n|n.name==name && matches!(n.kind,NodeKind::Light {..}) || light(&n.children,name))}
-                if light(&scene.nodes,&node) {eprintln!("warning: light {node:?}: ignored shadow/transmission visibility track");}
+                if light(&scene.nodes,&node) {crate::warnings::dropped("light_visibility_track", serde_json::json!({"node":node,"tracks":scene.animation}), format!("warning: light {node:?}: ignored shadow/transmission visibility track"));}
             }
         }
         return Ok(());
