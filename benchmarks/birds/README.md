@@ -23,7 +23,9 @@ needed. `--shot dive` and `--shot reveal` run the other later cameras. Results,
 images, video, simulation checkpoints, exact commands, exit codes, wall times,
 version and scene hashes stay in the output folder. Asset downloads and setup
 are timed separately. Each profile gets a separate warmup and full measured movie.
-The current shipped `std/previs` and `std/final` profiles are used; `std/draft` remains available, with four samples and OIDN denoising.
+The runner selects `std/previs` and `std/final` and warms up at full resolution.
+It does not reproduce the historical draft4 + OIDN movies, which used a 320×180
+still warmup. Those timings use build `81ae2b075`, seed 11 and the table settings.
 
 The Blender adapters live in [the separately licensed integration](../../integrations/blender/).
 They bake actual simulation checkpoints before timing and hand the completed flock

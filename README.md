@@ -138,8 +138,12 @@ initial impulse and limited secondary spray.
 ## Give it to an agent
 
 Start with `vork help`. The getting-started help is about **2,500 tokens**,
-including a complete first scene. The full help is about **19,400 tokens**.
-Those are help-text counts, not a claim that every advanced API fits on one page.
+including a complete first scene. Root, topic and command help total about
+**19,500 tokens**; detailed field lookups add more. These are release 0.1.0
+counts with the o200k_base tokenizer, not a measure of the whole API. The aggregate
+concatenates `vork help`, each listed topic except `field` with `--all`, and `--help` for
+render/std/setup/help. `vork help field material.inputs` includes another 38
+lookup-only records (about 1,800 tokens).
 
 Use the [prompt above](#paste-this-to-your-agent) to start.
 
@@ -169,6 +173,8 @@ vork help programs --all
 Scene content and render quality are separate. Use `std/previs` to iterate,
 `std/draft` for scene-ray lighting at 4 samples,
 `std/final` for the default delivery profile, and `std/path` for path transport.
+Final approximates indirect lighting and can darken interiors, including glossy
+bounces. More samples do not restore omitted transport; try path and inspect.
 Draft and final use 4 and 8 samples with bundled OIDN denoising by default; use `--set denoise=false` to turn it
 off. `--set samples=N` overrides the profile budget (1..4096); more samples means cleaner and slower.
 Without a fast GPU denoiser (NVIDIA or Apple GPU), draft and final say so and use 16 and 32 samples undenoised;
@@ -247,7 +253,7 @@ Different quality and timing boundaries still apply.
 
 These 1080p still timings were measured in an earlier freeze, not on that
 build. Adaptive sampling up to 4,096, threshold 0.01, minimum 64; stopping
-implementations differ. vork is slower in all three named cases.
+implementations differ. vork is slower in both cases below.
 
 | Scene input | Cycles (s) | vork path (s) | Comparison |
 |---|---:|---:|---|
@@ -292,7 +298,9 @@ The [bird inputs](benchmarks/birds/README.md) include the compute programs and
 all three cameras. These `std/draft` movies use four samples and OIDN at
 1080p24; each number is the median of three full commands. The first full movie
 is included in that three-command median, after a separate 320×180 still warmup.
-Setup and warmup are excluded from the movie times below.
+Setup and warmup are excluded from the movie times below. For skim, setup +
+warmup + the movie median total 506.781 seconds (8.45 minutes); asset preparation
+and transfers are additional.
 
 | Camera input | Frames | vork movie (s) | Setup (s) | Warmup (s) | EEVEE 16-sample projection (s), both retained runs |
 |---|---:|---:|---:|---:|---:|
@@ -318,9 +326,15 @@ python3 benchmarks/run.py --vork vork --out /tmp/vork-benchmark
 python3 integrations/blender/benchmark.py --blender blender --out /tmp/blender-benchmark
 ```
 
-These recipes use the current shipped profiles and their own documented timing
-boundaries; they are not the exact harness behind the numbers above. Compare results only with
-recorded builds, settings and cache state. See [the method](benchmarks/README.md).
+The vork runner measures undenoised B-scene variants, not the denoised final8
+tables above. It omits draft and does not set the recorded seed 11. The bird
+runner uses previs/final with a full-resolution warmup, not the recorded draft4
+workflow. The final8/draft4 tables use build `81ae2b075`; preview and path results
+come from earlier freezes, as noted beside those tables.
+
+The Blender helper currently fails during camera preparation on Blender 5.2.1.
+Independent reproduction of the comparisons is not working. The commands above
+are supplied for inspection; see [the method](benchmarks/README.md).
 
 ## Research-preview limits
 
@@ -352,9 +366,9 @@ Binary packages are available from [GitHub Releases](https://github.com/voyager-
 once a release is published. Keep the entire install folder together: Slang, OIDN,
 libraries, examples, SDKs and licence texts are runtime companions to the binary.
 
-- **Linux:** x64, glibc 2.35+ (Ubuntu 22.04+), a recent NVIDIA GPU and its hardware-ray-tracing Vulkan driver.
+- **Linux:** x64, glibc 2.35+ and libstdc++ with `GLIBCXX_3.4.30` (Ubuntu 22.04+), a recent NVIDIA GPU and its hardware-ray-tracing Vulkan driver.
 - **Windows:** x64 Windows 10/11, a recent NVIDIA GPU and its hardware-ray-tracing Vulkan driver.
-- **Mac:** Apple Silicon with Metal. Intel Macs are unsupported. H.264 uses system VideoToolbox.
+- **Mac:** Apple Silicon with Metal, macOS 26 for the bundled Slang toolchain. Older macOS versions are unqualified. Intel Macs are unsupported. H.264 uses system VideoToolbox.
 
 ### Linux
 
@@ -370,6 +384,10 @@ vork --version
 vork help
 ```
 
+These dependency commands are for Ubuntu with sudo. In a root container, omit
+`sudo`; without administrator access, arrange for the dependencies to be installed.
+The installer itself runs in your user account without root.
+
 The installer verifies SHA256SUMS, installs under `$HOME/.local/lib/vork`, links
 `$HOME/.local/bin/vork`, runs `vork setup`, and adds the PATH line to your shell's
 startup files, including the one login shells read. The `export` above covers the
@@ -377,8 +395,28 @@ current shell, and any shell that reads no startup file, such as plain `bash -c`
 `VORK_NO_MODIFY_PATH=1` or a custom `PREFIX` leaves startup files alone. Linux MP4 needs ffmpeg even when NVENC encodes frames, because ffmpeg
 muxes the stream. Native NVENC is attempted on NVIDIA; otherwise encoding uses a
 readback fallback. Older GPUs and software Vulkan adapters are unsupported.
+A100, H100, H200, B200 and B300 lack the required hardware ray tracing; recency
+alone does not make a NVIDIA GPU suitable. Containers also need working NVIDIA
+Vulkan driver discovery; passing through a GPU alone may not be sufficient.
 
 ### Mac
+
+The released 0.1.0 archive has these Mach-O `LC_BUILD_VERSION` minimums:
+
+| Binary | macOS minimum |
+|---|---:|
+| `vork` | 11.0 |
+| `slang/bin/slangc` | 26.0 |
+| `slang/lib/libslang-compiler.0.2026.20.dylib` | 26.0 |
+| `slang/lib/libslang-glsl-module-2026.20.dylib` | 26.0 |
+| `oidn/lib/libOpenImageDenoise.2.5.1.dylib` | 11.0 |
+| `oidn/lib/libOpenImageDenoise_core.2.5.1.dylib` | 11.0 |
+| `oidn/lib/libOpenImageDenoise_device_cpu.2.5.1.dylib` | 11.0 |
+| `oidn/lib/libOpenImageDenoise_device_metal.2.5.1.dylib` | 11.0 |
+| `oidn/lib/libtbb.12.19.dylib` | 11.0 |
+
+These are archive load-command targets, not tests on older macOS versions.
+A successful `vork --version` does not test Slang; new authored programs need it.
 
 In Terminal:
 
@@ -414,6 +452,10 @@ vork --version
 vork help
 ```
 
+These dependency commands are for Ubuntu with sudo. In a root container, omit
+`sudo`; without administrator access, arrange for the dependencies to be installed.
+The installer itself runs in your user account without root.
+
 The installer verifies SHA256SUMS, installs under `%LOCALAPPDATA%\Programs\vork`,
 runs `vork setup`, and adds that folder to your user PATH so new windows find `vork`;
 the `$env:Path` line above covers the current one. `VORK_NO_MODIFY_PATH=1` or a custom
@@ -432,7 +474,7 @@ Add that folder to your user PATH, open a new PowerShell window, and run
 with no output until `Shader setup completed`; that isn't a hang. Keep all bundled
 runtime companions beside the executable.
 
-`install.sh` downloads the release from GitHub; to install an archive you already
+The separately downloadable `install.sh` downloads the release from GitHub; to install an archive you already
 have without downloading again, use the manual steps below.
 
 ### Manual archive install (Linux or Mac)

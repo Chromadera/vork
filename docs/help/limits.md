@@ -2,7 +2,9 @@ LIMITS
 Supported GPUs: Apple Silicon Metal and recent NVIDIA Vulkan with hardware ray
 tracing and storage buffer arrays. AMD, Intel and CPU/software rendering are
 unsupported. Run vork setup to check the adapter. Windows x64 ships install.ps1;
-macOS and Linux ship install.sh. See README.md (Install) for binary setup.
+macOS and Linux provide install.sh as a separate release asset.
+The 0.1.0 bundled Slang toolchain targets macOS 26; older macOS is unqualified.
+See README.md (Mac) for each companion binary's deployment target. See README.md (Install) for binary setup.
 
 Participating media (fog, smoke and volumes) are absent from this release's API.
 Legacy medium bindings are ignored with a warning; surface subsurface scattering

@@ -8,6 +8,9 @@ pinned Intel Mac or Linux ARM archive.
 
 ## Prerequisites
 
+The pinned Slang 2026.20 macOS binaries target macOS 26. Older macOS versions
+have not been qualified with this toolchain.
+
 On macOS, install Apple's command line tools, then install Homebrew from
 https://brew.sh if it is not already available:
 
@@ -97,7 +100,8 @@ see README.md (Install). The compiled help and scene JSON are identical on every
 
 ## Runtime dependencies
 
-Video output needs FFmpeg and ffprobe on PATH.
+Linux/Windows video output and video decoding/fallbacks need FFmpeg on PATH;
+video inputs also need ffprobe. Native Mac H.264 output uses VideoToolbox.
 Install the pinned denoiser with `python scripts/install-oidn DESTINATION`.
 Set VORK_OIDN to its lib/libOpenImageDenoise.so.2 on Linux,
 lib/libOpenImageDenoise.2.dylib on macOS, or bin/OpenImageDenoise.dll on Windows.

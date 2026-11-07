@@ -19,13 +19,24 @@ python3 benchmarks/fetch.py
 python3 benchmarks/run.py --vork vork --out /tmp/vork-benchmark
 ```
 
-The runner measures the **current shipped profiles**. It records setup, a separate per-scene warmup, five warm process
+The runner resolves named profiles but forces `denoise=false`. By default it
+selects only B scenes and previs/final/path, omits draft, and does not set seed 11.
+It does not reproduce the historical denoised final8 tables or their C/D scenes.
+Those measurements use build `81ae2b075` and the settings listed with each table.
+
+It records setup, a separate per-scene warmup, five warm process
 times, commands, exit codes, diagnostics and PNGs. Setup uses the existing cache;
 this is not a cold-cache benchmark. Use a new `VORK_CACHE_DIR` to measure first use
 and record that choice. `--resolution 320x180 --repetitions 1` is a smoke run only.
 `std/previs` runs are previews, with different lighting/shadows; report them
 separately from final/path. No timings are projections. Inspect every image and
 report failures, hardware, driver, build, cache state and quality differences.
+
+**Known failure:** the helper fails during camera preparation on Blender 5.2.1:
+its Track To axis enum is invalid, and Python exceptions do not stop preparation
+reliably. The historical comparisons cannot currently be reproduced with it.
+Repair and validation across scenes are pending. The commands below describe
+the intended workflow.
 
 To create and time Blender inputs, use the separately licensed
 [Blender benchmark helper](../integrations/blender/benchmark.py). It imports the
