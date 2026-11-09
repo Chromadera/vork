@@ -2,6 +2,17 @@
 use anyhow::{Context, Result, ensure};
 use glam::Quat;
 use vork_scene::v2;
+mod exact;
+mod weights;
+
+fn hermite_basis<T>(u: T, one: T, two: T, three: T) -> [T; 4]
+where T: Clone + std::ops::Add<Output=T> + std::ops::Sub<Output=T> + std::ops::Mul<Output=T> {
+    let u2 = u.clone() * u.clone();
+    let u3 = u2.clone() * u.clone();
+    [two.clone()*u3.clone()-three.clone()*u2.clone()+one,
+        u3.clone()-two.clone()*u2.clone()+u,
+        three*u2.clone()-two*u3.clone(), u3-u2]
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Interpolation {
@@ -26,7 +37,9 @@ impl Curve {
         *self.times.last().unwrap()
     }
     pub fn sample(&self, time: f32, out: &mut Vec<f32>) {
-        let upper = self.times.partition_point(|v| *v <= time);
+        self.sample_interval(time, self.times.partition_point(|v| *v <= time), out);
+    }
+    fn sample_interval(&self, time: f32, upper: usize, out: &mut Vec<f32>) {
         let a = upper.saturating_sub(1);
         let b = upper.min(self.times.len() - 1);
         let dt = self.times[b] - self.times[a];
@@ -42,9 +55,9 @@ impl Curve {
         };
         if self.euler {
             let angle = |k: usize| if cubic {
-                let (u2, u3) = (u * u, u * u * u);
-                (2. * u3 - 3. * u2 + 1.) * value(a, 1, k) + (u3 - 2. * u2 + u) * dt * value(a, 2, k)
-                    + (-2. * u3 + 3. * u2) * value(b, 1, k) + (u3 - u2) * dt * value(b, 0, k)
+                let [h00,h10,h01,h11] = hermite_basis(u,1.,2.,3.);
+                h00 * value(a, 1, k) + h10 * dt * value(a, 2, k)
+                    + h01 * value(b, 1, k) + h11 * dt * value(b, 0, k)
             } else if self.interpolation == Interpolation::Step {
                 value(a, 0, k)
             } else {
@@ -63,12 +76,11 @@ impl Curve {
         }
         for (k, out) in out.iter_mut().enumerate() {
             *out = if cubic {
-                let u2 = u * u;
-                let u3 = u2 * u;
-                (2. * u3 - 3. * u2 + 1.) * value(a, 1, k)
-                    + (u3 - 2. * u2 + u) * dt * value(a, 2, k)
-                    + (-2. * u3 + 3. * u2) * value(b, 1, k)
-                    + (u3 - u2) * dt * value(b, 0, k)
+                let [h00,h10,h01,h11] = hermite_basis(u,1.,2.,3.);
+                h00 * value(a, 1, k)
+                    + h10 * dt * value(a, 2, k)
+                    + h01 * value(b, 1, k)
+                    + h11 * dt * value(b, 0, k)
             } else if self.interpolation == Interpolation::Step {
                 value(a, 0, k)
             } else {
@@ -102,6 +114,12 @@ impl Curve {
             ensure!(angles.len() == 3, "euler rotation needs [x,y,z] radians");
             Ok(angles)
         };
+        let components = |value:&serde_json::Value| -> Result<Vec<f32>> {
+            if matches!(track.path.as_slice(),[root,_,field] if root=="images" && field=="time") {
+                let value=value.as_array().filter(|v|v.len()==1).map_or(value,|v|&v[0]);
+                Ok(vec![serde_json::from_value::<vork_time::Clock>(value.clone())?.as_f32()])
+            } else {components(value)}
+        };
         let width = if euler { 3 } else { components(&values[0])?.len() };
         let mut flat = Vec::with_capacity(values.len() * width);
         for value in values {
@@ -126,13 +144,12 @@ impl Curve {
         width: usize,
     ) -> Result<Self> {
         let path = v2::display_path(&track.path);
+        let clock=matches!(track.path.as_slice(),[root,_,field] if root=="images" && field=="time");
         ensure!(
             width > 0
                 && !times.is_empty()
                 && values.len() == times.len() * width * if matches!(track.interpolation, v2::Interpolation::Cubic) { 3 } else { 1 }
-                && times.iter().all(|v| v.is_finite())
-                && times.windows(2).all(|v| v[0] < v[1])
-                && values.iter().all(|v| v.is_finite()),
+                && (clock || (times.iter().all(|v|v.is_finite()) && (if matches!(track.interpolation,v2::Interpolation::Step) {times.windows(2).all(|v|v[0]<=v[1])}else{times.windows(2).all(|v|v[0]<v[1])}) && values.iter().all(|v|v.is_finite()))),
             "invalid numeric track {path}"
         );
         ensure!(
@@ -317,6 +334,9 @@ pub(crate) struct PropertyTrack {
     /// The authored target; None for a glTF clip channel (asset targets only).
     pub target: Option<v2::TrackTarget>,
     channel: Channel,
+    time_curve: Option<std::sync::Arc<exact::DeferredTimeCurve>>,
+    camera_keys: Option<Vec<vork_time::exact::Rational>>,
+    discrete_keys: Option<std::sync::Arc<exact::DiscreteKeys>>,
     weight_target: Option<usize>,
     asset_targets: Vec<AssetTarget>,
     asset_visibility: Option<(usize, usize)>,
@@ -328,6 +348,7 @@ pub(crate) struct CompiledLayer {
     pub source: v2::Layer,
     pub tracks: Vec<PropertyTrack>,
     span: Option<(f32, f32)>,
+    time_span: Option<std::sync::Arc<exact::TimeSpan>>,
 }
 /// One immutable ordered layer plan. glTF import appends channels to these layers.
 #[derive(Clone)]
@@ -350,15 +371,21 @@ pub(crate) struct Samples {
     material_values: Vec<Sample>,
 }
 #[derive(Clone, Default)]
+struct AssetBindings {
+    transforms: Vec<(usize, AssetTarget, bool)>,
+    visibility: Vec<(usize, usize)>,
+}
+#[derive(Clone, Default)]
 pub(crate) struct Plan {
     pub layers: Vec<CompiledLayer>,
     reset_bindings: Vec<NodeBinding>,
+    asset_bindings: Vec<AssetBindings>,
     material_bindings: Vec<MaterialBinding>,
     material_offsets: Vec<f32>,
     cameras: std::collections::BTreeMap<String, usize>,
-    camera_events: Vec<(f32, usize)>,
-    camera_start: Option<usize>,
-    duration: f32,
+    camera_tracks: bool,
+    camera_weight_animation: bool,
+    discrete_tracks: bool,
 }
 impl Plan {
     #[cfg(test)]
@@ -386,6 +413,9 @@ impl Plan {
             );
             let mut tracks = Vec::new();
             let mut span: Option<(f32, f32)> = source.source_span;
+            let time_slice = targets.iter().any(|target| matches!(target, v2::TrackTarget::ImageTime {..} | v2::TrackTarget::Render(v2::RenderProperty::Camera)))
+                || source.tracks.iter().flatten().any(|track| matches!(track.interpolation, v2::Interpolation::Step) || matches!(&track.values,v2::Values::Inline(values) if values.first().is_some_and(|v| v.is_boolean() || v.is_string())));
+            let mut clock_endpoints=if time_slice {source.source_clock_span.clone()}else{Vec::new()};
             for (track, target) in source.tracks.iter().flatten().zip(targets) {
                 use v2::{NodeProperty, TrackTarget};
                 let rotation = matches!(
@@ -406,6 +436,9 @@ impl Plan {
                         times
                     }
                 };
+                if matches!(target,TrackTarget::ImageTime {..}|TrackTarget::Render(v2::RenderProperty::Camera)) || matches!(track.interpolation,v2::Interpolation::Step) {
+                    exact::times(track,&times)?;
+                } else {
                 ensure!(
                     !times.is_empty()
                         && times.iter().all(|t| t.is_finite() && *t >= 0.)
@@ -413,6 +446,7 @@ impl Plan {
                     "track {}: times must be non-empty, finite, >= 0 and strictly increasing",
                     v2::display_path(&track.path)
                 );
+                }
                 let weight_target = if let TrackTarget::LayerWeight { layer } = &target {
                     Some(
                         *names
@@ -424,7 +458,7 @@ impl Plan {
                 };
                 let channel = match &track.values {
                     v2::Values::Inline(values)
-                        if values
+                        if !matches!(target,TrackTarget::ImageTime {..}) && values
                             .first()
                             .is_some_and(|v| v.is_string() || v.is_boolean()) =>
                     {
@@ -468,9 +502,24 @@ impl Plan {
                 span = Some(span.map_or((times[0], *times.last().unwrap()), |(a, b)| {
                     (a.min(times[0]), b.max(*times.last().unwrap()))
                 }));
+                if time_slice {
+                    let times=exact::raw_times(track,&times)?;
+                    clock_endpoints.extend([times.first().unwrap().clone(),times.last().unwrap().clone()]);
+                }
+                let time_curve = if matches!(target, TrackTarget::ImageTime {..}) {
+                    let Channel::Numeric(curve) = &channel else { anyhow::bail!("image time needs a scalar track") };
+                    Some(std::sync::Arc::new(exact::DeferredTimeCurve::new(track,curve.clone())))
+                } else { None };
+                let discrete_keys = (!matches!(target, TrackTarget::ImageTime {..}|TrackTarget::Render(v2::RenderProperty::Camera)) && match &channel {
+                    Channel::Discrete {..} => true,
+                    Channel::Numeric(curve) => curve.interpolation == Interpolation::Step,
+                }).then(|| exact::raw_times(track,&times).map(exact::DiscreteKeys::new).map(std::sync::Arc::new)).transpose()?;
                 tracks.push(PropertyTrack {
+                    discrete_keys,
+                    camera_keys: (target == TrackTarget::Render(v2::RenderProperty::Camera)).then(||exact::times(track,&times)).transpose()?,
                     target: Some(target),
                     channel,
+                    time_curve,
                     weight_target,
                     asset_targets: vec![],
                     asset_visibility: None,
@@ -481,6 +530,7 @@ impl Plan {
             layers.push(CompiledLayer {
                 source: v2::Layer {
                     source_span: source.source_span,
+                    source_clock_span: source.source_clock_span.clone(),
                     name: source.name.clone(),
                     tracks: None,
                     clip: source.clip.clone(),
@@ -492,14 +542,28 @@ impl Plan {
                 },
                 tracks,
                 span,
+                time_span: time_slice.then(||std::sync::Arc::new(exact::TimeSpan::new(clock_endpoints))),
             });
+        }
+        let discrete_tracks=layers.iter().flat_map(|layer|&layer.tracks).any(|track|track.discrete_keys.is_some());
+        let camera_tracks=layers.iter().flat_map(|layer|&layer.tracks).any(|track|track.camera_keys.is_some());
+        let mut needed:std::collections::BTreeSet<_>=layers.iter().enumerate().filter(|(_,layer)|layer.tracks.iter().any(|t|t.camera_keys.is_some())).map(|(i,_)|i).collect();
+        let mut camera_weight_animation=false;
+        for (i,layer) in layers.iter().enumerate().rev() {
+            for track in &layer.tracks {
+                if track.weight_target.is_some_and(|target|needed.contains(&target)) {
+                    needed.insert(i);
+                    camera_weight_animation|=matches!(&track.channel,Channel::Numeric(curve) if curve.times.len()>1);
+                }
+            }
         }
         Ok(Self {
             layers,
-            duration: scene.render.duration,
-            camera_events: vec![],
-            camera_start: None,
+            camera_tracks,
+            discrete_tracks,
+            camera_weight_animation,
             reset_bindings: vec![],
+            asset_bindings: vec![],
             material_bindings: vec![],
             material_offsets: vec![],
             cameras: Default::default(),
@@ -526,6 +590,7 @@ impl Plan {
         curve: std::sync::Arc<Curve>,
         target: AssetTarget,
     ) {
+        self.discrete_tracks |= curve.interpolation==Interpolation::Step;
         let span = (0., curve.duration());
         let layer = &mut self.layers[layer];
         layer.span = Some(
@@ -533,9 +598,18 @@ impl Plan {
                 .span
                 .map_or(span, |(a, b)| (a.min(span.0), b.max(span.1))),
         );
+        if layer.time_span.is_some() || curve.interpolation==Interpolation::Step {
+            let mut endpoints=layer.time_span.as_ref().map(|span|span.endpoints.clone()).unwrap_or_default();
+            let (a,b)=layer.span.unwrap();
+            endpoints.extend([vork_time::Clock::binary(a),vork_time::Clock::binary(b)]);
+            layer.time_span=Some(std::sync::Arc::new(exact::TimeSpan::new(endpoints)));
+        }
         layer.tracks.push(PropertyTrack {
+            discrete_keys: (curve.interpolation == Interpolation::Step).then(||std::sync::Arc::new(exact::DiscreteKeys::new(curve.times.iter().map(|&t|vork_time::Clock::binary(t)).collect()))),
             target: None,
             channel: Channel::Numeric(curve),
+            time_curve: None,
+            camera_keys: None,
             weight_target: None,
             asset_targets: vec![target],
             asset_visibility: None,
@@ -647,13 +721,31 @@ impl Plan {
         }
         Ok(any)
     }
-    pub fn validate_asset_bindings(&self) -> Result<()> {
+    /// Freeze imported targets after every clip has appended its channels. Flat
+    /// sample addresses are final only here, since later clips can extend earlier layers.
+    pub fn finish_asset_bindings(&mut self) -> Result<()> {
         for track in self.layers.iter().flat_map(|l| &l.tracks) {
             if let Some(v2::TrackTarget::Imported { asset, node, .. }) = &track.target {
                 ensure!(
                     !track.asset_targets.is_empty() || track.asset_visibility.is_some(),
                     "unbound imported-node track [\"nodes\",{asset:?},\"nodes\",{node:?}]"
                 );
+            }
+        }
+        self.asset_bindings.clear();
+        let mut index = 0;
+        for layer in &self.layers {
+            let additive = matches!(layer.source.blend, v2::Blend::Add);
+            for track in &layer.tracks {
+                for &target in &track.asset_targets {
+                    self.asset_bindings.resize_with(self.asset_bindings.len().max(target.asset + 1), AssetBindings::default);
+                    self.asset_bindings[target.asset].transforms.push((index, target, additive));
+                }
+                if let Some((asset, node)) = track.asset_visibility {
+                    self.asset_bindings.resize_with(self.asset_bindings.len().max(asset + 1), AssetBindings::default);
+                    self.asset_bindings[asset].visibility.push((index, node));
+                }
+                index += 1;
             }
         }
         Ok(())
@@ -822,27 +914,12 @@ impl Plan {
                 .collect(),
         }
     }
+    pub fn has_discrete_tracks(&self)->bool {self.discrete_tracks}
     pub fn sample_into(&self, time: f32, samples: &mut Samples) {
         self.sample_into_where(time, samples, |_| true);
     }
-    pub fn sample_nodes_into(
-        &self,
-        time: f32,
-        samples: &mut Samples,
-        nodes: &[usize],
-        assets: &[usize],
-    ) {
-        self.sample_into_where(time, samples, |track| {
-            track
-                .node_targets
-                .iter()
-                .any(|binding| nodes.binary_search(&binding.node).is_ok())
-                || track.asset_visibility.is_some_and(|(asset,_)| assets.binary_search(&asset).is_ok())
-                || track
-                    .asset_targets
-                    .iter()
-                    .any(|target| assets.binary_search(&target.asset).is_ok())
-        });
+    pub fn sample_request_into(&self, time:f32, request: &vork_time::Request, samples: &mut Samples) -> Result<()> {
+        self.sample_where_request(time, Some(request), samples, |_| true)
     }
     fn sample_into_where(
         &self,
@@ -850,6 +927,15 @@ impl Plan {
         samples: &mut Samples,
         wanted: impl Fn(&PropertyTrack) -> bool,
     ) {
+        self.sample_where_request(time, None, samples, wanted).expect("numeric sampling has no exact decisions");
+    }
+    fn sample_where_request(
+        &self,
+        time: f32,
+        request: Option<&vork_time::Request>,
+        samples: &mut Samples,
+        wanted: impl Fn(&PropertyTrack) -> bool,
+    ) -> Result<()> {
         for (value, binding) in samples
             .material_values
             .iter_mut()
@@ -861,6 +947,7 @@ impl Plan {
             *weight = layer.source.weight;
         }
         let mut index = 0;
+        let mut exact_request = None;
         for (layer_index, layer) in self.layers.iter().enumerate() {
             let weight = samples.layer_weights[layer_index];
             let mut local = layer.source.offset + time * layer.source.speed;
@@ -871,6 +958,7 @@ impl Plan {
                     }
                 }
             }
+            let mut exact_local = None;
             let additive = matches!(layer.source.blend, v2::Blend::Add);
             for track in &layer.tracks {
                 let weight = if track.weight_target.is_some() || wanted(track) {
@@ -880,17 +968,25 @@ impl Plan {
                 };
                 samples.weights[index] = weight;
                 if weight != 0. {
+                    let upper = if let (Some(request),Some(keys)) = (request,track.discrete_keys.as_ref()) {
+                        if exact_request.is_none() {exact_request=Some(request.exact()?);}
+                        if exact_local.is_none() {exact_local=Some(layer.exact_local(exact_request.as_ref().unwrap())?);}
+                        Some(keys.upper(exact_local.as_ref().unwrap()))
+                    } else {None};
                     match &track.channel {
                         Channel::Numeric(curve) => {
                             let Sample::Numeric(value) = &mut samples.values[index] else {
                                 unreachable!()
                             };
-                            curve.sample(local, value);
+                            if track.time_curve.is_none() {
+                                if let Some(upper)=upper {curve.sample_interval(local,upper,value);}
+                                else {curve.sample(local, value);}
+                            }
                         }
                         Channel::Discrete { times, values } => {
-                            samples.values[index] = values
-                                [times.partition_point(|t| *t <= local).saturating_sub(1)]
-                            .clone()
+                            if track.camera_keys.is_none() {samples.values[index] = values
+                                [upper.unwrap_or_else(||times.partition_point(|t| *t <= local)).saturating_sub(1)]
+                            .clone();}
                         }
                     }
                     for &target in track.material_targets.iter().flatten() {
@@ -916,15 +1012,16 @@ impl Plan {
                 index += 1;
             }
         }
+        Ok(())
     }
     pub fn apply_asset_visibility(&self, asset: usize, samples: &Samples, visibility: &mut [v2::Visibility]) {
-        self.apply_filtered(samples, |track| track.asset_visibility.is_some_and(|(a,_)| a == asset),
-            |track, value, weight, _| {
-                if weight >= 0.5 {
-                    let Sample::Bool(value) = value else { unreachable!() };
-                    visibility[track.asset_visibility.unwrap().1].visible = *value;
-                }
-            });
+        let Some(bindings) = self.asset_bindings.get(asset) else { return; };
+        for &(index, node) in &bindings.visibility {
+            if samples.weights[index] >= 0.5 {
+                let Sample::Bool(value) = samples.values[index] else { unreachable!() };
+                visibility[node].visible = value;
+            }
+        }
     }
     pub fn apply_asset(
         &self,
@@ -932,21 +1029,11 @@ impl Plan {
         samples: &Samples,
         mut apply: impl FnMut(AssetTarget, &Sample, f32, bool),
     ) {
-        let mut index = 0;
-        for layer in &self.layers {
-            let additive = matches!(layer.source.blend, v2::Blend::Add);
-            for track in &layer.tracks {
-                for &target in &track.asset_targets {
-                    if target.asset == asset && samples.weights[index] != 0. {
-                        apply(
-                            target,
-                            &samples.values[index],
-                            samples.weights[index],
-                            additive,
-                        );
-                    }
-                }
-                index += 1;
+        let Some(bindings) = self.asset_bindings.get(asset) else { return; };
+        for &(index, target, additive) in &bindings.transforms {
+            let weight = samples.weights[index];
+            if weight != 0. {
+                apply(target, &samples.values[index], weight, additive);
             }
         }
     }
@@ -997,28 +1084,19 @@ impl Plan {
             }
         }
     }
-    pub fn start_camera(&self, base: &v2::Render, time: f32) -> Option<String> {
+    pub fn start_camera(&self, base: &v2::Render, time: impl Into<vork_time::Request>) -> Option<String> {
+        let time=time.into();
         let mut samples = self.samples();
-        self.sample_into(time, &mut samples);
-        self.apply_render(&mut samples, base);
-        samples.render.and_then(|render| render.camera)
+        self.sample_into(time.numeric().expect("validated initial time"), &mut samples);
+        self.camera_selection(&samples,&time).expect("validated camera request")
+            .map(str::to_owned).or_else(||base.camera.clone())
     }
-    /// Image clocks use the same evaluated layers, weights and loop mapping as poses.
-    pub fn image_time(&self, samples: &Samples, name: &str, base: f32) -> f32 {
-        let mut time = base;
-        let mut index = 0;
-        for layer in &self.layers {
-            for track in &layer.tracks {
-                if matches!(&track.target, Some(v2::TrackTarget::ImageTime { image }) if image == name) {
-                    if let Sample::Numeric(value) = &samples.values[index] {
-                        blend(std::slice::from_mut(&mut time), value, samples.weights[index],
-                            matches!(layer.source.blend, v2::Blend::Add), Combine::Add);
-                    }
-                }
-                index += 1;
-            }
-        }
-        time
+    pub(crate) fn has_shutter_animation(&self)->bool {
+        self.targets().any(|target|matches!(target,v2::TrackTarget::Render(v2::RenderProperty::MotionBlurShutter)))
+    }
+    pub(crate) fn sample_shutter(&self,time:f32,samples:&mut Samples,base:&v2::Render) {
+        self.sample_into_where(time,samples,|track|matches!(track.target,Some(v2::TrackTarget::Render(v2::RenderProperty::MotionBlurShutter))));
+        self.apply_render(samples,base);
     }
     pub fn apply_render(&self, samples: &mut Samples, base: &v2::Render) {
         let render = samples.render.get_or_insert_with(|| base.clone());
@@ -1040,14 +1118,6 @@ impl Plan {
                                 blend(color, value, weight, additive, Combine::Add);
                             }
                         },
-                        (R::Camera, Sample::String(value)) if weight >= 0.5 => {
-                            if let Some(camera) = &mut render.camera {
-                                camera.clear();
-                                camera.push_str(value);
-                            } else {
-                                render.camera = Some(value.to_string());
-                            }
-                        }
                         (R::MotionBlurShutter, Sample::Numeric(value)) => {
                             if let Some(m) = &mut render.motion_blur {
                                 blend(std::slice::from_mut(&mut m.shutter), value, weight, additive, Combine::Add);
@@ -1226,283 +1296,14 @@ impl Plan {
             nodes[i].dynamic |= nodes[i].parent.is_some_and(|p| nodes[p].dynamic);
         }
 
-        self.compile_camera_events(default_camera);
+        let _=default_camera;
         Ok(())
     }
-    /// Half-open shot interval containing the nominal frame time.
-    pub fn camera_bounds(&self, time: f32) -> (f32, f32) {
-        let next = self.camera_events.partition_point(|event| event.0 <= time);
-        let lower = next
-            .checked_sub(1)
-            .map_or(0., |index| self.camera_events[index].0);
-        let upper = self
-            .camera_events
-            .get(next)
-            .map_or(f32::INFINITY, |event| event.0.next_down());
-        (lower, upper)
-    }
-    fn compile_camera_events(&mut self, fallback: usize) {
-        let mut events = vec![0., self.duration];
-        for layer in &self.layers {
-            let speed = layer.source.speed;
-            if speed == 0. {
-                continue;
-            }
-            let period = layer
-                .span
-                .filter(|(a, b)| layer.source.looping && b > a)
-                .map(|(a, b)| (b - a) / speed.abs());
-            for track in &layer.tracks {
-                if track.target != Some(v2::TrackTarget::Render(v2::RenderProperty::Camera))
-                    && track.weight_target.is_none()
-                {
-                    continue;
-                }
-                let keys = match &track.channel {
-                    Channel::Numeric(curve) => &curve.times,
-                    Channel::Discrete { times, .. } => times,
-                };
-                for &key in keys
-                    .iter()
-                    .chain(layer.span.iter().flat_map(|(a, b)| [a, b]))
-                {
-                    let event = (key - layer.source.offset) / speed;
-                    if let Some(period) = period {
-                        let first = (-event / period).ceil() as i64;
-                        let last = ((self.duration - event) / period).floor() as i64;
-                        for cycle in first..=last {
-                            let time = event + cycle as f32 * period;
-                            if time >= 0. && time <= self.duration {
-                                events.push(time);
-                            }
-                        }
-                    } else if event >= 0. && event <= self.duration {
-                        events.push(event);
-                    }
-                }
-            }
-        }
-        events.sort_by(f32::total_cmp);
-        events.dedup();
-        let mut thresholds = vec![];
-        for pair in events.windows(2) {
-            let mut weights: Vec<_> = self
-                .layers
-                .iter()
-                .map(|layer| vec![layer.source.weight as f64])
-                .collect();
-            for (index, layer) in self.layers.iter().enumerate() {
-                let weight = weights[index].clone();
-                if layer.tracks.iter().any(|track| {
-                    track.target == Some(v2::TrackTarget::Render(v2::RenderProperty::Camera))
-                }) {
-                    let mut threshold = weight.clone();
-                    threshold[0] -= 0.5;
-                    thresholds.extend(
-                        polynomial_roots(&threshold)
-                            .into_iter()
-                            .map(|u| pair[0] + (pair[1] - pair[0]) * u as f32),
-                    );
-                }
-                for track in &layer.tracks {
-                    if let (Some(target), Channel::Numeric(curve)) =
-                        (track.weight_target, &track.channel)
-                    {
-                        let sample = weight_polynomial(curve, layer, pair[0], pair[1]);
-                        let contribution = polynomial_multiply(&weight, &sample);
-                        weights[target] = if matches!(layer.source.blend, v2::Blend::Add) {
-                            polynomial_add(&weights[target], &contribution)
-                        } else {
-                            let inverse: Vec<_> = weight
-                                .iter()
-                                .enumerate()
-                                .map(|(i, w)| if i == 0 { 1. - w } else { -w })
-                                .collect();
-                            polynomial_add(
-                                &polynomial_multiply(&weights[target], &inverse),
-                                &contribution,
-                            )
-                        };
-                    }
-                }
-            }
-        }
-        events.extend(thresholds);
-        events.sort_by(f32::total_cmp);
-        events.dedup();
-        let mut probes = vec![0.];
-        for pair in events.windows(2) {
-            probes.push(pair[0] + (pair[1] - pair[0]) * 0.5);
-        }
-        for event in events {
-            probes.extend([
-                event.next_down().max(0.),
-                event,
-                event.next_up().min(self.duration),
-            ]);
-        }
-        probes.sort_by(f32::total_cmp);
-        probes.dedup();
-        let mut scratch = self.samples();
-        let mut camera_at = |time| {
-            self.sample_into(time, &mut scratch);
-            self.camera_sampled(&scratch, fallback)
-        };
-        let mut cuts = vec![];
-        for pair in probes.windows(2) {
-            let before = camera_at(pair[0]);
-            if camera_at(pair[1]) == before {
-                continue;
-            }
-            let (mut lower, mut upper) = (pair[0].to_bits(), pair[1].to_bits());
-            while upper - lower > 1 {
-                let middle = lower + (upper - lower) / 2;
-                if camera_at(f32::from_bits(middle)) == before {
-                    lower = middle;
-                } else {
-                    upper = middle;
-                }
-            }
-            let time = f32::from_bits(upper);
-            cuts.push((time, camera_at(time)));
-        }
-        self.camera_start = Some(camera_at(0.));
-        cuts.dedup();
-        self.camera_events = cuts;
-    }
-    pub fn camera_sampled(&self, samples: &Samples, fallback: usize) -> usize {
-        let mut camera = fallback;
-        self.apply_filtered(
-            samples,
-            |track| track.target == Some(v2::TrackTarget::Render(v2::RenderProperty::Camera)),
-            |_, value, weight, additive| {
-                if weight >= 0.5 && !additive {
-                    if let Sample::String(name) = value {
-                        camera = *self.cameras.get(name.as_ref()).expect("validated camera track references an installed camera");
-                    }
-                }
-            },
-        );
-        camera
-    }
     pub fn camera_at(&self, time: f32, fallback: usize) -> usize {
-        let upper = self.camera_events.partition_point(|event| event.0 <= time);
-        upper
-            .checked_sub(1)
-            .map_or(self.camera_start.unwrap_or(fallback), |index| {
-                self.camera_events[index].1
-            })
+        self.camera_at_request(&vork_time::Request::Numeric(time),fallback).expect("validated camera request")
     }
 }
-// Install-time scalar layer weights are piecewise polynomials. Isolating their
-// threshold roots preserves camera cuts even when lower layers blend weights.
-fn polynomial_add(a: &[f64], b: &[f64]) -> Vec<f64> {
-    (0..a.len().max(b.len()))
-        .map(|i| a.get(i).unwrap_or(&0.) + b.get(i).unwrap_or(&0.))
-        .collect()
-}
-fn polynomial_multiply(a: &[f64], b: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.; a.len() + b.len() - 1];
-    for (i, x) in a.iter().enumerate() {
-        for (j, y) in b.iter().enumerate() {
-            out[i + j] += x * y;
-        }
-    }
-    out
-}
-fn polynomial_value(p: &[f64], x: f64) -> f64 {
-    p.iter().rev().fold(0., |v, c| v * x + c)
-}
-fn polynomial_roots(p: &[f64]) -> Vec<f64> {
-    let mut p = p.to_vec();
-    while p.len() > 1 && p.last() == Some(&0.) {
-        p.pop();
-    }
-    if p.len() <= 1 {
-        return vec![];
-    }
-    let derivative: Vec<_> = p
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(i, c)| i as f64 * c)
-        .collect();
-    let mut intervals = vec![0.];
-    intervals.extend(polynomial_roots(&derivative));
-    intervals.push(1.);
-    let mut roots = vec![];
-    for pair in intervals.windows(2) {
-        let (mut a, mut b) = (pair[0], pair[1]);
-        let mut fa = polynomial_value(&p, a);
-        let fb = polynomial_value(&p, b);
-        if fa == 0. {
-            roots.push(a);
-        }
-        if fb == 0. {
-            roots.push(b);
-        }
-        if fa.is_sign_negative() == fb.is_sign_negative() {
-            continue;
-        }
-        loop {
-            let mid = (a + b) * 0.5;
-            if mid == a || mid == b {
-                break;
-            }
-            let fm = polynomial_value(&p, mid);
-            if fm == 0. {
-                a = mid;
-                b = mid;
-                break;
-            }
-            if fm.is_sign_negative() == fa.is_sign_negative() {
-                a = mid;
-                fa = fm;
-            } else {
-                b = mid;
-            }
-        }
-        roots.push((a + b) * 0.5);
-    }
-    roots.sort_by(f64::total_cmp);
-    roots.dedup();
-    roots
-}
-fn weight_polynomial(curve: &Curve, layer: &CompiledLayer, start: f32, end: f32) -> Vec<f64> {
-    let span = (end - start) as f64 * layer.source.speed as f64;
-    let mut midpoint =
-        layer.source.offset as f64 + (start as f64 + end as f64) * 0.5 * layer.source.speed as f64;
-    if let Some((a, b)) = layer.span.filter(|(a, b)| layer.source.looping && b > a) {
-        midpoint = a as f64 + (midpoint - a as f64).rem_euclid((b - a) as f64);
-    }
-    let cubic = curve.interpolation == Interpolation::Cubic;
-    let get = |key: usize, part: usize| curve.values[key * if cubic { 3 } else { 1 } + part] as f64;
-    let upper = curve.times.partition_point(|t| (*t as f64) <= midpoint);
-    let a = upper.saturating_sub(1);
-    let b = upper.min(curve.times.len() - 1);
-    if a == b || curve.interpolation == Interpolation::Step {
-        return vec![get(a, usize::from(cubic))];
-    }
-    let dt = (curve.times[b] - curve.times[a]) as f64;
-    let x = vec![
-        (midpoint - span * 0.5 - curve.times[a] as f64) / dt,
-        span / dt,
-    ];
-    let coefficients = if cubic {
-        let (v0, v1, m0, m1) = (get(a, 1), get(b, 1), dt * get(a, 2), dt * get(b, 0));
-        vec![
-            v0,
-            m0,
-            -3. * v0 + 3. * v1 - 2. * m0 - m1,
-            2. * v0 - 2. * v1 + m0 + m1,
-        ]
-    } else {
-        vec![get(a, 0), get(b, 0) - get(a, 0)]
-    };
-    coefficients.iter().rev().fold(vec![0.], |p, c| {
-        polynomial_add(&polynomial_multiply(&p, &x), &[*c])
-    })
-}
+
 fn blend_sample(base: &mut Sample, value: &Sample, weight: f32, additive: bool) {
     match (base, value) {
         (Sample::Numeric(base), Sample::Numeric(value)) => {
@@ -1703,20 +1504,65 @@ mod camera_cut_tests {
         Ok(())
     }
     #[test]
+    fn numeric_clock_controls_accept_scalar_arrays_tiny_speed_and_cubics() -> Result<()> {
+        for weight in [serde_json::json!(0.5), serde_json::json!([0.5])] {
+            let plan = plan(serde_json::json!([
+                {"tracks":[{"path":["animation","cut","weight"],"keys":[[0,weight]]}]},
+                {"name":"cut","weight":0,"speed":1e-20,"tracks":[{"path":["render","camera"],"keys":[[0,"b"]]}]}
+            ]))?;
+            assert_eq!(plan.camera_at(0.1234567,0),1);
+        }
+        let scene: v2::Scene = vork_scene::v2::from_test_value(serde_json::json!({
+            "version":2,"nodes":[{"type":"camera","name":"a"}],
+            "images":{"clip":{"file":"missing%04d.png"}},
+            "animation":[{"tracks":[{"path":["images","clip","time"],"keys":[[0,0],[1,1]],"interpolation":"CUBICSPLINE"}]}]
+        }))?;
+        scene.validate()?;
+        let plan = Plan::compile(&scene,std::path::Path::new("."))?;
+        let mut samples=plan.samples();
+        let t=0.1234567;
+        plan.sample_into(t,&mut samples);
+        let request=vork_time::Request::Numeric(t).exact()?;
+        let actual=plan.image_time_exact(&samples,&request,"clip",vork_time::Request::Numeric(0.).exact()?)?.numeric()?;
+        assert!((actual-(3.*t*t-2.*t*t*t)).abs()<1e-7);
+        Ok(())
+    }
+    #[test]
     fn camera_cut_shutter_interval_respects_offset_speed_and_loop() -> Result<()> {
         let plan = plan(
             serde_json::json!([{"offset":0.2,"speed":2,"loop":true,"tracks":[{
                 "path":["render","camera"],"interpolation":"STEP","keys":[[0,"a"],[0.4,"b"],[1,"a"]]
             }]}]),
         )?;
-        let (lower, upper) = plan.camera_bounds(0.25);
-        assert!((lower - 0.1).abs() < 1e-6);
-        assert!((upper - 0.4).abs() < 1e-6);
-        assert_eq!(plan.camera_at(upper, 0), 1);
-        assert_eq!(plan.camera_at(upper.next_up(), 0), 0);
-        let (lower, upper) = plan.camera_bounds(0.75);
-        assert!((lower - 0.6).abs() < 1e-6);
-        assert!((upper - 0.9).abs() < 1e-6);
+        for nominal in [0.25_f32,0.75,1.75,100.75] {
+            let point=vork_time::Request::Numeric(nominal).exact()?;
+            for target in [nominal-0.2,nominal+0.2] {
+                let clamped=plan.clamp_camera_request(&point,&vork_time::Request::Numeric(target).exact()?,0)?;
+                assert_eq!(plan.camera_at_request(&vork_time::Request::Exact(clamped),0)?,1);
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn rational_cut_initialization_and_one_sided_history_share_identity()->Result<()> {
+        use vork_time::{Request,Time,exact::{Germ,decimal}};
+        let plan=plan(serde_json::json!([{"tracks":[{"path":["render","camera"],"keys":[[0,"a"],["1/24","b"]]}]}]))?;
+        let cut=Request::Frame(1,Time::integer(24));
+        assert_eq!(plan.start_camera(&v2::Render::default(),&cut).as_deref(),Some("b"));
+        assert_eq!(plan.camera_at_request(&cut,0)?,1);
+        let nominal=Germ::point(decimal("1/48")?);
+        let clamped=plan.clamp_camera_request(&nominal,&Germ::point(decimal("1/12")?),0)?;
+        assert_eq!(clamped,Germ::left(decimal("1/24")?));
+        assert_eq!(Request::Exact(clamped).previous(Time::integer(48))?.exact()?,Germ::left(decimal("1/48")?));
+        Ok(())
+    }
+    #[test]
+    fn returning_to_a_camera_starts_a_distinct_owning_interval()->Result<()> {
+        let plan=plan(serde_json::json!([{"tracks":[{"path":["render","camera"],"keys":[[0,"a"],[0.4,"b"],[0.6,"a"]]}]}]))?;
+        let current=vork_time::exact::Germ::point(vork_time::exact::decimal("3/4")?);
+        let previous=vork_time::exact::Germ::point(vork_time::exact::decimal("1/4")?);
+        assert_eq!(plan.camera_at_request(&vork_time::Request::Exact(current.clone()),0)?,plan.camera_at_request(&vork_time::Request::Exact(previous.clone()),0)?);
+        assert_ne!(plan.clamp_camera_request(&current,&previous,0)?,previous);
         Ok(())
     }
     #[test]
@@ -1725,13 +1571,13 @@ mod camera_cut_tests {
             {"tracks":[{"path":["animation","cut","weight"],"keys":[[0,0,0,4],[1,0,-4,0]],"interpolation":"CUBICSPLINE"}]},
             {"name":"cut","weight":0,"tracks":[{"path":["render","camera"],"keys":[[0,"b"]],"interpolation":"STEP"}]}
         ]))?;
-        let (lower, upper) = plan.camera_bounds(0.5);
-        assert!((lower - (1. - 0.5_f32.sqrt()) * 0.5).abs() < 1e-5);
-        assert!((upper - (1. + 0.5_f32.sqrt()) * 0.5).abs() < 1e-5);
-        assert_eq!(plan.camera_at(lower.next_down(), 0), 0);
-        assert_eq!(plan.camera_at(lower, 0), 1);
-        assert_eq!(plan.camera_at(upper, 0), 1);
-        assert_eq!(plan.camera_at(upper.next_up(), 0), 0);
+        for (nominal,target) in [(0.15_f32,0.14_f32),(0.85,0.86)] {
+            let nominal=vork_time::Request::Numeric(nominal).exact()?;
+            let target=vork_time::Request::Numeric(target).exact()?;
+            let clamped=plan.clamp_camera_request(&nominal,&target,0)?;
+            assert_ne!(clamped,target);
+            assert_eq!(plan.camera_at_request(&vork_time::Request::Exact(clamped),0)?,1);
+        }
         Ok(())
     }
     #[test]
@@ -1973,6 +1819,7 @@ pub(crate) fn fold_material_inputs(scene: &mut v2::Scene, base: &std::path::Path
     }
     for (layer, compiled) in scene.animation.iter_mut().zip(&plan.layers) {
         layer.source_span = compiled.span;
+        layer.source_clock_span = compiled.time_span.as_ref().map(|span|span.endpoints.clone()).unwrap_or_default();
         if let Some(tracks) = &mut layer.tracks {
             tracks.retain(|track| !matches!(track.path.as_slice(), [root, name, inputs, input] if root == "materials" && inputs == "inputs" && folded.contains(&(name.clone(), input.clone()))));
         }
@@ -1981,4 +1828,99 @@ pub(crate) fn fold_material_inputs(scene: &mut v2::Scene, base: &std::path::Path
         .filter_map(|t| match t.path.as_slice() { [root, name, field] if root == "animation" && field == "weight" => Some(name.clone()), _ => None }).collect();
     scene.animation.retain(|layer| layer.clip.is_some() || layer.tracks.as_ref().is_some_and(|t| !t.is_empty()) || layer.name.as_ref().is_some_and(|name| referenced.contains(name)));
     Ok(())
+}
+
+#[cfg(test)]
+mod asset_index_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn asset_index_work_is_independent_of_unrelated_population() -> Result<()> {
+        let mut plan = Plan::default();
+        plan.layers.push(CompiledLayer { source: serde_json::from_value(json!({"tracks":[]}))?, tracks: vec![], span: None, time_span: None });
+        let curve = std::sync::Arc::new(Curve { times: vec![0.,1.], values: vec![0.,0.,0.,1.,2.,3.], width: 3,
+            interpolation: Interpolation::Linear, rotation: false, euler: false });
+        for asset in 0..1024 {
+            plan.add_clip_curve(0, curve.clone(), AssetTarget { asset, node: 0, property: gltf::animation::Property::Translation, component: None });
+        }
+        plan.finish_asset_bindings()?;
+        assert_eq!(plan.asset_bindings.len(),1024);
+        assert!(plan.asset_bindings.iter().all(|bindings|bindings.transforms.len()==1));
+        let mut samples=plan.samples();
+        plan.sample_into(0.5,&mut samples);
+        let mut visits=0;
+        plan.apply_asset(17,&samples,|target,value,_,_| {
+            visits+=1;
+            assert_eq!(target.asset,17);
+            assert_eq!(*value,Sample::Numeric(vec![0.5,1.,1.5]));
+        });
+        assert_eq!(visits,1);
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_assets_match_ordered_scan_across_slots_seeks_and_rebinding() -> Result<()> {
+        let scene: v2::Scene = vork_scene::v2::from_test_value(json!({"version":2,
+            "nodes":[{"type":"asset","name":"a","file":"a.gltf"},{"type":"asset","name":"b","file":"b.gltf"}],
+            "animation":[
+                {"tracks":[{"path":["animation","add","weight"],"keys":[[0,0],[2,1]]}]},
+                {"name":"base","loop":true,"offset":-0.2,"tracks":[
+                    {"path":["nodes","a","nodes","joint","translation"],"keys":[[0,[1,2,3]],[2,[3,4,5]]]},
+                    {"path":["nodes","b","nodes","joint","scale"],"keys":[[0,[1,1,1]],[2,[2,3,4]]]},
+                    {"path":["nodes","a","nodes","joint","visible"],"keys":[[0,false],[1,true]]}]},
+                {"name":"add","blend":"add","weight":0.75,"tracks":[
+                    {"path":["nodes","a","nodes","joint","translation"],"keys":[[0,[0,0,0]],[2,[0,2,0]]]}]}
+            ]}))?;
+        let doc = gltf::Gltf::from_slice(br#"{"asset":{"version":"2.0"},"nodes":[{"name":"joint"}]}"#)?;
+        let mut plan = Plan::compile(&scene, std::path::Path::new("."))?;
+        plan.bind_asset(&doc.document, "a", 0)?;
+        plan.bind_asset(&doc.document, "b", 1)?;
+        // Importing a later asset extends an earlier layer, shifting every
+        // following layer's sample address before the index is finalized.
+        plan.add_clip_curve(1, std::sync::Arc::new(Curve { times: vec![0.,2.], values: vec![1.,1.,1.,2.,2.,2.], width: 3,
+            interpolation: Interpolation::Linear, rotation: false, euler: false }),
+            AssetTarget { asset: 1, node: 0, property: gltf::animation::Property::Scale, component: None });
+        plan.finish_asset_bindings()?;
+        assert_eq!(plan.asset_bindings[0].transforms.len(), 2);
+        assert_eq!(plan.asset_bindings[0].visibility.len(), 1);
+        assert_eq!(plan.asset_bindings[1].transforms.len(), 2);
+        let mut slots = [plan.samples(), plan.samples()];
+        for (slot, time) in [(0,0.),(1,1.25),(0,0.5),(1,0.),(0,1.75),(1,0.5),(0,0.5)] {
+            plan.sample_into(time, &mut slots[slot]);
+            let samples = &slots[slot];
+            for asset in 0..3 {
+                let mut expected = Vec::new();
+                let mut visibility = vec![v2::Visibility::default()];
+                let mut index = 0;
+                for layer in &plan.layers {
+                    let additive = matches!(layer.source.blend,v2::Blend::Add);
+                    for track in &layer.tracks {
+                        for target in &track.asset_targets {
+                            if target.asset == asset && samples.weights[index] != 0. {
+                                expected.push((target.node,target.property,target.component,samples.values[index].clone(),samples.weights[index],additive));
+                            }
+                        }
+                        if track.asset_visibility.is_some_and(|(a,_)| a == asset) && samples.weights[index] >= 0.5 {
+                            let Sample::Bool(value) = samples.values[index] else {unreachable!()};
+                            visibility[0].visible = value;
+                        }
+                        index += 1;
+                    }
+                }
+                let mut actual = Vec::new();
+                plan.apply_asset(asset,samples,|target,value,weight,additive| actual.push((target.node,target.property,target.component,value.clone(),weight,additive)));
+                let mut actual_visibility = vec![v2::Visibility::default()];
+                plan.apply_asset_visibility(asset,samples,&mut actual_visibility);
+                assert_eq!(actual,expected,"asset {asset}, slot {slot}, time {time}");
+                assert_eq!(actual_visibility[0].visible,visibility[0].visible);
+            }
+        }
+        // Re-finishing after binding edits replaces the index rather than appending.
+        plan.layers[1].tracks[0].asset_targets[0].asset = 1;
+        plan.finish_asset_bindings()?;
+        assert_eq!(plan.asset_bindings[0].transforms.len(),1);
+        assert_eq!(plan.asset_bindings[1].transforms.len(),3);
+        Ok(())
+    }
 }

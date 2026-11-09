@@ -9,14 +9,16 @@ import csv
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import shutil
 import struct
-import re
 import subprocess
 import tempfile
 import tomllib
 import zipfile
+
+from runtime_platform import check_runtime_platform
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {
@@ -70,6 +72,22 @@ def main():
             p.error(f'incomplete release tree: missing {name}')
     if json.loads((tree / 'sdk/package.json').read_text())['version'] != version:
         p.error('release SDK version does not match Cargo version')
+    # The native executable owns immutable build identity; a version alone can
+    # describe many different SDK revisions. Resolve abbreviated build SHAs in
+    # this checkout and require the exact commit before combining their bytes.
+    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    try:
+        reported = subprocess.check_output([str(tree / binary), '--version'], text=True)
+        match = re.fullmatch(r'vork ([^ ]+) \(commit ([0-9a-f]{12,40}); API v2\)\s*', reported)
+        if not match or match[1] != version:
+            p.error('native runtime lacks current version and source identity')
+        native_commit = subprocess.check_output(['git', 'rev-parse', '--verify', match[2] + '^{commit}'], cwd=ROOT, text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        p.error(f'cannot verify native runtime source identity: {error}')
+    if native_commit != commit:
+        p.error(f'native source {native_commit} does not match SDK source {commit}')
+    if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no', '--', 'packages/ts', 'packages/python', 'Cargo.toml', 'scripts/package-registries', 'scripts/registry-cli.cjs', 'packages/create-vork'], cwd=ROOT, text=True).strip():
+        p.error('registry packaging requires committed SDK and packaging sources')
     header = (tree / binary).read_bytes()
     if a.platform == 'linux-x64' and not (header[:5] == b'\x7fELF\x02' and struct.unpack_from('<H', header, 18)[0] == 62):
         p.error('expected an x86-64 ELF engine')
@@ -96,29 +114,12 @@ def main():
         if f.is_file():
             runtime[rel.as_posix()] = f
     os_name, cpu, tag, _ = TARGETS[a.platform]
+    try:
+        minimum = check_runtime_platform(runtime.values(), a.platform)
+    except ValueError as error:
+        p.error(str(error))
     if a.platform == 'darwin-arm64':
-        minimum = (11, 0)
-        for source in runtime.values():
-            data = source.read_bytes()
-            if data[:4] != b'\xcf\xfa\xed\xfe':
-                continue
-            offset = 32
-            for _ in range(struct.unpack_from('<I', data, 16)[0]):
-                command, size = struct.unpack_from('<II', data, offset)
-                if command in (0x32, 0x24):  # LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX
-                    value = struct.unpack_from('<I', data, offset + (12 if command == 0x32 else 8))[0]
-                    minimum = max(minimum, (value >> 16, (value >> 8) & 255))
-                if size < 8:
-                    p.error(f'invalid Mach-O load command: {source}')
-                offset += size
         tag = f'macosx_{minimum[0]}_{minimum[1]}_arm64'
-    if a.platform == 'linux-x64':
-        for source in runtime.values():
-            data = source.read_bytes()
-            if data[:4] == b'\x7fELF':
-                versions = [tuple(map(int, v)) for v in re.findall(rb'GLIBC_(\d+)\.(\d+)', data)]
-                if versions and max(versions) > (2, 35):
-                    p.error(f'{source} exceeds the glibc 2.35 baseline: {max(versions)}')
     with tempfile.TemporaryDirectory() as tmp:
         stage = Path(tmp)
         native = stage / 'native'
@@ -140,14 +141,14 @@ def main():
         meta = json.loads((ROOT / 'packages/ts/package.json').read_text())
         for key in ('scripts', 'devDependencies'):
             meta.pop(key, None)
-        (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npx vork init my-shot`. Enter my-shot and run `npx vork render scene.json --profile std/draft --out render.png`, then `npx vork help`. Use `npm create vork my-shot` for project-local engine installation. Run `npx vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+, a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
+        (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npm exec --no --package=@voyager-so/vork -- vork init my-shot`. Follow init\'s printed next steps in my-shot. The default `std/final` first render is warmed by setup; use `--profile std/draft` for quicker previews. Run `npm exec --no --package=@voyager-so/vork -- vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+, a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
         meta.update(description='Native vork renderer, TypeScript SDK and scene schema', version=version, bin={'vork': 'cli.cjs'}, files=['dist', 'cli.cjs', 'LICENSE', 'README.md', 'scene.schema.json'], optionalDependencies={f'@voyager-so/vork-{t}': version for t in TARGETS})
         meta['exports']['./package.json'] = './package.json'
         (main / 'package.json').write_text(json.dumps(meta, indent=2) + '\n')
         subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=main, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         creator = stage / 'creator'
         creator.mkdir()
-        shutil.copy2(ROOT / 'scripts/create-vork.cjs', creator / 'cli.cjs')
+        shutil.copy2(ROOT / 'packages/create-vork/cli.cjs', creator / 'cli.cjs')
         shutil.copy2(ROOT / 'LICENSE', creator / 'LICENSE')
         (creator / 'package.json').write_text(json.dumps(dict(name='create-vork', version=version, description='Create an offline vork rendering project', bin={'create-vork': 'cli.cjs'}, engines={'node': '>=22.18'}, license='SEE LICENSE IN LICENSE', dependencies={'@voyager-so/vork': version}), indent=2) + '\n')
         subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=creator, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

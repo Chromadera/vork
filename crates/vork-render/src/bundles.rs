@@ -18,6 +18,7 @@ pub(crate) struct Recorder<'a> {
     pub camera_instances: Option<&'a wgpu::Buffer>,
     pub compute: Option<&'a wgpu::Buffer>,
     pub s: &'a InstalledScene,
+    pub graph: &'a crate::graph::Graph,
     pub included: Option<&'a [bool]>,
     pub included_objects: Option<&'a [bool]>,
     pub deforms: &'a [Option<EvaluatedGeometry>],
@@ -71,6 +72,7 @@ impl Recorder<'_> {
                 },
                 multiview: None,
             });
+        if !self.graph.draws(kind) || self.included.is_some_and(|draws|!draws.iter().any(|&draw|draw)) {return Ok(b.finish(&wgpu::RenderBundleDescriptor {label:Some(label)}));}
         let caster_filter = if let Kind::Fibre(_, moving) = kind {
             Some(moving)
         } else {

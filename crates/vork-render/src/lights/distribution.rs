@@ -1,38 +1,13 @@
-//! A complete power reduction tree derived from the evaluated shared lights.
-//! Slot zero is unused; leaves start at half the allocation. Shader traversal
-//! uses the same child sums for selection and its returned event probability.
-use super::Light;
+//! Retained spatial proposal derived from the evaluated analytic light buffer.
+use super::{Light, tree::{Tree, Node, analytic_sources}};
 
-pub(crate) fn node_count(lights: usize) -> usize {
-    lights.max(1).next_power_of_two() * 2
-}
+pub(crate) fn node_count(lights: usize) -> usize { lights.saturating_mul(2).saturating_sub(1).max(1) }
 
-pub(crate) fn powers(lights: &[Light]) -> Vec<f32> {
-    let weights: Vec<f64> = lights
-        .iter()
-        .map(|light| {
-            light.radiance[..3]
-                .iter()
-                .zip(crate::constants::LUMINANCE_REC709)
-                .map(|(value, luma)| f64::from(*value) * f64::from(luma))
-                .sum::<f64>()
-                .max(0.)
-        })
-        .collect();
-    // Scaling preserves probabilities and prevents overflow when many bright
-    // emitters are reduced. No emitter properties live in this derived table.
-    let scale = weights.iter().copied().fold(0., f64::max);
-    let mut tree = vec![0.; node_count(lights.len())];
-    let leaves = tree.len() / 2;
-    if scale > 0. {
-        for (leaf, power) in tree[leaves..].iter_mut().zip(weights) {
-            *leaf = (power / scale) as f32;
-        }
-        for node in (1..leaves).rev() {
-            tree[node] = tree[node * 2] + tree[node * 2 + 1];
-        }
-    }
-    tree
+pub(crate) fn nodes(lights: &[Light]) -> anyhow::Result<Vec<Node>> {
+    // path_sampler.sample_unit supplies 23-bit midpoint source coordinates.
+    anyhow::ensure!(lights.len() <= (1 << 23), "analytic light tree exceeds the path sampler source-coordinate capacity");
+    let tree = Tree::build(&analytic_sources(lights))?;
+    Ok(if tree.nodes.is_empty() { vec![bytemuck::Zeroable::zeroed()] } else { tree.nodes })
 }
 
 #[cfg(test)]
@@ -55,9 +30,10 @@ mod tests {
             )
         };
         let lighting = crate::view::ViewLighting {
+            active: true,
             uniform: buffer("unused uniform", 16),
             lights: buffer("shared lights", 2 * std::mem::size_of::<Light>()),
-            path_light_tree: Some(buffer("power distribution", 16)),
+            path_light_tree: Some(buffer("spatial distribution", node_count(2) * std::mem::size_of::<Node>())),
             cluster_config: buffer("unused config", 16),
             cluster_lights: buffer("unused cluster", 4),
             clusters: None,
@@ -83,32 +59,32 @@ mod tests {
             "animated powers left a stale distribution"
         );
         let (_, _, offset, size) = changes.uploads.last().unwrap();
-        let tree: Vec<f32> = changes.bytes[*offset as usize..(*offset + *size) as usize]
-            .chunks_exact(4)
-            .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+        let tree: Vec<Node> = changes.bytes[*offset as usize..(*offset + *size) as usize]
+            .chunks_exact(std::mem::size_of::<Node>())
+            .map(bytemuck::pod_read_unaligned)
             .collect();
-        assert_eq!(tree[2], 1.);
-        assert!((tree[3] - 1. / 3.).abs() < 1e-6);
+        let leaf = |identity| tree.iter().find(|n| n.links[0] == u32::MAX && n.source[1] == identity).unwrap();
+        assert_eq!(leaf(0).lower_power[3], 1.);
+        assert!((leaf(1).lower_power[3] - 1. / 3.).abs() < 1e-6);
+        changes.uploads.clear(); changes.bytes.clear();
+        lights[0].position[0] = 7.;
+        lighting.upload_lights(&mut changes, &lights)?;
+        assert_eq!(changes.uploads.len(), 2, "moving lights left stale spatial bounds");
         Ok(())
     }
 
     #[test]
-    fn reduction_handles_padding_dark_lights_and_bright_animated_values() {
+    fn spatial_nodes_handle_empty_dark_and_hdr_guides() -> anyhow::Result<()> {
+        assert_eq!(nodes(&[])?.len(), node_count(0));
         let mut lights = vec![Light::zeroed(); 5];
-        for (light, power) in lights.iter_mut().zip([0., 1., 2., 0., 5.]) {
-            light.radiance = [power, power, power, 0.];
+        for (i, light) in lights.iter_mut().enumerate() {
+            light.position = [i as f32, 0., 0., 1.];
+            light.radiance = [if i == 0 { f32::MAX } else { 0. }; 4];
         }
-        let tree = powers(&lights);
-        assert_eq!(tree.len(), 16);
-        assert_eq!(&tree[13..], &[0.; 3]);
-        for node in 1..8 {
-            assert_eq!(tree[node], tree[node * 2] + tree[node * 2 + 1]);
-        }
-        assert!((tree[1] - 1.6).abs() < 1e-6);
-        lights[0].radiance = [f32::MAX; 4];
-        assert!(powers(&lights).iter().all(|p| p.is_finite()));
-        lights.fill(Light::zeroed());
-        assert!(powers(&lights).iter().all(|p| *p == 0.));
-        assert_eq!(powers(&[]), vec![0.; 2]);
+        let tree = nodes(&lights)?;
+        assert_eq!(tree.len(), node_count(lights.len()));
+        assert!(tree.iter().all(|n| n.lower_power.iter().chain(n.upper_infinite.iter()).all(|p| p.is_finite())));
+        assert_eq!(tree.iter().filter(|n| n.links[0] == u32::MAX).count(), lights.len());
+        Ok(())
     }
 }

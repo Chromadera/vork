@@ -28,9 +28,10 @@ impl Args {
             let file=options["file"].as_str().ok_or_else(||anyhow::anyhow!("environment file path"))?;
             if vork_render::footage::is_media(std::path::Path::new(file)) {
                 let mut source=vork_render::footage::Source::open(std::path::Path::new(file))?;
-                let fps=options.get("fps").and_then(serde_json::Value::as_f64).unwrap_or(24.) as f32;
+                let fps:vork_scene::Time=serde_json::from_value(options.get("fps").cloned().unwrap_or(24.into()))?;
                 let times=source.timeline(fps)?;
-                vork_std::environment::prepare_frames(&argument,&times,|time|source.frame(time,fps,u32::MAX),read,write)?
+                let inputs=source.files().to_vec();
+                vork_std::environment::prepare_frames(&argument,&inputs,&times,|time|source.frame(time,fps,u32::MAX),read,write)?
             } else {vork_std::environment::prepare(&argument,read,write)?}
         } else {vork_std::evaluate(&self.function,&argument)?};
         output!("{result}");

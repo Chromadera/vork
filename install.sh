@@ -5,9 +5,15 @@
 set -eu
 repo=${VORK_REPO:-voyager-so/vork}
 # Default version is generated from Cargo.toml by scripts/sync-version.
-version=${VERSION:-0.2.0}
+version=${VERSION:-0.3.0}
 default_prefix=$HOME/.local
 prefix=${PREFIX:-"$default_prefix"}
+# POSIX shell literals for copy/paste, including embedded quotes and $/backticks.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
 dry_run=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -18,7 +24,13 @@ while [ "$#" -gt 0 ]; do
 done
 case "$version" in *[!A-Za-z0-9._-]*|'') echo 'Invalid VERSION' >&2; exit 2;; esac
 case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64) platform=darwin-arm64 ;;
+    Darwin-arm64)
+        platform=darwin-arm64
+        macos=$(sw_vers -productVersion 2>/dev/null || true)
+        if ! awk -v v="$macos" 'BEGIN {split(v,a,"."); exit !(a[1] ~ /^[0-9]+$/ && a[1]>=26)}'; then
+            echo "Requires Apple Silicon macOS 26+ because the bundled Slang compiler and libraries target macOS 26; found ${macos:-unknown}. Nothing was downloaded." >&2
+            exit 1
+        fi ;;
     Linux-x86_64)
         platform=linux-x64
         glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
@@ -46,14 +58,22 @@ retired=''
 cleanup() {
     rm -rf "$work"
     if [ -n "$stage" ]; then rm -rf "$stage"; fi
-    if [ -n "$retired" ]; then rm -rf "$retired"; fi
+    if [ -n "$retired" ]; then
+        if [ -e "$retired/vork" ] && [ ! -e "$prefix/lib/vork" ]; then
+            if ! mv "$retired/vork" "$prefix/lib/vork"; then
+                echo "Could not restore the previous install; it is preserved at $retired/vork" >&2
+                return
+            fi
+        fi
+        rm -rf "$retired"
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 fetch() {
-    curl -fL --retry 3 "$base/$1" -o "$work/$1" || {
+    curl -fL --connect-timeout 30 --speed-limit 1024 --speed-time 120 --retry 3 "$base/$1" -o "$work/$1" || {
         echo "Could not download $base/$1" >&2
-        echo "Nothing was installed. Check your connection and that vork $version has this file: https://github.com/$repo/releases" >&2
+        echo "Nothing was installed. Check free space in $work, your connection (downloads stop after 120 seconds below 1 KiB/s), and that vork $version has this file: https://github.com/$repo/releases" >&2
         exit 1
     }
 }
@@ -86,9 +106,24 @@ prefix=$(cd "$prefix" && pwd -P)
 # Build the new tree beside the old one and swap it in whole: files a release dropped
 # do not survive an upgrade, and a failed install leaves the old one working.
 stage=$(mktemp -d "$prefix/lib/.vork-new.XXXXXX")
-tar -xzf "$work/$archive" -C "$stage"
+if ! tar -xzf "$work/$archive" -C "$stage" 2>"$work/extract.log"; then
+    echo "Could not extract vork into $stage; the existing install was not changed." >&2
+    echo "Check free space and write permissions on $prefix (the expanded release must fit beside the existing install). The downloaded archive also occupies space in $work." >&2
+    head -n 8 "$work/extract.log" >&2
+    exit 1
+fi
 chmod 755 "$stage"
-"$stage/vork" --version >/dev/null || { echo "This vork build does not run on this machine; nothing was changed." >&2; exit 1; }
+if "$stage/vork" --version >"$work/version.log" 2>&1; then :
+else
+    status=$?
+    if [ "$status" = 126 ]; then
+        echo "Cannot execute $stage/vork. Check executable permissions and whether $prefix is mounted noexec; choose an executable filesystem with PREFIX. The existing install was not changed." >&2
+    else
+        echo "This vork build could not start (exit $status); check the native error below for missing runtime libraries or platform incompatibility. The existing install was not changed." >&2
+    fi
+    cat "$work/version.log" >&2
+    exit 1
+fi
 if [ -e "$prefix/lib/vork" ]; then
     retired=$(mktemp -d "$prefix/lib/.vork-old.XXXXXX")
     mv "$prefix/lib/vork" "$retired/vork"
@@ -99,7 +134,9 @@ ln -sf "$prefix/lib/vork/vork" "$prefix/bin/vork"
 "$prefix/bin/vork" --version
 
 # Let new shells find vork. Only the default location touches startup files.
-path_line=$(printf 'export PATH="%s/bin:$PATH"' "$prefix")
+quoted_exe=$(shell_quote "$prefix/bin/vork")
+quoted_bin=$(shell_quote "$prefix/bin")
+path_line="export PATH=$quoted_bin:\"\$PATH\""
 path_note=''
 if [ -n "${PREFIX:-}" ] || [ "${VORK_NO_MODIFY_PATH:-}" = 1 ]; then
     case ":$PATH:" in
@@ -138,7 +175,7 @@ $rc_files
 RC_FILES
     if [ -n "$added" ]; then path_note="New shells that read$added find vork. In this shell, or one that reads none of those (such as plain \`bash -c\`), run:
   $path_line
-or call it directly: $prefix/bin/vork"; fi
+or call it directly: $quoted_exe"; fi
     if [ -n "$failed" ]; then path_note="${path_note:+$path_note
 }Could not write$failed. Put this in your shell startup file:
   $path_line"; fi
@@ -147,9 +184,9 @@ fi
 if [ "${VORK_SKIP_SETUP:-}" = 1 ]; then
     echo 'Skipping vork setup (VORK_SKIP_SETUP=1); run `vork setup` before rendering.'
 else
-    echo 'Preparing shaders for this GPU (up to about 3 minutes)...'
+    echo 'Preparing shaders for this GPU; native progress reports the current phase...'
     "$prefix/bin/vork" setup || {
-        echo "vork is installed at $prefix/bin/vork, but setup failed. Follow the report above, then run: $prefix/bin/vork setup" >&2
+        echo "vork is installed at $prefix/bin/vork, but setup failed. Follow the report above, then run: $quoted_exe setup" >&2
         if [ -n "$path_note" ]; then printf '%s\n' "$path_note" >&2; fi
         exit 1
     }

@@ -7,7 +7,9 @@ impl std::fmt::Display for Stdout {
 }
 impl std::error::Error for Stdout {}
 
-pub fn context(error: anyhow::Error) -> anyhow::Error { error.context(Stdout) }
+pub fn context(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<std::io::Error>().is_some() { error.context(Stdout) } else { error }
+}
 pub fn error(error: std::io::Error) -> anyhow::Error { context(error.into()) }
 
 pub fn line(args: std::fmt::Arguments<'_>) -> anyhow::Result<()> {
@@ -21,6 +23,14 @@ pub fn broken_pipe(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_and_usage_failures_are_not_stdout_failures() {
+        for message in ["setup tools failed: Slang", "unknown help topic"] {
+            let error = super::context(anyhow::anyhow!("{message}"));
+            assert_eq!(format!("{error:#}"), message);
+            assert!(!super::broken_pipe(&error));
+        }
+    }
     #[test]
     fn only_stdout_broken_pipes_are_clean_termination() {
         let pipe = || std::io::Error::from(std::io::ErrorKind::BrokenPipe);

@@ -55,6 +55,7 @@ pub(super) fn pass(
     sizes[0] = [w, h, extent[0], extent[1]];
     sizes[1] = [full[0], full[1], source_size[0], source_size[1]];
     for (index, channel) in program.channels.iter().enumerate() {
+        if !program.reads(index as u32+1) {continue;}
         if let Some(name) = channel.strip_prefix("node:") {
             let (_, extent) = nodes.get(name).with_context(|| format!("unknown earlier compositor node {name}"))?;
             sizes[2 + index] = [extent[0], extent[1], 0, 0];
@@ -89,6 +90,7 @@ pub(super) fn pass(
     let colour = "return composite_load(p);";
     for (index, channel) in program.channels.iter().enumerate() {
         let slot = index as u32 + 1;
+        if !program.reads(slot) {continue;}
         let key = if channel.starts_with("aov:") {
             "aov:"
         } else if matches!(channel.as_str(), "motion") {
@@ -131,7 +133,13 @@ pub(super) fn pass(
                 item.visibility=wgpu::ShaderStages::COMPUTE;
                 layout.push(item);bindings.push(entry(binding,wgpu::BindingResource::TextureView(view)));
             }
-            (format!("var {name}:texture_2d<f32>;"),format!("let at=clamp(p,vec2(0),vec2<i32>(textureDimensions({name}))-1);return textureLoad({name},at,0);"),format!("textureDimensions({name})"))
+            // File/video textures carry straight alpha, while render images
+            // and OpenEXR files use associated scene-linear RGBA. Associate each
+            // texel before interpolation, so hidden RGB cannot bleed into edges.
+            let associated=!s.file_images.contains_key(image) || s.scene.images[image].file.as_ref()
+                .is_some_and(|path|Path::new(path).extension().is_some_and(|e|e.eq_ignore_ascii_case("exr")));
+            let result=if associated {"value"} else {"vec4(value.rgb*value.a,value.a)"};
+            (format!("var {name}:texture_2d<f32>;"),format!("let at=clamp(p,vec2(0),vec2<i32>(textureDimensions({name}))-1);let value=textureLoad({name},at,0);return {result};"),format!("textureDimensions({name})"))
         } else if channel.starts_with("aov:") {
             if new {
                 buffer(

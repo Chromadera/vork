@@ -8,7 +8,9 @@ mod output;
 
 mod constants;
 mod init;
+mod gpu_diagnostics;
 mod progress;
+mod setup;
 mod help;
 mod std_command;
 use anyhow::Result;
@@ -33,15 +35,22 @@ struct Args {
 enum Command {
     /// Create a small offline project ready to render.
     Init(init::Args),
-    /// Warm default-profile shaders in this machine's driver cache.
+    /// Warm the init starter at the default profile in this machine's driver cache.
     Setup {
         /// Also warm every bundled program/profile and built-in descriptor.
         #[arg(long)]
         all: bool,
+        /// Check tools without warming shaders; renders compile on demand.
+        #[arg(long, conflicts_with = "all")]
+        skip_warmup: bool,
+        #[arg(long, hide = true)]
+        warmup_worker: bool,
     },
     /// Compile portable release shaders without opening a GPU driver.
     #[command(hide = true)]
-    PrepareReleaseShaders,
+    PrepareReleaseShaders {
+        scenes: Vec<PathBuf>,
+    },
     /// Standard-library JSON fragments.
     Std(std_command::Args),
     /// Topic reference.
@@ -74,7 +83,7 @@ enum Command {
         exr_codec: vork_render::ExrCodec,
         /// Select the still time in seconds; with video, directory/EXR outputs receive one still.
         #[arg(long, conflicts_with_all = ["frame_start", "frame_end"])]
-        at: Option<f32>,
+        at: Option<vork_time::Clock>,
         /// First frame to render (absolute index, inclusive; default the clip's first frame, 0).
         #[arg(long)]
         frame_start: Option<usize>,
@@ -132,12 +141,16 @@ fn run() -> Result<()> {
             start.elapsed().as_secs_f64() * 1000.
         );
     }
-    if matches!(command, Command::PrepareReleaseShaders) {
-        return vork_render::Renderer::prepare_release_shaders();
+    if let Command::PrepareReleaseShaders { scenes } = &command {
+        return vork_render::Renderer::prepare_release_shaders(scenes);
     }
-    if let Command::Setup { all } = &command {
+    if let Command::Setup { all, skip_warmup, warmup_worker } = &command {
+        // Supervise required checks even when warming is skipped. Only time
+        // spent warming shaders may expire successfully.
+        if !warmup_worker { return setup::bounded(*all, *skip_warmup); }
         output!("vork {}", env!("VORK_VERSION"));
         output!("OS: {} ({})", std::env::consts::OS, std::env::consts::ARCH);
+        setup::stage("checking FFmpeg")?;
         match std::process::Command::new("ffmpeg").arg("-version").output() {
             Ok(output) if output.status.success() => {
                 if let Some(version) = String::from_utf8_lossy(&output.stdout).lines().next() {
@@ -147,15 +160,31 @@ fn run() -> Result<()> {
             _ => output!("FFmpeg version: unavailable"),
         }
         let progress = progress::Monitor::start("Setup: opening GPU and checking tools");
+        setup::stage("opening GPU")?;
         let renderer=vork_render::Renderer::new().map_err(|error| {
-            eprintln!("GPU: {error:#}. Install a supported GPU driver; in Docker enable GPU access with --gpus all.");
-            eprintln!("Rendering requires an NVIDIA GPU with Vulkan ray queries, or Apple Silicon. Docker does not provide a GPU on its own. On your own NVIDIA Linux machine, use the Docker runtime: docs/REMOTE-GPU.md. Hosted rendering: details will be added when available. Scene authoring and `vork help` work without a GPU.");
+            // Prefer concrete loader failures to the renderer's generic container hint.
+            let error = match gpu_diagnostics::report() {
+                Some(problems) => anyhow::anyhow!("GPU initialization failed. {problems}"),
+                None => error,
+            };
+            eprintln!("GPU: {error:#}");
+            eprintln!("Rendering requires hardware Vulkan ray queries and storage buffer arrays, or Apple Silicon Metal. A container needs host graphics-driver libraries and device access; Docker does not provide a GPU on its own. On your own NVIDIA Linux machine, use the Docker runtime: docs/REMOTE-GPU.md. Scene authoring and `vork help` work without a GPU.");
             error.context(vork_render::failure::FailureKind::Device)
         })?;
         let device_s = start.elapsed().as_secs_f64();
         let tools_start = std::time::Instant::now();
-        renderer.setup_report(&mut std::io::stdout().lock()).map_err(output::context)?;
+        setup::stage("checking tools")?;
+        renderer.setup_report(&mut std::io::stdout().lock()).map_err(|error| {
+            if error.downcast_ref::<std::io::Error>().is_some() { output::context(error) }
+            else { error.context(vork_render::failure::FailureKind::Setup) }
+        })?;
         let tools_s = tools_start.elapsed().as_secs_f64();
+        if *skip_warmup {
+            progress.finish();
+            output!("Shader warmup skipped; rendering will compile pipelines on demand.");
+            return Ok(());
+        }
+        setup::stage("warming shaders")?;
         let warm_start = std::time::Instant::now();
         vork_slang::progress::phase("Setup: warming shaders and driver pipelines", 0);
         if *all { renderer.warm_shaders()?; } else { renderer.warm_startup_shaders()?; }
@@ -230,17 +259,7 @@ fn run() -> Result<()> {
     // and reclaims resources without driver teardown. Errors still unwind.
     std::io::stdout().flush().map_err(output::error)?;
     std::io::stderr().flush()?;
-    // libc exit runs driver atexit hooks: CUDA/NVENC can block there when its
-    // finished GPU owners are intentionally kept alive. Files and Rust streams are
-    // already complete, so let the OS reclaim process resources directly.
-    #[cfg(unix)]
-    // SAFETY: successful completion has joined writers, reaped muxers and flushed
-    // output. No Rust or C user-space cleanup is needed to finish any output.
-    unsafe {
-        libc::_exit(0)
-    }
-    #[cfg(not(unix))]
-    std::process::exit(0)
+    rendered.exit_process()
 }
 
 /// Parse values only after resolving their writable schema field.
@@ -466,7 +485,7 @@ mod help_tests {
         assert!(!help::REFERENCE.lines().any(|line| line.starts_with("hair.")));
         let help = include_str!("../../../libraries/std/HELP.txt");
         assert!(help.contains("std/hair:"));
-        assert!(help.contains("parametrization color|melanin|absorption"));
+        assert!(help.contains("vork help field std/hair"));
     }
 
     #[test]

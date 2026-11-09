@@ -16,7 +16,6 @@ COPY bundle/ /opt/vork/
 COPY entrypoint.sh /usr/local/bin/vork-container
 COPY runner.py /opt/vork/remote-runner.py
 ENV PATH=/opt/vork:/opt/ffmpeg/bin:$PATH LD_LIBRARY_PATH=/opt/ffmpeg/lib \
-    VORK_SLANGC=/opt/vork/slang/bin/slangc VORK_OIDN=/opt/vork/oidn/lib/libOpenImageDenoise.so.2 \
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility,video
 WORKDIR /job
 ENTRYPOINT ["/usr/local/bin/vork-container"]

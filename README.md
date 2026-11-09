@@ -48,7 +48,7 @@ After [installing vork](#install), create a working project:
 ```sh
 vork init my-shot
 cd my-shot
-vork render scene.json --profile std/draft --out render.png
+vork render scene.json --out render.png
 vork help
 ```
 
@@ -57,14 +57,7 @@ again. The starter uses only bundled sphere, box and grid primitives: no downloa
 no GPU needed to initialize. Use `vork init my-shot --language typescript` or
 `--language python` for editable `scene.ts` or `scene.py` alongside the ready-to-render
 JSON. The generated README explains regeneration and SDK requirements. Existing
-files are never overwritten. Use `--profile std/final` for a cleaner image.
-
-With the candidate npm packages (not yet published), `npm create vork my-shot`
-creates the same project and installs its matching native engine and TypeScript SDK
-from npm's cache, without network access during initialization. Then use
-`npx vork render scene.json --profile std/draft --out render.png` and `npx vork help`
-in the new directory. Pass `-- --language typescript` or `-- --language python`
-to select source authoring. Python source needs the Python SDK as well.
+files are never overwritten. The default `std/final` profile is warmed by setup; use `--profile std/draft` for quicker previews.
 
 ## What you can make
 
@@ -169,7 +162,6 @@ initial impulse and limited secondary spray.
 Rendering requires Apple Silicon or an NVIDIA GPU with Vulkan ray queries.
 Scene authoring and `vork help` work without a GPU. On your own NVIDIA Linux
 machine, you can use the [Docker runtime](docs/REMOTE-GPU.md).
-Hosted rendering: details will be added here when available.
 
 ## Give it to an agent
 
@@ -365,13 +357,20 @@ runner uses previs/final with a full-resolution warmup, not the recorded draft4
 workflow. The final8/draft4 tables use build `81ae2b075`; preview and path results
 come from earlier freezes, as noted beside those tables.
 
-The Blender helper currently fails during camera preparation on Blender 5.2.1.
-Independent reproduction of the comparisons is not working. The commands above
-are supplied for inspection; see [the method](benchmarks/README.md).
+The Blender helper has been checked for preparation of all ten scenes on Blender
+5.2.1. The historical GPU timing comparisons have not been rerun with this repair;
+see [the method](benchmarks/README.md).
 
 ## Research-preview limits
 
-Fog and participating volumes are ignored with warnings in this release. Large scenes
+Participating media (fog, haze, smoke and volumes) are unsupported in 0.3.
+Used medium bindings and volume topology are refused; removed programs such as
+`std/fog` fail lookup even in unused definitions. Bake an image plate and composite
+it, or render the medium externally. For a deliberately dry alternative, remove
+medium-only nodes, bindings and definitions while preserving shared surfaces.
+See `vork help upgrade` and `vork help limits`.
+
+Large scenes
 and dense transparency can fail, including on Mac; reducing image resolution
 alone does not necessarily fix them. Some heavy interiors work with `std/path`
 when the default hybrid profile fails. First use of a new program can involve
@@ -389,21 +388,31 @@ unresolved thin features and no two-way rigid-body coupling. It is not a general
 replacement for a mature simulation package. The VFX camera solve and single-view
 relief are estimates, with limitations documented beside the example.
 
-The next direction is fog and volumes, broader simulation, and better reliability
-and performance on demanding scenes. There is no release date promised for those
-features. Read `vork help limits` before committing to a shot.
+Fog returns in 0.4 with a design independent of pause/resume. Broader simulation,
+reliability and performance on demanding scenes remain future directions, without
+promised release dates. Read `vork help limits` before committing to a shot.
 
 ## Install
 
 Upgrading scenes or scripts? Run `vork help upgrade` ([upgrade guide](docs/help/upgrade.md)).
 
 Binary packages are available from [GitHub Releases](https://github.com/voyager-so/vork/releases)
-once a release is published. Keep the entire install folder together: Slang, OIDN,
+for Linux, Windows and Mac. Keep the entire install folder together: Slang, OIDN,
 libraries, examples, SDKs and licence texts are runtime companions to the binary.
 
 - **Linux:** x64, glibc 2.35+ and libstdc++ with `GLIBCXX_3.4.30` (Ubuntu 22.04+), a recent NVIDIA GPU and its hardware-ray-tracing Vulkan driver.
 - **Windows:** x64 Windows 10/11, a recent NVIDIA GPU and its hardware-ray-tracing Vulkan driver.
 - **Mac:** Apple Silicon with Metal, macOS 26 for the bundled Slang toolchain. Older macOS versions are unqualified. Intel Macs are unsupported. H.264 uses system VideoToolbox.
+
+For TypeScript authoring, install **Node 22.18+** (with npm) from
+[nodejs.org](https://nodejs.org/en/download). For Python authoring, install
+**Python 3.11+** from [python.org](https://www.python.org/downloads/) or your
+platform's package manager. These runtimes are not bundled and are not needed
+for JSON scenes. Ubuntu 22.04's default Python 3.10 and Node packages are too old.
+On Ubuntu, install `python3-venv` for the distribution's Python, or the matching
+versioned venv package for your chosen Python (for example `python3.12-venv`).
+Use that Python 3.11+ executable in the commands below. Minimal Linux images
+also need `xz-utils` to unpack Node's `.tar.xz` download.
 
 ### Linux
 
@@ -433,25 +442,14 @@ readback fallback. Older GPUs and software Vulkan adapters are unsupported.
 A100, H100, H200, B200 and B300 lack the required hardware ray tracing; recency
 alone does not make a NVIDIA GPU suitable. Containers also need working NVIDIA
 Vulkan driver discovery; passing through a GPU alone may not be sufficient.
+If `nvidia-smi` works but Vulkan sees only llvmpipe, check the NVIDIA ICD JSON
+in `/etc/vulkan/icd.d` or `/usr/share/vulkan/icd.d`: its library may fail to load
+in a headless container. See [Vulkan driver discovery](docs/REMOTE-GPU.md#vulkan-driver-discovery).
 
 ### Mac
 
-The released 0.1.0 archive has these Mach-O `LC_BUILD_VERSION` minimums:
-
-| Binary | macOS minimum |
-|---|---:|
-| `vork` | 11.0 |
-| `slang/bin/slangc` | 26.0 |
-| `slang/lib/libslang-compiler.0.2026.20.dylib` | 26.0 |
-| `slang/lib/libslang-glsl-module-2026.20.dylib` | 26.0 |
-| `oidn/lib/libOpenImageDenoise.2.5.1.dylib` | 11.0 |
-| `oidn/lib/libOpenImageDenoise_core.2.5.1.dylib` | 11.0 |
-| `oidn/lib/libOpenImageDenoise_device_cpu.2.5.1.dylib` | 11.0 |
-| `oidn/lib/libOpenImageDenoise_device_metal.2.5.1.dylib` | 11.0 |
-| `oidn/lib/libtbb.12.19.dylib` | 11.0 |
-
-These are archive load-command targets, not tests on older macOS versions.
-A successful `vork --version` does not test Slang; new authored programs need it.
+The bundled Slang compiler requires macOS 26. Older macOS versions have not been
+qualified; a successful `vork --version` alone does not test Slang.
 
 In Terminal:
 
@@ -487,7 +485,7 @@ vork --version
 vork help
 ```
 
-The installer itself runs in your user account without root.
+The installer itself runs in your user account without administrator rights.
 
 The installer verifies SHA256SUMS, installs under `%LOCALAPPDATA%\Programs\vork`,
 runs `vork setup`, and adds that folder to your user PATH so new windows find `vork`;
@@ -503,14 +501,14 @@ Download the Windows `.zip` and `SHA256SUMS` from the release page. Compare
 `Get-FileHash .\vork-*-windows-x64.zip -Algorithm SHA256` with its entry in
 `SHA256SUMS`, then unzip the entire contents into `%LOCALAPPDATA%\Programs\vork`.
 Add that folder to your user PATH, open a new PowerShell window, and run
-`vork setup`. It prints its report right away, then reports compilation progress until
-`Shader setup completed`. Setup can take several minutes. Keep all bundled
+`vork setup`. It prints the tools/GPU report and current phase; completion is marked
+by `Shader setup completed`. Time depends on the GPU, driver and cache. Keep all bundled
 runtime companions beside the executable.
+
+### Manual archive install (Linux or Mac)
 
 The separately downloadable `install.sh` downloads the release from GitHub; to install an archive you already
 have without downloading again, use the manual steps below.
-
-### Manual archive install (Linux or Mac)
 
 Download your platform's `.tar.gz` and `SHA256SUMS` from the release page into a
 new empty folder. In that folder, verify and install the entire archive:
@@ -537,8 +535,8 @@ vork --version
 vork setup
 ```
 
-`vork setup` prints its report right away, then reports compilation progress until
-`Shader setup completed`. Setup can take several minutes.
+`vork setup` prints the tools/GPU report and current phase. `Shader setup completed`
+marks success; time depends on the GPU, driver and cache.
 
 ### npm and pip installation candidate
 
@@ -583,27 +581,46 @@ vork render model.json --profile std/final --out model.png
 Adjust the camera and light for your model's scale. glTF files can refer to
 textures and buffers beside them; keep those files together.
 
-Run `vork setup` again after upgrading or changing GPU drivers. It prints its report
-right away, then reports compilation progress until `Shader setup completed`.
-Setup can take several minutes. Vulkan persists
+Setup warms the `vork init` starter at the default `std/final` profile on your GPU, with a
+ten-minute limit. Use `vork setup --skip-warmup` to check tools only. You can
+interrupt setup safely: completed cache entries survive and remaining pipelines
+compile when needed. Run setup again to continue, or use `vork setup --all` for
+the exhaustive catalogue without the time limit. Device cache blobs are never
+included in the download.
+
+Run `vork setup` again after upgrading or changing GPU drivers. It prints the
+tools/GPU report and current phase until `Shader setup completed`; time depends on
+the GPU, driver and cache. Vulkan persists
 its pipeline cache when supported; Metal warms the system driver cache. New scene
 programs can still require compilation on their first render. `VORK_CACHE_DIR`
 overrides the cache location.
 
-The archive includes Python 3.11+ and TypeScript SDK source/packages. Install the
+The archive includes Python and TypeScript SDK source/packages, but not their runtimes. Install the
 Python SDK into your authoring virtual environment, and the TypeScript SDK into
-your project (Node 22.18+ and npm):
+your project. TypeScript requires Node 22.18+ and npm. On older Node, upgrade
+(recommended), or run `node --experimental-strip-types scene.ts` instead of `node scene.ts`:
 
 ```sh
-python3 -m pip install "$HOME/.local/lib/vork/python"
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install "$HOME/.local/lib/vork/python"
 npm install "$HOME/.local/lib/vork/sdk"
 ```
 
 The SDKs install from your vork folder, not from npm or PyPI. The npm package named
 `vork` is unrelated, and the PyPI package only points back here.
 
-On Windows use `py -m pip install "$env:LOCALAPPDATA\Programs\vork\python"` and
-`npm install "$env:LOCALAPPDATA\Programs\vork\sdk"`. Import as `vork` in Python or
+On Windows (PowerShell):
+
+```powershell
+py -m venv .venv
+.venv\Scripts\python -m pip install "$env:LOCALAPPDATA\Programs\vork\python"
+npm install "$env:LOCALAPPDATA\Programs\vork\sdk"
+```
+
+Use `.venv\Scripts\python scene.py` to run Python source on Windows.
+For a custom install, replace the default SDK paths above with your install folder.
+Import as `vork` in Python or
 `@voyager-so/vork` in TypeScript; keep the native executable on PATH.
 For source builds, see [`vork help build`](docs/help/build.md).
 

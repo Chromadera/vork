@@ -1,5 +1,6 @@
 //! Light records, distributions and per-frame light evaluation.
 pub(crate) mod distribution;
+pub(crate) mod tree;
 use super::*;
 pub(crate) mod links;
 
@@ -511,7 +512,7 @@ pub(crate) fn object_visibility_mask(v: &::vork_scene::v2::Visibility) -> u32 {
 /// or raster ray-refraction objects. Light transmission masks remain reserved.
 pub(crate) fn validate_visibility(scene: &::vork_scene::v2::Scene) -> Result<()> {
     use ::vork_scene::v2::{NodeKind, Visibility};
-    if scene.media_disabled {
+    if scene.delivery {
         fn ignored(nodes:&[::vork_scene::v2::Node], inherited:bool) {
             for node in nodes {
                 let transmission=inherited && node.visibility.transmission;

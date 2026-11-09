@@ -1,5 +1,6 @@
 //! Test-only shot driver. Provider overrides never enter production profile parsing.
 use anyhow::{Context, Result, bail};
+use std::io::Write;
 use vork_render::shot::Shot;
 fn main() {
     if let Err(error) = run() {
@@ -52,6 +53,8 @@ fn run() -> Result<()> {
     }
     anyhow::ensure!(!shot.scene.as_os_str().is_empty(), "scene is required");
     let rendered = shot.render()?;
-    println!("{}", rendered.report);
-    Ok(())
+    writeln!(std::io::stdout().lock(), "{}", rendered.report)?;
+    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
+    rendered.exit_process()
 }

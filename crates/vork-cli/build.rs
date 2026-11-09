@@ -8,60 +8,74 @@ fn program_input_help() {
         context: Abi::spec_context(),
         closure: vork_slang::openpbr_fields(),
     };
-    let path = Path::new("../../libraries/std/camera.slang");
-    println!("cargo:rerun-if-changed={}", path.display());
+    let compiler = Compiler::discover();
     println!("cargo:rerun-if-env-changed=VORK_SLANGC");
-    let source = std::fs::read_to_string(path).expect("std/camera source");
-    let camera = Compiler::discover()
-        .compile_camera(&abi, &source, path, "helpcamera")
-        .expect("reflect std/camera inputs");
     let mut text = String::new();
-    for field in camera.inputs.fields {
-        // Read initializers from the bundled source rather than duplicating camera defaults.
-        let initializer = source.lines().find_map(|line| {
-            let (declaration, value) = line.split_once('=')?;
-            (declaration.split_whitespace().last()? == field.name)
-                .then(|| value.split_once(';').expect("camera input initializer").0.trim())
-        }).expect("bundled camera input has an initializer");
-        let default = if field.enumeration.is_some() {
-            initializer.rsplit('.').next().unwrap().to_ascii_lowercase()
-        } else if let vork_slang::Type::Vector(n) = field.ty {
-            let value = initializer.split_once('(').expect("camera vector initializer").1.trim_end_matches(')');
-            let value: f64 = value.parse().expect("camera vector splat");
-            format!("[{}]", vec![value.to_string(); n as usize].join(","))
-        } else if matches!(field.ty, vork_slang::Type::Float) {
-            initializer.parse::<f64>().expect("camera numeric initializer").to_string()
-        } else { initializer.to_owned() };
-        let units = match field.name.as_str() {
-            "lens" | "sensor_width" | "sensor_height" => "; mm",
-            "ortho_scale" | "clip_start" | "clip_end" | "focus_distance" => "; metres",
-            "aperture_rotation" => "; radians",
-            _ => "",
+    for program in ["camera", "hair", "sky"] {
+        let filename = format!("../../libraries/std/{program}.slang");
+        let path = Path::new(&filename);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = std::fs::read_to_string(path).expect("bundled program source");
+        let inputs = match program {
+            "camera" => compiler.compile_camera(&abi, &source, path, "helpcamera").expect("reflect camera").inputs,
+            "hair" => compiler.compile_surface(&abi, &source, path, "helphair").expect("reflect hair").inputs,
+            "sky" => compiler.compile_environment(&abi, &source, path, "helpsky").expect("reflect sky").inputs,
+            _ => unreachable!(),
         };
-        if let Some(enumeration) = field.enumeration {
-            let tokens = enumeration
-                .cases
-                .iter()
-                .map(|case| case.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("|");
-            writeln!(
-                text,
-                "std/camera.{}: enum {tokens}; {} (JSON tokens); default {default}.",
-                field.name, enumeration.ty
-            )
-            .unwrap();
-        } else {
-            let ty = match field.ty {
-                vork_slang::Type::Float => "number".to_owned(),
-                vork_slang::Type::Uint => "uint".to_owned(),
-                vork_slang::Type::Bool => "bool".to_owned(),
-                vork_slang::Type::Vector(n) => format!("vec{n}"),
-                ty => format!("{ty:?}"),
+        let declarations = source.split_once("struct Inputs {").unwrap().1.split_once("};").unwrap().0;
+        for field in inputs.fields {
+            // Read initializers from the bundled source rather than duplicating defaults.
+            let initializer = declarations.lines().find_map(|line| {
+                let (declaration, value) = line.split_once('=')?;
+                (declaration.split_whitespace().last()? == field.name)
+                    .then(|| value.split_once(';').expect("bundled input initializer").0.trim())
+            }).expect("bundled input has an initializer");
+            let default = if field.enumeration.is_some() {
+                initializer.split("::").last().unwrap().rsplit('.').next().unwrap().to_ascii_lowercase()
+            } else if let vork_slang::Type::Vector(n) = field.ty {
+                let value = initializer.split_once('(').expect("vector initializer").1.trim_end_matches(')');
+                let mut values = value.split(',').map(|v| v.trim().parse::<f64>().expect("numeric vector initializer").to_string()).collect::<Vec<_>>();
+                if values.len() == 1 { values.resize(n as usize, values[0].clone()); }
+                assert_eq!(values.len(), n as usize);
+                format!("[{}]", values.join(","))
+            } else if matches!(field.ty, vork_slang::Type::Float) {
+                initializer.parse::<f64>().expect("numeric initializer").to_string()
+            } else { initializer.to_owned() };
+            let units = match field.name.as_str() {
+                "lens" | "sensor_width" | "sensor_height" => "; mm",
+                "ortho_scale" | "clip_start" | "clip_end" | "focus_distance" => "; metres",
+                "aperture_rotation" | "sun_elevation" | "sun_rotation" | "offset" => "; radians",
+                "altitude" => "; metres",
+                _ => "",
             };
-            writeln!(text, "std/camera.{}: {ty}{units}; default {default}.", field.name).unwrap();
+            let range = field.range.as_ref().map_or_else(|| "no declared range".to_owned(), |r|
+                format!("range {}{},{}{}", if r.min_closed { '[' } else { '(' }, r.min, r.max, if r.max_closed { ']' } else { ')' }));
+            if let Some(enumeration) = field.enumeration {
+                let tokens = enumeration
+                    .cases
+                    .iter()
+                    .map(|case| case.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("|");
+                writeln!(
+                    text,
+                    "std/{program}.{}: enum {tokens}; {} (JSON tokens); default {default}; {range}.",
+                    field.name, enumeration.ty
+                )
+                .unwrap();
+            } else {
+                let ty = match field.ty {
+                    vork_slang::Type::Float => "number".to_owned(),
+                    vork_slang::Type::Uint => "uint".to_owned(),
+                    vork_slang::Type::Bool => "bool".to_owned(),
+                    vork_slang::Type::Vector(n) => format!("vec{n}"),
+                    ty => format!("{ty:?}"),
+                };
+                writeln!(text, "std/{program}.{}: {ty}{units}; default {default}; {range}.", field.name).unwrap();
+            }
         }
     }
+    text.push_str(&vork_std::text_input_help());
     std::fs::write(
         Path::new(&std::env::var("OUT_DIR").unwrap()).join("program-inputs.txt"),
         text,

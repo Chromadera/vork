@@ -5,6 +5,8 @@ pub struct Layer {
     /// Retained source span after install-time constant folding; never authored.
     #[serde(skip)]
     pub source_span: Option<(f32, f32)>,
+    #[serde(skip)]
+    pub source_clock_span: Vec<vork_time::Clock>,
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "animation.layer.name", "x-help" = "string|null"))]
     pub name: Option<String>,
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "animation.layer.tracks", "x-help" = "track[]|null; XOR clip"))]
@@ -93,14 +95,18 @@ impl TryFrom<AuthoredTrack> for Track {
                 t.interpolation.unwrap_or_default()),
             Keys::Inline(keys) => {
                 // Names and switches hold until the next key: STEP is the only meaning.
-                let discrete = keys.first().and_then(|k| k.get(1)).is_some_and(|v| v.is_string() || v.is_boolean());
+                let clock_value=matches!(t.path.as_slice(),[root,_,field] if root=="images" && field=="time");
+                let discrete = !clock_value && keys.first().and_then(|k| k.get(1)).is_some_and(|v| v.is_string() || v.is_boolean());
                 let interpolation = t.interpolation.unwrap_or(if discrete { Interpolation::Step } else { Interpolation::Linear });
                 let cubic = matches!(interpolation, Interpolation::Cubic);
                 let mut times = Vec::with_capacity(keys.len());
                 let mut values = Vec::with_capacity(keys.len() * if cubic { 3 } else { 1 });
                 for (i, key) in keys.iter().enumerate() {
-                    let time = key.first().and_then(serde_json::Value::as_f64)
-                        .ok_or_else(|| format!("track {path}: key {i}: expected [time, value], time a number"))?;
+                    let time = key.first().ok_or_else(||format!("track {path}: key {i}: expected [time, value]"))?;
+                    let time=if let Some(number)=time.as_f64() {number as f32} else {
+                        serde_json::from_value::<vork_time::Clock>(time.clone())
+                            .map_err(|e|format!("track {path}: key {i}: expected [time, value]: {e}"))?.as_f32()
+                    };
                     match (cubic, key.len()) {
                         (_, 2) if !cubic => values.push(key[1].clone()),
                         (true, 2) => {
@@ -111,7 +117,7 @@ impl TryFrom<AuthoredTrack> for Track {
                         _ => return Err(format!("track {path}: key {i}: expected [time, value]{}",
                             if cubic { " or [time, value, in_tangent, out_tangent]" } else { "" })),
                     }
-                    times.push(time as f32);
+                    times.push(time);
                 }
                 (Times::Inline(times), Values::Inline(values), interpolation)
             }
@@ -185,4 +191,22 @@ mod key_tests {
         assert!(matches!(names.interpolation, Interpolation::Step), "names and switches default to STEP");
         assert!(track(serde_json::json!({"path":["nodes","a","translation"],"times":[0],"values":[[0,0,0]]})).is_err());
     }
+}
+
+#[cfg(test)]
+mod output_rate_tests {
+    use super::*;
+    #[test]
+    fn output_rate_decoding_preserves_numeric_inputs() -> anyhow::Result<()> {
+        let scene: Scene = serde_json::from_str(r#"{"version":2,"render":{"fps":29.970000000000001,"background":[0.1,0.2,0.3],"compositor":[{"material":"m","resolution":0.5}]},"materials":{"m":{"inputs":{"base_weight":0.1,"base_color":[0.125,0.25,0.5]}}},"nodes":[{"type":"camera","translation":[0.001,0.2,0.3],"scale":[0.001,0.001,0.001],"rotation":{"euler":[0.01,0.02,0.03]},"target":[0.1,0.2,0.3]},{"type":"light","shape":"sun","energy":1e-3,"angle":1e-5}]}"#)?;
+        assert_eq!(scene.render.fps, "29.970000000000001".parse()?);
+        assert_ne!(scene.render.fps, "29.97".parse()?);
+        assert_eq!(scene.nodes[0].transform.translation, [0.001,0.2,0.3]);
+        assert_eq!(scene.nodes[0].transform.scale, [0.001;3]);
+        assert!(scene.nodes[0].transform.resolved_rotation().iter().all(|v|v.is_finite()));
+        assert_eq!(scene.materials["m"].inputs["base_weight"], Input::Number(0.1));
+        assert_eq!(scene.materials["m"].inputs["base_color"], Input::Vector(vec![0.125,0.25,0.5]));
+        Ok(())
+    }
+
 }

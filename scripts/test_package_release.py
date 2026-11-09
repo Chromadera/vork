@@ -12,6 +12,8 @@ import unittest
 import sys
 from blake3 import blake3
 from shader_bundle import export, package
+from runtime_platform import check_runtime_platform
+import struct
 
 PAYLOAD = b"compiled shader fixture"
 ENVELOPE = blake3(PAYLOAD).digest() + PAYLOAD
@@ -20,6 +22,67 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackageReleaseTests(unittest.TestCase):
+    def test_complete_runtime_must_fit_advertised_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = root / 'vork'; companion = root / 'compiler'
+            engine.write_bytes(b'\x7fELF GLIBC_2.34')
+            companion.write_bytes(b'\x7fELF GLIBC_2.35')
+            self.assertEqual(check_runtime_platform([engine, companion], 'linux-x64'), (2, 35))
+            companion.write_bytes(b'\x7fELF GLIBC_2.39')
+            with self.assertRaisesRegex(ValueError, 'compiler requires glibc 2.39'):
+                check_runtime_platform([engine, companion], 'linux-x64')
+            def macho(major):
+                header = bytearray(32)
+                struct.pack_into('<I', header, 0, 0xfeedfacf)
+                struct.pack_into('<I', header, 16, 1)
+                return header + struct.pack('<IIIIII', 0x32, 24, 1, major << 16, 0, 0)
+            engine.write_bytes(macho(11)); companion.write_bytes(macho(26))
+            self.assertEqual(check_runtime_platform([engine, companion], 'darwin-arm64'), (26, 0))
+            companion.write_bytes(macho(27))
+            with self.assertRaisesRegex(ValueError, 'compiler requires macOS 27.0'):
+                check_runtime_platform([engine, companion], 'darwin-arm64')
+
+    def test_universal_runtime_checks_every_slice(self):
+        def macho(major, cpu):
+            return struct.pack('<IIIIIIII', 0xfeedfacf, cpu, 0, 6, 1, 24, 0, 0) + struct.pack('<IIIIII', 0x32, 24, 1, major << 16, 0, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            companion = Path(tmp) / 'universal.dylib'
+            for endian in ('>', '<'):
+                for wide in (False, True):
+                    fields = 'IIQQII' if wide else 'IIIII'
+                    magic = 0xcafebabf if wide else 0xcafebabe
+                    for floor in (26, 27):
+                        # Put the arm64 slice second, after a valid x86_64 slice.
+                        slices = [(0x1000007, macho(11, 0x1000007)), (0x100000c, macho(floor, 0x100000c))]
+                        offset = 4096
+                        directory = bytearray(struct.pack(endian + 'II', magic, 2))
+                        payload = bytearray()
+                        for cpu, data in slices:
+                            entry = (cpu, 0, offset, len(data), 12) + ((0,) if wide else ())
+                            directory.extend(struct.pack(endian + fields, *entry))
+                            payload.extend(data.ljust(4096, b'\0'))
+                            offset += 4096
+                        data = directory.ljust(4096, b'\0') + payload
+                        companion.write_bytes(data)
+                        with self.subTest(endian=endian, wide=wide, floor=floor):
+                            if floor == 26:
+                                self.assertEqual(check_runtime_platform([companion], 'darwin-arm64'), (26, 0))
+                            else:
+                                with self.assertRaisesRegex(ValueError, 'requires macOS 27.0'):
+                                    check_runtime_platform([companion], 'darwin-arm64')
+                        # Truncating the file inside the second slice must not
+                        # let a valid first slice qualify the package.
+                        companion.write_bytes(data[:8193])
+                        with self.assertRaisesRegex(ValueError, 'invalid universal Mach-O slice'):
+                            check_runtime_platform([companion], 'darwin-arm64')
+            for data in (b'\xca\xfe\xba\xbe', struct.pack('>II', 0xcafebabe, 0),
+                         struct.pack('>II', 0xcafebabe, 0xffffffff), b'\xfe\xed\xfa\xcf'):
+                companion.write_bytes(data)
+                with self.assertRaisesRegex(ValueError, 'Mach-O'):
+                    check_runtime_platform([companion], 'darwin-arm64')
+
     def test_shader_bundle_excludes_device_artifacts_and_checks_binary(self):
         with tempfile.TemporaryDirectory(prefix='vork-shader-package-') as tmp:
             root = Path(tmp)
@@ -69,7 +132,8 @@ class PackageReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='vork-prepare-test-') as tmp:
             root = Path(tmp)
             binary = root / 'vork'
-            binary.write_text('#!/bin/sh\ntest \"$1\" = prepare-release-shaders\n')
+            binary.write_text(f'#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n'
+                              'Path(__file__).with_suffix(".args").write_text(json.dumps(sys.argv[1:]))\n')
             binary.chmod(0o755)
             cache = root / 'cache'
             cache.mkdir()
@@ -79,6 +143,14 @@ class PackageReleaseTests(unittest.TestCase):
                             '--binary', str(binary), '--cache', str(cache),
                             '--output', str(root / 'shaders')], check=True)
             self.assertTrue((root / 'shaders' / shader).is_file())
+            command, *scenes = json.loads(binary.with_suffix('.args').read_text())
+            self.assertEqual(command, 'prepare-release-shaders')
+            self.assertIn(str(ROOT / 'crates/vork-scene/src/starter.json'), scenes)
+            if (ROOT / 'scenes').is_dir():
+                self.assertTrue({ROOT / 'examples/orbit.json', ROOT / 'examples/jitter-aa.json'}
+                                .issubset(map(Path, scenes)))
+            for scene in scenes:
+                self.assertIn('nodes', json.loads(Path(scene).read_text()))
 
     def test_filmic_ships_beside_executable(self):
         with tempfile.TemporaryDirectory(prefix='vork-package-test-') as tmp:

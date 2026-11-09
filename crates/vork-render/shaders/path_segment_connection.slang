@@ -34,7 +34,7 @@ float3 segment_connection<V:IVariant,P:IProgram>(float3 origin,float3 direction,
             throughput*=transfer;
         }
         let limit=pending;
-        let hit=trace<P>(origin,direction,limit,event);
+        let hit=trace<V,P>(origin,direction,limit,event);
         let stop=hit.t>=0. ? hit.t : limit;
         throughput*=straight_participating_transmittance(origin,direction,stop,rng)*segment_attenuation(optical,stop);
         if(!any(throughput>float3(0.))) return radiance;

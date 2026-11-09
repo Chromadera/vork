@@ -151,7 +151,7 @@ fn every_field_remains_addressable_without_duplicate_topic_listings() {
     assert!(!include_str!("../../vork-scene/src/v2/reference.txt").lines()
         .any(|line| line.starts_with("hair.")));
     let std = help_args(&["std", "--all"]);
-    assert!(std.contains("parametrization color|melanin|absorption"));
+    assert!(std.contains("std/hair.parametrization: enum color|melanin|absorption"));
     let retired = Command::new(env!("CARGO_BIN_EXE_vork"))
         .args(["help", "field", "hair.roughness"]).output().unwrap();
     assert_eq!(retired.status.code(), Some(2));
@@ -206,7 +206,7 @@ fn wrong_field_prefix_points_to_the_field_and_setting_override() {
 #[test]
 fn library_and_program_field_lookups_point_to_library_help() {
     for library in ["std", "blender", "post"] {
-        for path in [library.to_owned(), format!("{library}/sky")] {
+        for path in [library.to_owned(), format!("{library}/unknown_program")] {
             let error = field_error(&path);
             assert!(error.contains("library/program"), "{error}");
             assert!(error.contains(&format!("vork help {library}`")), "{error}");
@@ -286,4 +286,20 @@ fn stdout_filesystem_failure_keeps_io_category() {
     let output = Command::new(env!("CARGO_BIN_EXE_vork")).arg("help")
         .stdout(std::fs::File::options().write(true).open("/dev/full").unwrap()).output().unwrap();
     assert_eq!(output.status.code(), Some(5), "{output:?}");
+}
+
+#[test]
+fn bundled_program_contracts_are_exactly_addressable() {
+    for program in ["std/hair", "std/sky", "std/text"] {
+        let exact = help_args(&["field", program]);
+        assert_eq!(help(program), exact);
+        assert!(help_args(&["std", "--all"]).contains(&exact));
+    }
+    assert!(!help("cameras").contains("std/hair."));
+    for leaf in ["emission_luminance", "subsurface_radius_scale"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vork"))
+            .args(["help", "field", &format!("std/openpbr.{leaf}")]).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("material.inputs.{leaf}")));
+    }
 }

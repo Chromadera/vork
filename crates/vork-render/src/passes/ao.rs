@@ -2,18 +2,9 @@
 use crate::*;
 use wgpu::util::DeviceExt;
 /// Retain one GI hit-shading specialization over every installed material.
-pub(crate) fn ray_pipeline(r: &Renderer, cached: &crate::pipelines::CachedPipelines, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<wgpu::ComputePipeline> {
-    let kernel=cached.drawn_kernel(crate::pipelines::ProgramKernel::Gi { features }, mode,&r.compiler);
-    #[cfg(test)]
-    r.compiler.hit_selections.lock().unwrap().push((crate::pipelines::ProgramKernel::Gi { features },kernel));
-    let (module, entry)=cached.program_kernel(kernel)?;
+pub(crate) fn ray_pipeline(r: &Renderer, cached: &std::sync::Arc<crate::pipelines::CachedPipelines>, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<crate::pipelines::Drawn<wgpu::ComputePipeline>> {
     let layout=crate::rt::gi_layout(&r.device,&cached.mat_layout,probes);
-    let pipeline=r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label:Some("ray-traced diffuse indirect"),layout:Some(&layout),module:&module,entry_point:Some(entry),
-        compilation_options:Default::default(),cache:r.cache.as_ref(),
-    });
-    r.compiler.remember(cached.kernel_content_key(kernel));
-    Ok(pipeline)
+    cached.install_hit(r, crate::pipelines::ProgramKernel::Gi { features }, mode, layout, "ray-traced diffuse indirect")
 }
 
 #[cfg(test)]
@@ -54,11 +45,12 @@ impl Resources {
         cluster_lights: &wgpu::Buffer,
         material: &wgpu::BindGroup,
         visibility_samples: u32,
+        enabled: bool,
         recorder: &mut crate::graph::Recorder,
     ) -> Result<Self> {
         let [w, h] = extent;
         let divisor = constants::GI_RESOLUTION_DIVISOR;
-        let (iw, ih) = if s.plan.effects.indirect {
+        let (iw, ih) = if enabled && s.plan.effects.indirect {
             (w.div_ceil(divisor), h.div_ceil(divisor))
         } else {
             (1, 1)
@@ -76,14 +68,14 @@ impl Resources {
                 )
                 .create_view(&Default::default())
         };
-        let (aw, ah) = if s.plan.effects.indirect { (w.div_ceil(divisor), h.div_ceil(divisor)) } else { (1, 1) };
+        let (aw, ah) = if enabled && s.plan.effects.indirect { (w.div_ceil(divisor), h.div_ceil(divisor)) } else { (1, 1) };
         let raw_ao = image("AO per-sample visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba16Float);
         let incident_image = |label| image(label, iw, ih, wgpu::TextureFormat::Rgba16Float);
         let incident = incident_image("hemisphere per-sample incident radiance");
         // Query selection is shared by both blur axes and every upsampling tap.
         let cell_receivers = image("AO selected receivers", aw, ah, wgpu::TextureFormat::Rgba32Float);
         let mut dispatches = Vec::new();
-        if s.plan.effects.indirect {
+        if enabled && s.plan.effects.indirect {
             let ao_view = image("AO filtered visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba16Float);
             let incident_horizontal = incident_image("hemisphere incident radiance");
             let (receivers, post_normals) = guides.context("AO needs retained slot receivers")?;
@@ -137,7 +129,7 @@ impl Resources {
                     .context("ray GI needs the scene TLAS")?
                     .alpha;
                 (
-                    s.gi.as_ref(),
+                    s.gi.as_ref().map(|pipeline|pipeline.current(false)),
                     "ray GI plan",
                     // rt::gi_entries: the scene globals, then GI's images and rays.
                     { let mut entries=pipelines::ray_globals(s,uniform,objects,lights,cluster_config,cluster_lights);
@@ -194,7 +186,7 @@ impl Resources {
                 if material.is_some() {
                     // Ray GI hits read the irradiance volume for further bounces.
                     let probes = (s.plan.effects.ray_indirect).then(|| s.probes.as_ref().map(|p| p.read_bind(d))).flatten();
-                    dispatch = dispatch.with_hits(hits.clone()).with_read_table(probes);
+                    dispatch = dispatch.with_pipeline(s.gi.as_ref().unwrap().clone()).with_hits(hits.clone()).with_read_table(probes);
                 }
                 dispatches.push(match material {
                     Some(material) => dispatch.with_material(material),

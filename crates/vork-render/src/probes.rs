@@ -367,13 +367,16 @@ impl Volume {
         })
     }
 
-    pub(crate) fn new(r: &Renderer, pipelines: &CachedPipelines, mut field: Field, bounces: u32, timed: bool, exposure_samples:u32, dependencies: vork_slang::ProgramDependencies, geometry_timed:bool, linear:bool, features:crate::forward_variant::FeatureMask, variants:&pipelines::VariantCompile) -> Result<Self> {
+    pub(crate) fn new(r: &Renderer, pipelines: &CachedPipelines, mut field: Field, bounces: u32, timed: bool, exposure_samples:u32, animated_shutter:bool, dependencies: vork_slang::ProgramDependencies, geometry_timed:bool, linear:bool, features:crate::forward_variant::FeatureMask, variants:&pipelines::VariantCompile) -> Result<Self> {
         let d = &r.device;
         // A timed shutter must integrate the exposure's capture budget, rather
         // than multiply the entire bake by the number of camera time strata.
-        let strata=if timed {exposure_samples.max(1)} else {1};
+        let dynamic = timed && animated_shutter;
+        let strata=if timed && !dynamic {exposure_samples.max(1)} else {1};
         field.header.counts[3]=field.header.counts[3].div_ceil(strata);
-        field.header.visibility_policy[0]=strata;
+        // Zero selects the current frame's stratum count. Reserve the complete
+        // closed-exposure ray allocation, and use its prefix for open exposures.
+        field.header.visibility_policy[0]=if dynamic {0} else {strata};
         for brick in &mut field.bricks {brick.counts[3]=field.header.counts[3];}
         let demand = std::sync::Arc::new(std::sync::Mutex::new(Demand {capacity:field.header.count().max(1),..Default::default()}));
         let grid=field.header;
@@ -542,8 +545,12 @@ impl Volume {
         for buffer in &storage.visibility {encoder.clear_buffer(buffer,offset,None);}
     }
     /// Publish the final bounce in buffer zero, starting from a dark volume.
-    pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, slot: &Slot, queries: &wgpu::QuerySet, geometry_changed:bool) {
+    pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, slot: &Slot, queries: &wgpu::QuerySet, geometry_changed:bool, exposure_samples:u32) {
         let storage = &slot._storage;
+        let rays = if self.grid.visibility_policy[0] == 0 {
+            self.grid.counts[3].div_ceil(exposure_samples.max(1))
+        } else { self.grid.counts[3] };
+        let batches = rays.div_ceil(storage.recipe.batch);
         let generations = self.bounces;
         let write = |bounce: u32| ((generations - 1 - bounce) % 2) as usize;
         encoder.clear_buffer(&storage.irradiance[1 - write(0)], 0, None);
@@ -555,7 +562,7 @@ impl Volume {
             // outgoing radiance changes; depth moments from bounce zero remain valid.
             let slots = if bounce == 0 && geometry_changed { GATHER_SLOTS } else { u64::from(constants::PROBE_VEC4S as u32) };
             let batch_set = if bounce == 0 {if geometry_changed {0} else {2*storage.recipe.batch_count}} else {storage.recipe.batch_count};
-            for batch in 0..storage.recipe.batch_count {
+            for batch in 0..batches {
                 // Resident support and capture scratch are separate budgets. A
                 // large sparse field can need many batches; keep each in its
                 // own native compute body rather than one unbounded bounce.
@@ -595,7 +602,7 @@ impl Volume {
             pass.set_pipeline(&self.choose);bind(&mut pass,0);
             let [x,y,z]=groups(u64::from(storage.recipe.field.header.field[0]));pass.dispatch_workgroups(x,y,z);
         }
-        for batch in 0..storage.recipe.batch_count {
+        for batch in 0..batches {
             let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("directional capture batch"),..Default::default()});
             bind(&mut pass,(3*storage.recipe.batch_count+batch)*storage.recipe.batch_stride);
             for (pipeline,threads) in [(&self.directional_trace,u64::from(storage.recipe.field.header.field[0])*u64::from(storage.recipe.batch)),(&self.directional_gather,u64::from(storage.recipe.field.header.field[0])*u64::from(constants::PROBE_RADIANCE_SIDE.pow(2)))] {

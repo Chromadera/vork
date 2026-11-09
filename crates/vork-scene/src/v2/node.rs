@@ -34,6 +34,8 @@ pub struct Node {
 impl<'de> Deserialize<'de> for NodeKind {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut value = serde_json::Value::deserialize(deserializer)?;
+        // Node-kind values are numeric program inputs, not scene clocks.
+        super::lower_numeric_json(&mut value).map_err(serde::de::Error::custom)?;
         if let Some(object) = value.as_object_mut() {
             object.entry("type").or_insert_with(|| serde_json::json!("node"));
         }
@@ -188,7 +190,7 @@ pub struct AssetNodeOverrides {
 #[serde(untagged)]
 pub enum AimTarget {
     Node(String),
-    Point([f32; 3]),
+    Point(#[serde(deserialize_with="super::numeric")] [f32; 3]),
 }
 /// Translation, rotation and scale (glTF node TRS), flat on the node. Rotation is
 /// stored as a quaternion; an authored `{"euler": [x,y,z]}` converts losslessly.
@@ -196,6 +198,7 @@ pub enum AimTarget {
 #[serde(default, deny_unknown_fields)]
 pub struct Transform {
     #[schemars(extend("x-source" = "glTF 2.0", "x-help-path" = "node.translation", "x-help" = "[x,y,z]; parent frame"))]
+    #[serde(deserialize_with="super::numeric")]
     pub translation: [f32; 3],
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "authored_rotation")]
     #[schemars(with = "Rotation", extend("default" = [0., 0., 0., 1.]))]
@@ -203,15 +206,17 @@ pub struct Transform {
     // Preserve omission so targets can reject even an authored identity.
     pub rotation: Option<[f32; 4]>,
     #[schemars(extend("x-source" = "glTF 2.0", "x-help-path" = "node.scale", "x-help" = "[x,y,z]; any zero world-scale component hides geometry, including children"))]
+    #[serde(deserialize_with="super::numeric")]
     pub scale: [f32; 3],
 }
 /// An authored rotation: a glTF quaternion or a tagged Euler triple.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Rotation {
-    Quaternion([f32; 4]),
+    Quaternion(#[serde(deserialize_with="super::numeric")] [f32; 4]),
     Euler {
         /// Radians about X, then Y, then Z (fixed parent axes; Blender XYZ).
+        #[serde(deserialize_with="super::numeric")]
         euler: [f32; 3],
     },
 }

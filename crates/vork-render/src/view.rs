@@ -9,6 +9,7 @@ pub struct View {
     variants: std::sync::OnceLock<ShadingBundles>,
     pending_bundles: std::sync::Mutex<Option<(ShadingBundles, Rerecord)>>,
     pub(crate) steps: Vec<crate::graph::Step>,
+    graph: crate::graph::Graph,
     pub(crate) uniform: wgpu::Buffer,
     pub(crate) depth: wgpu::TextureView,
     pub(crate) ids: wgpu::TextureView,
@@ -61,6 +62,7 @@ impl std::ops::Deref for ViewState {
 }
 
 pub(crate) struct ViewLighting {
+    pub(crate) active: bool,
     pub(crate) uniform: wgpu::Buffer,
     pub(crate) lights: wgpu::Buffer,
     pub(crate) path_light_tree: Option<wgpu::Buffer>,
@@ -71,12 +73,12 @@ pub(crate) struct ViewLighting {
 
 impl ViewLighting {
     pub(crate) fn upload_lights(&self, changes: &mut crate::values::ChangeTracker, lights: &[Light]) -> Result<()> {
-        if lights.is_empty() { return Ok(()); }
+        if !self.active || lights.is_empty() { return Ok(()); }
         let bytes = bytemuck::cast_slice(lights);
         changes.upload(&self.lights, 0, bytes);
         if let Some(tree) = &self.path_light_tree {
             changes.derive_upload(crate::values::ChangeKey::LightTree(tree.clone()), bytes, tree, 0, || {
-                Ok((0u32, bytemuck::cast_slice(&crate::lights::distribution::powers(lights)).to_vec()))
+                Ok((0u32, bytemuck::cast_slice(&crate::lights::distribution::nodes(lights)?).to_vec()))
             })?;
         }
         Ok(())
@@ -115,6 +117,16 @@ impl ViewState {
         subset: Option<&crate::render_images::Subset>,
     ) -> Result<Self> {
         let capture = desc.passes == crate::views::PassSet::Image;
+        let (mut dependencies,_)=crate::compositor::dependencies(&s.compositor,&settings.compositor);
+        if !capture {dependencies=s.main_outputs;}
+        dependencies.images &= s.graph.views.image_renders().next().is_some();
+        let view_graph=crate::graph::Graph::for_outputs(&s.plan,!capture && s.readback.any(),Some(dependencies))?;
+        use crate::graph::Pass;
+        let raster=view_graph.runs(Pass::Depth) || view_graph.runs(Pass::Visibility) || view_graph.runs(Pass::Forward);
+        let scene_work=raster || view_graph.runs(Pass::Path) || view_graph.runs(Pass::Shade);
+        let unused=(!scene_work).then(||crate::render_images::Subset {draws:vec![false;s.draws.len()],objects:vec![false;s.objects.len()],lights:vec![false;s.light_plan.nodes.len()]});
+        let subset=unused.as_ref().or(subset);
+        let decoupled_enabled=s.plan.decoupled && (view_graph.runs(Pass::Visibility) || (s.pipelines.field_controls && view_graph.runs(Pass::Forward)));
         let label = match &desc.kind {
             crate::views::ViewKind::Camera(node) => format!("camera view {node}"),
             crate::views::ViewKind::Image { name, .. } => format!("image view {name}"),
@@ -125,7 +137,7 @@ impl ViewState {
         );
         let (exposure_samples, visibility_samples) = match &desc.kind {
             crate::views::ViewKind::Image { render, .. } => (render.exposure_samples, render.visibility_samples),
-            _ => (s.plan.exposure_samples, s.plan.visibility_samples),
+            _ => crate::plan::sampling_counts(settings, true),
         };
         let d = &r.device;
         let [w, h] = desc.extent;
@@ -145,13 +157,18 @@ impl ViewState {
         } else {
             constants::PACKED_OUTPUT_PLANES
         };
-        let output_planes=aov_base+s.render.aovs.len() as u32*4 + if s.has_catchers {4} else {0} + if !capture {4} else {0};
+        // Packed colour needs one delivery plane and four float display-input
+        // planes. Keep fixed control/AOV offsets only when a consumer uses them.
+        let output_planes=if !capture && !float_output && !s.main_outputs.controls()
+            && !dependencies.aov_output && !s.has_catchers {5} else {
+            aov_base+if dependencies.aov_output {s.render.aovs.len() as u32*4} else {0} + if s.has_catchers {4} else {0} + if !capture {4} else {0}
+        };
         let output_pixels = u64::from(w) * u64::from(h);
         let pixels = u64::from(iw) * u64::from(ih);
-        let aov_bytes=(pixels*s.render.aovs.len() as u64*16).max(16);
+        let aov_bytes=if view_graph.uses("AOV resolved") {(pixels*s.render.aovs.len() as u64*16).max(16)} else {16};
         for (name, bytes) in [
             ("AOV resolved",aov_bytes),
-            ("catcher radiance sums",if s.has_catchers {pixels*48} else {48}),
+            ("catcher radiance sums",if s.has_catchers && view_graph.runs(Pass::Path) {pixels*48} else {48}),
             (
                 "packed output",
                 output_pixels * 4 * u64::from(output_planes),
@@ -175,7 +192,7 @@ impl ViewState {
                 d.limits().max_buffer_size
             );
         }
-        if s.pipelines.denoise {
+        if s.pipelines.denoise && view_graph.runs(Pass::Denoise) {
             let guide_bytes = pixels * 32;
             ensure!(guide_bytes <= d.limits().max_storage_buffer_binding_size && guide_bytes <= d.limits().max_buffer_size,
                 "OIDN guides need {guide_bytes} bytes; exceeds device storage binding or buffer limit");
@@ -221,8 +238,8 @@ impl ViewState {
             wgpu::BufferUsages::UNIFORM,
         );
         let empty_mask = init(d, "unclustered mask", &[0; 4], wgpu::BufferUsages::STORAGE);
-        let camera_cull = passes::camera_cull::Resources::new(s,r,&uniform,&objects,
-            shared.materials.as_ref().map_or_else(||s.material_table.records(),|m|&m.records),shared.compute,subset);
+        let camera_cull = if view_graph.runs(Pass::Depth) {passes::camera_cull::Resources::new(s,r,&uniform,&objects,
+            shared.materials.as_ref().map_or_else(||s.material_table.records(),|m|&m.records),shared.compute,subset)} else {passes::camera_cull::Resources::unused(d)};
         let make_global = |uniform: &wgpu::Buffer,
                            lights: &wgpu::Buffer,
                            config: &wgpu::Buffer,
@@ -240,7 +257,8 @@ impl ViewState {
         let forward_global;
         // Compute work the pass modules record for this view's graph steps.
         let mut work = crate::graph::Recorder::default();
-        let targets = Targets::new(s, r, internal, aov_bytes, &uniform, &mut work);
+        let capture_owner = capture.then_some(label.as_str());
+        let targets = Targets::new(s, r, internal, aov_bytes, &uniform, &view_graph, &mut work, capture_owner);
         // Float-only capture resolve never writes the display output. Reuse
         // the existing binding rather than allocating a throwaway texture.
         let output = shared.output.cloned().unwrap_or_else(|| {
@@ -259,13 +277,14 @@ impl ViewState {
         let shadow_bind = shared.shadow_bind;
         let deforms = shared.deforms;
         let frame_materials = shared.materials;
-        let volume_samples=medium::sample_buffers(s,d,[iw,ih],visibility_samples);
-        let visibility = s.plan.decoupled.then(|| passes::decoupled::Sampling::new(d, [iw, ih], visibility_samples,
+        let volume_samples=if [Pass::Visibility,Pass::Shade,Pass::Volume,Pass::Ao,Pass::Reflections].iter().any(|&pass|view_graph.runs(pass)) {medium::sample_buffers(s,d,[iw,ih],visibility_samples)} else {Vec::new()};
+        let visibility = decoupled_enabled.then(|| passes::decoupled::Sampling::new(d, [iw, ih], visibility_samples,
             s.pipelines.resolve_native.as_ref().map_or(0,|n|n.froxel_page_elements)));
-        let fragments = s.plan.decoupled.then(|| passes::decoupled::Fragments::new(s, r, [iw, ih], visibility_samples, &volume_samples, visibility.as_ref().unwrap(), &deforms)).transpose()?;
+        let fragments = decoupled_enabled.then(|| passes::decoupled::Fragments::new(s, r, [iw, ih], visibility_samples, &volume_samples, visibility.as_ref().unwrap(), &deforms)).transpose()?;
         let fragments_bind = fragments.as_ref().and_then(|f| f.bind.clone());
         let fragments_geometry = fragments.as_ref().and_then(|f| f.geometry.clone());
         let recorder = crate::bundles::Recorder {
+            graph: &view_graph,
             camera_instances: Some(&camera_cull.instances),
             transparent_instances: transparent_instances.as_ref(),
             compute: shared.compute,
@@ -284,7 +303,7 @@ impl ViewState {
         };
         use crate::bundles::Kind;
         let depth_bundle = recorder.record("depth plan", Kind::Depth, &global, camera_cull.commands(), None)?;
-        let visibility_passes = s.plan.decoupled.then(|| -> Result<_> { Ok([
+        let visibility_passes = decoupled_enabled.then(|| -> Result<_> { Ok([
             (0..visibility_samples)
                 .map(|sample| recorder.record("decoupled visibility", Kind::Visibility(sample), &global, camera_cull.commands(), None))
                 .collect::<Result<Vec<_>>>()?,
@@ -300,12 +319,12 @@ impl ViewState {
             let lights = init(
                 d,
                 "batch lights",
-                &vec![0; batch.nodes.len().max(1) * std::mem::size_of::<Light>()],
+                &vec![0; if scene_work {batch.nodes.len().max(1)} else {1} * std::mem::size_of::<Light>()],
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             );
-            let path_light_tree = (s.plan.effects.path).then(|| init(
-                d, "path light powers",
-                &vec![0; crate::lights::distribution::node_count(batch.nodes.len()) * 4],
+            let path_light_tree = (view_graph.runs(Pass::Path)).then(|| init(
+                d, "path spatial light tree",
+                &vec![0; crate::lights::distribution::node_count(batch.nodes.len()) * std::mem::size_of::<crate::lights::tree::Node>()],
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             ));
             let list_stride = batch.nodes.len() as u32 + constants::CLUSTER_LIST_HEADER;
@@ -313,7 +332,7 @@ impl ViewState {
                 .min(d.limits().max_buffer_size);
             let (grid, tile, bytes) = light_grid(iw, ih, list_stride, max_bytes)?;
             let slices = grid[2];
-            let enabled = s.plan.cluster;
+            let enabled = s.plan.cluster && view_graph.runs(Pass::Clusters);
             let config_data = [
                 grid[0],
                 grid[1],
@@ -364,6 +383,7 @@ impl ViewState {
             controls_bundle = recorder.record("opaque controls plan", Kind::Controls, &global, camera_cull.commands(), None)?;
             forward_global = global;
             lighting = ViewLighting {
+                active: scene_work,
                 uniform: batch_uniform,
                 lights,
                 path_light_tree,
@@ -374,7 +394,7 @@ impl ViewState {
         }
         let decoupled = visibility_passes.zip(fragments).map(|(passes, fragments)| passes::decoupled::View::new(s, r, [iw, ih], visibility.as_ref().unwrap(), &targets, &volume_samples, passes, fragments, deforms,
             [forward_global.clone(), recorder.material_bind.clone(), shadow_bind.clone()],frame_materials.as_ref().map(|m|&m.shader_errors),shared.rays.and_then(|r|r.emitter_weights.as_ref().map(|w|&w.buffer)))).transpose()?;
-        let subsurface = if s.plan.effects.subsurface {
+        let subsurface = if view_graph.runs(Pass::SubsurfaceDiffuse) {
             let visibility=decoupled.as_ref().context("subsurface visibility")?;
             Some(passes::subsurface::Resources::new(s, r, internal, settings.settings.samples, &uniform, &targets.resolved, &targets.post_ambient, &visibility.slots, &visibility.subsurface_records, visibility.refraction_source.as_ref(), &mut work)?)
         } else {
@@ -400,6 +420,7 @@ impl ViewState {
                 .as_ref()
                 .map_or_else(|| s.material_table.bind(), |m| &m.bind),
             &volume_samples,
+            view_graph.runs(Pass::Reflections),
             &mut work,
         )?;
         let transparent_bundles = transparent_bundles(&recorder, &forward_global, transparent_indirect.as_ref())?;
@@ -418,7 +439,7 @@ impl ViewState {
             s, d, &lighting.uniform,
             ao_guides, [targets.resolved.texture().width(), targets.resolved.texture().height()], &targets.post_ambient, &targets.diffuse_response,
             shared.rays, &lighting.lights, objects, &lighting.cluster_config, &lighting.cluster_lights,
-            frame_materials.as_ref().map_or_else(|| s.material_table.bind(), |m| &m.bind), visibility_samples, &mut work,
+            frame_materials.as_ref().map_or_else(|| s.material_table.bind(), |m| &m.bind), visibility_samples, view_graph.runs(Pass::Ao), &mut work,
         )?;
         let (mut post, output_bind) = passes::resolve::Resources::new(
             s,
@@ -451,6 +472,8 @@ impl ViewState {
             &settings.compositor,
             settings.settings.integrator.denoiser(),
             settings.settings.reconstruct,
+            &view_graph,
+            dependencies,
         )?;
         if let Some(stage) = &mut post.denoiser {
             let mut feedback = Vec::new();
@@ -466,7 +489,7 @@ impl ViewState {
             }
             stage.set_rejection_feedback(r, feedback);
         }
-        let aov_resolve=crate::aov::Resolve::new(s,r,&uniform,&targets.aov_values,&post.pixels,[w,h],[iw,ih],aov_base)?;
+        let aov_resolve=if view_graph.runs(Pass::AovResolve) {crate::aov::Resolve::new(s,r,&uniform,&targets.aov_values,&post.pixels,[w,h],[iw,ih],aov_base)?} else {None};
         let publication = if let crate::views::ViewKind::Image { render, .. } = &desc.kind {
             Some(d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("render image publication"),
@@ -518,7 +541,8 @@ impl ViewState {
             transparent_indirect: transparent_indirect,
             post: post,
             publication,
-            steps: s.graph.record(!capture, work)?,
+            steps: view_graph.record(!capture, work)?,
+            graph: view_graph,
             width: w,
             height: h,
             internal,
@@ -622,6 +646,7 @@ impl View {
             return Ok(());
         };
         let recorder = crate::bundles::Recorder {
+            graph: &self.graph,
             camera_instances: Some(&self.camera_cull.instances),
             transparent_instances: self.transparent_instances.as_ref(),
             compute: p.compute.as_ref(),
@@ -713,19 +738,30 @@ impl Targets {
         resolution: [u32; 2],
         aov_bytes: u64,
         uniform: &wgpu::Buffer,
+        graph: &crate::graph::Graph,
         recorder: &mut crate::graph::Recorder,
+        capture_owner: Option<&str>,
     ) -> Self {
+        use crate::graph::Pass;
         let d = &r.device;
         let [w, h] = resolution;
+        let buffer = |label: &str, size, usage| {
+            let owned;
+            let label = if let Some(owner) = capture_owner {
+                owned = format!("{owner}: {label}"); owned.as_str()
+            } else { label };
+            s.transients.buffer(d,label,size,usage)
+        };
         let nonfinite=s.transients.buffer(d,"nonfinite output diagnostics",(vork_slang::registry::NONFINITE_WORDS*4) as u64,wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC|wgpu::BufferUsages::COPY_DST);
-        let catcher=s.transients.buffer(d,"catcher radiance sums",
-            if s.has_catchers {u64::from(w)*u64::from(h)*48} else {48},wgpu::BufferUsages::STORAGE);
-        let aov_values=s.transients.buffer(d,"AOV resolved",aov_bytes,wgpu::BufferUsages::STORAGE);
+        let catcher=buffer("catcher radiance sums",
+            if s.has_catchers && graph.runs(Pass::Path) {u64::from(w)*u64::from(h)*48} else {48},wgpu::BufferUsages::STORAGE);
+        let aov_values=buffer("AOV resolved",if graph.uses("AOV resolved") {aov_bytes} else {16},wgpu::BufferUsages::STORAGE);
         let samples = s.pipelines.raster_samples;
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let view = |label, format, samples, usage| {
+            let (tw,th)=if graph.uses(label) || label=="denoising albedo 4x" {(w,h)} else {(1,1)};
             s.transients
-                .target(d, label, w, h, samples, format, usage)
+                .target(d, label, tw, th, samples, format, usage)
                 .create_view(&Default::default())
         };
         let depth = view(
@@ -759,7 +795,7 @@ impl Targets {
             samples,
             usage,
         );
-        let denoising_albedo = s.pipelines.denoise.then(|| {
+        let denoising_albedo = (s.pipelines.denoise && graph.runs(Pass::Forward)).then(|| {
             view(
                 "denoising albedo 4x",
                 wgpu::TextureFormat::Rgba32Float,
@@ -779,16 +815,16 @@ impl Targets {
         let post_ids = control_view("resolved IDs", wgpu::TextureFormat::R32Uint);
         // Only raster indirect replacement consumes the exact three-channel
         // response. All other plans bind one unused RGB record.
-        let diffuse_response = s.transients.buffer(d, "indirect diffuse response",
-            if s.plan.effects.indirect {u64::from(w)*u64::from(h)*12} else {12},
+        let diffuse_response = buffer( "indirect diffuse response",
+            if graph.runs(Pass::Ao) {u64::from(w)*u64::from(h)*12} else {12},
             wgpu::BufferUsages::STORAGE);
         let post_normals = control_view("resolved normals", wgpu::TextureFormat::Rgba16Float);
         // The subsurface correction adds to the resolved ambient as an attachment.
         let post_ambient = view("resolved ambient", pipelines::resolved_ambient_format(samples), 1,
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let denoising_guides = s.pipelines.denoise.then(|| s.transients.buffer(d, "denoising guides", u64::from(w)*u64::from(h)*32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC));
+        let denoising_guides = (s.pipelines.denoise && (graph.runs(Pass::Path) || graph.runs(Pass::Controls))).then(|| buffer( "denoising guides", u64::from(w)*u64::from(h)*32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC));
         let post_motion = control_view("resolved motion", wgpu::TextureFormat::Rgba16Float);
-        if !s.plan.effects.fuse_controls() {
+        if !s.plan.effects.fuse_controls() && graph.runs(crate::graph::Pass::Controls) {
         let control_resolve = pipelines::base(&s.pipelines.control_resolve_pipeline);
         let mut control_entries = vec![
                 entry(0, wgpu::BindingResource::TextureView(&depth)),

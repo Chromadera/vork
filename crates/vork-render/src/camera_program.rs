@@ -65,7 +65,7 @@ pub(crate) struct Native {
 
 /// Resolve all possible view cameras once with the same default and cut semantics.
 /// Aspects belong to views, not to the camera's position in the node list.
-pub(crate) fn views(scene: &v2::Scene, nodes: &[EvalNode], animation: &animation::Plan, initial_time: f32) -> BTreeMap<String,Vec<[u32;2]>> {
+pub(crate) fn views(scene: &v2::Scene, nodes: &[EvalNode], animation: &animation::Plan, initial_time: impl Into<vork_time::Request>) -> BTreeMap<String,Vec<[u32;2]>> {
     let default=nodes.iter().find(|n|matches!(n.node.kind,NodeKind::Camera {..})).map(|n|n.node.name.as_str());
     let start=scene.render.camera.clone().or_else(||animation.start_camera(&scene.render,initial_time));
     let fallback=start.as_deref().or(default);
@@ -157,7 +157,7 @@ pub(crate) fn selection(scene: &InstalledScene, node: usize, state: &EvalNode, a
 
 /// Views inherit transport settings. Camera cuts and render images keep every
 /// reachable camera in the same traced registry; wavelength mode remains per view.
-pub(crate) fn promote(r: &Renderer, scene: &mut v2::Scene, base: &Path, initial_time: f32) -> Result<bool> {
+pub(crate) fn promote(r: &Renderer, scene: &mut v2::Scene, base: &Path, initial_time: impl Into<vork_time::Request>) -> Result<bool> {
     fn collect(nodes: &[v2::Node], out: &mut Vec<EvalNode>) {
         for node in nodes {
             if matches!(node.kind,NodeKind::Camera {..}) {out.push(EvalNode {node:node.without_children(),camera:None,parent:None,world:Mat4::IDENTITY,dynamic:false,embedded:None});}

@@ -23,3 +23,11 @@ export function engine(): string {
     return 'vork';
   }
 }
+
+/** Translate launch failures while preserving other process errors. */
+export function launchError(error: unknown): never {
+  if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    throw new Error(`vork executable not found: ${JSON.stringify((error as {path?: string}).path)}. Add the directory containing vork to PATH (for example, export PATH="$HOME/.local/bin:$PATH"), or set VORK_BIN to the full path to the vork executable.`, {cause: error});
+  }
+  throw error;
+}

@@ -43,36 +43,14 @@ pub(crate) fn dropped(code: &'static str, requested: serde_json::Value, dropped:
 mod tests {
     use super::*;
     #[test]
-    fn identical_unnamed_environments_keep_distinct_authored_locations() {
+    fn provisional_environment_selection_does_not_decide_admission() {
         let scene = vork_scene::v2::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"},{"type":"light","shape":"environment"},{"type":"light","shape":"environment"},{"type":"light","shape":"environment"}]}"#).unwrap();
         let collector = Collector::default();
         let _scope = collector.enter();
         let settings = crate::environment_node::Settings::from_scene(&scene).unwrap();
         assert_eq!(settings.source, Some(1));
         let warnings = collector.snapshot();
-        assert_eq!(warnings.len(), 2);
-        assert_eq!(warnings[0].requested["node_index"], 2);
-        assert_eq!(warnings[1].requested["node_index"], 3);
-    }
-
-    #[test]
-    fn replaced_ray_surface_reports_its_authored_animation_before_removing_it() {
-        let mut scene = vork_scene::v2::from_test_value(serde_json::json!({
-            "version":2,"nodes":[{"type":"camera"}],
-            "render":{"duration":1,"settings":{"integrator":"path"}},
-            "materials":{"animated":{"program":{"source":"struct Inputs {float amount=0.;}; Closure surface(ShadingContext c,Inputs i) {Closure s={};return s;}"},
-                "inputs":{"geometry_opacity":{"attribute":"alpha"},"amount":0}}},
-            "animation":[{"tracks":[{"path":["materials","animated","inputs","amount"],"keys":[[0,0],[1,2]]}]}]
-        })).unwrap();
-        let collector = Collector::default();
-        let _scope = collector.enter();
-        crate::rt::normalize_materials(&mut scene);
-        assert!(scene.animation[0].tracks.as_ref().unwrap().is_empty());
-        let warnings = collector.snapshot();
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, "ray_surface_attribute");
-        assert_eq!(warnings[0].requested["tracks"][0]["path"][1], "animated");
-        assert_eq!(warnings[0].requested["surface"]["inputs"]["geometry_opacity"]["attribute"], "alpha");
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -92,9 +70,4 @@ mod tests {
         assert_eq!(first.snapshot()[0].requested["stage"], "lit");
         assert_eq!(serde_json::to_value(first.snapshot()).unwrap()[0]["code"], "test");
     }
-}
-
-pub(crate) fn additional_environment(node: &vork_scene::v2::Node, first: &str, index: usize) {
-    dropped("additional_environment", serde_json::json!({"node": node, "node_index":index, "retained_environment":first}),
-        format!("additional environment light at node {index} ({:?}) and its light-property tracks; retaining first environment {first}", node.name));
 }

@@ -3,11 +3,13 @@ OUTPUT ENCODINGS
 PNG filename frame patterns (two or more # characters or printf-style %d/%04d) are usage errors; use a directory or %06d.exr for frames. Parent directories and other filename characters are literal.
 directory (no extension or trailing /): NNNNNN.png frames plus channel PNGs
 PATH/%06d.exr: one multilayer OpenEXR per frame, scene-linear premultiplied, before exposure
-.mp4 H.264; .mov ProRes 4444 RGBA (keeps alpha; transparency needs render.background "transparent")
+.mp4 H.264 (requires opaque final alpha on every composited frame); .mov ProRes 4444 RGBA (keeps final alpha)
 --at SECONDS: one still; needs .png, directory or EXR. --frame-start/--frame-end N: inclusive
 absolute frame indices, default the whole clip; not with --at.
 Sidecars: OUT/meta.json for directories; OUT.meta.json for files, e.g. check.png.meta.json (fps, per-frame camera and depth unit, object_ids pass_index -> node,
 exposure, warnings [{code,requested,dropped}] for omitted/substituted effects); camera.json in directories or OUT.camera.json for files when camera is a channel (videos always; vork help camera-json).
+EXR sidecar examples: shot.%06d.exr -> shot.exr.meta.json; frames/%06d.exr -> frames/meta.json.
+The same naming rule applies to camera.json and timings.json.
 PNG channels: depth and object_index grayscale16 (depth metres per unit in meta.json
 frames[].depth_unit_m); view_normal RGB8 = (v+1)/2; motion RGB16, RG = 0.5+0.5*offset in image
 extents, clamped to ±1; shadow_catcher RGB16 linear, clamped 0..1; aov linear 16-bit, clamped 0..1.
@@ -23,3 +25,11 @@ division; light added by CG to an otherwise unlit catcher is not representable.
 Combined always treats a catcher as transparent black on transparent film; opaque
 film shows background times ratio. Holdouts are transparent black on transparent
 film, opaque black on opaque film. Channel selection never changes combined.
+
+meta.json is version 3: frame times are numeric evaluation seconds; fps is a
+number or rational string. camera.json remains version 2.
+An overwrite invalidates previous completion metadata and removes owned old
+frames/channels before writing. Save outputs elsewhere to retain them; serialize
+writers per destination (concurrent writes fail "output already in use").
+Only consume a shot after success with fresh meta.json; partial files can remain
+on failure. Cleanup also matches native non-UTF-8 filenames.

@@ -134,6 +134,23 @@ fn run(mut command: Command, log: &Path) -> Result<(), String> {
 mod renderer_registry;
 
 /// Returns the compiler version and content identity of embedded runtime modules.
+/// Targets this build compiles (`VORK_SHADER_TARGETS`, comma-separated:
+/// spirv, metal). Default both, so layout tests check Metal indices on every
+/// host; a Linux check that runs no Metal tests can set `spirv`.
+fn host_targets() -> Vec<String> {
+    println!("cargo:rerun-if-env-changed=VORK_SHADER_TARGETS");
+    match std::env::var("VORK_SHADER_TARGETS") {
+        Ok(list) if !list.trim().is_empty() => {
+            let targets: Vec<String> = list.split(',').map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).collect();
+            for t in &targets { assert!(t == "spirv" || t == "metal", "VORK_SHADER_TARGETS: unknown target {t}"); }
+            assert!(std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple") || targets.iter().any(|t| t == "metal"),
+                "VORK_SHADER_TARGETS must include metal on Apple targets");
+            targets
+        }
+        _ => vec!["spirv".into(), "metal".into()],
+    }
+}
+
 pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
     let slangc = slangc();
     let version = Command::new(&slangc)
@@ -237,7 +254,12 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
                 fs::write(&path,forward_variant::late_variant_module(&family.source(),family.camera() && rays)).unwrap();
                 let mut defines=vec!["VORK_NO_IMPLICIT".to_owned(),"VORK_AOV_COUNT=0".to_owned(),"VORK_SURFACE_SLANG_OUTLINE".to_owned()];
                 defines.extend(["VORK_SURFACE_MEDIUM".into(),"VORK_SURFACE_MEDIUM_SHARED".into()]);
-                if coverage {defines.extend(["VORK_PROGRAM_COVERAGE".into(),"VORK_NO_SHADOW_CONTAINMENT".into()]);}
+                // All shipped surfaces require installation's no-containment proof.
+                // Candidate record layout is independent: opaque connections keep
+                // the compact reader without retaining the solid discovery walk.
+                defines.push("VORK_NO_SHADOW_CONTAINMENT".into());
+                if coverage {defines.push("VORK_PROGRAM_COVERAGE".into());}
+                else {defines.push("VORK_NO_CONNECTION_TRANSMISSION".into());}
                 if boundaries>0 {defines.push("VORK_RAY_REFRACTION".into());}
                 if rays {defines.push("VORK_RAY_BINDINGS".into());}
                 if probes {defines.extend(["VORK_PROBES".into(),format!("VORK_PROBE_BINDING={}",if family.camera() {9} else {0})]);}
@@ -346,9 +368,10 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
             panic!("slangc {}: {e}", module.display());
         }
     }
+    let host = host_targets();
     let jobs: Vec<_> = units
         .iter()
-        .flat_map(|u| [SPIRV_TARGET, METAL_TARGET].into_iter().filter(move |t| targets(&u.1).contains(&t.1)).map(move |t| (u, t)))
+        .flat_map(|u| [SPIRV_TARGET, METAL_TARGET].into_iter().filter(|t| host.iter().any(|h| h == t.1)).filter(move |t| targets(&u.1).contains(&t.1)).map(move |t| (u, t)))
         .collect();
     // Each compiler process holds its own linked IR. Respect Cargo's build
     // parallelism instead of launching every entry/target at once on small hosts.
@@ -436,7 +459,7 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
     }
     let mut rust = String::new();
     for (name, module, entry, stage) in &units {
-        let metal = targets(module).contains(&"metal");
+        let metal = targets(module).contains(&"metal") && host.iter().any(|h| h == "metal");
         if !metal {
             fs::write(dir.join(format!("{name}.metal")), "").unwrap();
             fs::write(dir.join(format!("{name}.metal.json")), "").unwrap();

@@ -7,6 +7,8 @@ pub struct CompositeProgram {
     pub inputs: InputLayout,
     pub dependencies: Vec<PathBuf>,
     pub warnings: String,
+    /// Image slots read by the lowered program; None means a dynamic slot.
+    pub image_reads: Option<Vec<u32>>,
 }
 impl Compiler {
     pub fn compile_composite(
@@ -51,7 +53,9 @@ impl Compiler {
             compiled.output.wgsl.contains(&format!("fn {entry}(")),
             "Slang did not emit {entry}"
         );
+        let image_reads = effects::composite_reads(&compiled.output.wgsl, &entry, abi)?;
         Ok(CompositeProgram {
+            image_reads,
             wgsl: compiled.output.wgsl,
             entry,
             inputs: compiled.inputs,
@@ -64,6 +68,18 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_reads_follow_helpers_branches_and_dynamic_addresses() -> Result<()> {
+        let abi=Abi {aov_count:0,context:Abi::spec_context(),closure:openpbr_fields()};
+        for (source,expected) in [
+            ("fn root()->vec4<f32>{return vec4(1.);}",Some(vec![])),
+            ("fn helper(s:u32)->vec4<f32>{return vork_compositor_load(s,vec2(0));} fn root()->vec4<f32>{return helper(2u);}",Some(vec![2])),
+            ("fn root(b:bool)->vec4<f32>{if b {return vork_compositor_load(0u,vec2(0));}return vork_compositor_load(3u,vec2(0));}",Some(vec![0,3])),
+            ("fn root(s:u32)->vec4<f32>{return vork_compositor_load(s,vec2(0));}",None),
+            ("fn root()->vec4<f32>{let extent=vork_compositor_size(0u);return vec4(extent,0.,1.);}",Some(vec![])),
+        ] {assert_eq!(effects::composite_reads(source,"root",&abi)?,expected);}
+        Ok(())
+    }
     #[test]
     #[ignore = "requires pinned Slang"]
     fn reflected_composite_reads_image_and_defaults() -> Result<()> {
@@ -78,6 +94,13 @@ mod tests {
             "struct Inputs { Image depth; Image color; }; float4 composite(CompositeContext ctx, Inputs inputs) { return compositor_load(inputs.depth,int2(ctx.uv*ctx.size)) + compositor_sample(inputs.color,ctx.uv); }",
             Path::new("composite-channels.slang"), "channels")?;
         assert!(channels.wgsl.contains("vork_compositor_load("));
+        let bound=Compiler::discover().compile_composite_bound(&abi,
+            "struct Inputs {Image plate;Image unused;};float4 composite(CompositeContext c,Inputs i){return compositor_sample(i.plate,c.uv);}",
+            Path::new("bound-images.slang"),"bound",&BTreeMap::from([
+                ("plate".into(),serde_json::json!({"image":"plate"})),
+                ("unused".into(),serde_json::json!({"channel":"color"})),
+            ]))?;
+        assert_eq!(bound.image_reads,Some(vec![1]),"{}",bound.wgsl);
         assert!(
             channels
                 .inputs
@@ -88,6 +111,7 @@ mod tests {
                 .is_ok()
         );
         assert!(program.wgsl.contains(SAMPLE_IMAGE));
+        assert_eq!(program.image_reads,Some(vec![0]));
         assert!(
             program
                 .inputs

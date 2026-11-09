@@ -6,6 +6,7 @@ import catcher;
 #ifdef VORK_SPATIAL_ENVIRONMENT
 import spatial_environment;
 #endif
+import light_tree;
 import closure;
 import material_layout;
 import variant;
@@ -59,7 +60,7 @@ struct PathGeometry : IHitGeometry {
     static uint load(uint buffer,uint index) {return path_hit_buffers_load(buffer,index);}
 };
 uint2 path_image_size() {uint width,height;path_output.GetDimensions(width,height);return uint2(width,height);}
-[[vk::binding(14,0)]] StructuredBuffer<float> path_light_powers : register(t8);
+[[vk::binding(14,0)]] StructuredBuffer<LightTreeNode> path_light_nodes : register(t8);
 [[vk::binding(15,0)]] Texture2DArray<uint4> path_environment_source : register(t5);
 [[vk::binding(16,0)]] SamplerState path_environment_sampler : register(s1);
 [[vk::binding(17,0)]] StructuredBuffer<float2> path_environment_distribution : register(t9);
@@ -101,8 +102,9 @@ float3 connection_arrival(float prefix,float distance,float ior) {
 }
 
 float3 clamp_sample(float3 value, float limit) {
-    let peak=max(value.x,max(value.y,value.z));
-    return value*select(limit>0. && peak>limit,limit/max(peak,1e-20),1.);
+    // Cycles film clamp: mean absolute RGB, with one scale to preserve hue.
+    let brightness=dot(abs(value),float3(1./3.));
+    return value*select(limit>0. && brightness>limit,limit/max(brightness,1e-20),1.);
 }
 // Bound Slang's optimization graph; SPIR-V handoff restores driver inlining freedom.
 #if defined(VORK_PATH_SLANG_OUTLINE)
@@ -111,8 +113,15 @@ float3 clamp_sample(float3 value, float limit) {
 #define VORK_PATH_HELPER
 #endif
 
+// The installed geometry capability removes the entire latent field graph,
+// including auxiliary camera queries and emitter/containment consumers.
+uint4 path_fields<V:IVariant>() {
+    if (!V.has_implicit_geometry) {return uint4(0u);}
+    return path_settings.implicit;
+}
+
 VORK_PATH_HELPER
-DielectricHit trace<P:IProgram>(float3 origin, float3 direction, float distance, uint mask) {
+DielectricHit trace<V:IVariant,P:IProgram>(float3 origin, float3 direction, float distance, uint mask) {
     RayDesc ray;ray.Origin=origin;ray.Direction=direction;ray.TMin=0.;ray.TMax=distance;
 #ifdef VORK_PROPAGATION
     // Adjacent segments own their shared endpoint. Native triangle queries
@@ -140,7 +149,7 @@ DielectricHit trace<P:IProgram>(float3 origin, float3 direction, float distance,
         h.t=query.CommittedRayT();h.instance=query.CommittedInstanceIndex();h.primitive=query.CommittedPrimitiveIndex();
         h.object=query.CommittedInstanceID();h.barycentrics=query.CommittedTriangleBarycentrics();h.world_to_object=query.CommittedWorldToObject3x4();
     }
-    h=merge_field_hits<P,PathGeometry>(h,path_settings.implicit.xy,origin,direction,distance,mask);
+    h=merge_field_hits<P,PathGeometry>(h,path_fields<V>().xy,origin,direction,distance,mask);
     return h;
 }
 #define VORK_PATH_CONTEXT
@@ -476,8 +485,8 @@ float3 straight_shadow_transmittance<V:IVariant,P:IProgram>(float3 origin, float
         transmittance*=path_spectrum(crossing.transmittance);
     }
     if(query.CommittedStatus()!=COMMITTED_NOTHING) return float3(0.);
-    for(uint i=0u;i<path_settings.implicit.y;i++) {
-        let at=path_settings.implicit.x+i*3u;let object=path_words[at+1u];
+    for(uint i=0u;i<path_fields<V>().y;i++) {
+        let at=path_fields<V>().x+i*3u;let object=path_words[at+1u];
         if(!catcher_keeps(object) || collapsed_endpoint(objects[object].model) || (objects[object].metadata.y&REG_RAY_SHADOW)==0u || (!all_casters && (objects[object].metadata.x&groups)==0u)) continue;
         var minimum=0.;
         for(;;) {
@@ -562,19 +571,13 @@ float3 path_origin(HitSurface h,float3 world,float3 error,float3 direction) {
     return world+mul(float4(offset,0.),model).xyz;
 }
 
-// The view's retained reduction of the shared light buffer. Weights update
-// through the ordinary value/upload tracker, once per changed light set.
-uint pick_light(float u, out float probability) {
-    let leaves=asuint(path_settings.adaptive.w);
-    if (path_light_powers[1]<=0.) {probability=0.;return 0u;}
-    var node=1u;probability=1.;
-    while (node<leaves) {
-        let left=path_light_powers[node*2u];let right=path_light_powers[node*2u+1u];
-        let split=left/(left+right);
-        if (u<split) {node*=2u;probability*=split;u/=split;}
-        else {node=node*2u+1u;probability*=1.-split;u=(u-split)/(1.-split);}
-    }
-    return node-leaves;
+// Position-dependent analytic source proposal; both direct strategies divide
+// by this same complete mixture mass at the scattering vertex.
+uint pick_light(float2 u, float3 world, out float probability) {
+    let count=uint(frame_light_count(frame));
+    let pick=light_tree_pick(path_light_nodes,count==0u ? 0u : 2u*count-1u,world,u);
+    probability=pick.probability;
+    return pick.identity;
 }
 // The shared evaluation's shadows at a path hit (lit stages): one shadow ray per
 // light toward a sampled point of it, seeded by `pixel`, as next events trace.
@@ -622,7 +625,7 @@ float3 analytic_mis_response(Closure c, float3 view, float3 direction, float3 ge
 float3 next_event<V:IVariant,P:IProgram>(HitSurface shading, Closure c, float3 view, float3 world, float3 error, float3 geometric, uint groups, uint transparent, DielectricInterface media, float subsurface_thickness, TransportPreparation prepared, BsdfSample sample, PathSampler sampler, float optical_length, inout uint rng) {
     let count=uint(frame_light_count(frame));if (count==0u) {return float3(0.);}
     let u=path_light(sampler);
-    float probability;let i=pick_light(u.z,probability);if (probability<=0.) {return float3(0.);}
+    float probability;let i=pick_light(u.zw,world,probability);if (probability<=0.) {return float3(0.);}
     let contribution=lights[i].shadow_offsets[REG_LIGHT_CONTRIBUTION_WORD];
     if (!light_receives(contribution,lights[i].shadow_offsets[REG_LIGHT_LINK_WORD],groups)) {return float3(0.);}
     let l=light_values<Unspecialized>(i);
@@ -748,8 +751,8 @@ float3 environment_direction(float2 u, out float pdf) {
 // Both strategies use the same joint event / solid-angle measure. Scaling by
 // the largest density avoids overflow for tiny or nearly edge-on emitters.
 uint mesh_emitters() {return asuint(path_settings.adaptive.y);}
-float mesh_pdf(DielectricHit hit, float3 from, float3 point, float3 face) {
-    if(hit.field) {return field_emitter_pdf<PathGeometry>(path_settings.implicit,hit.instance,from);}
+float mesh_pdf<V:IVariant>(DielectricHit hit, float3 from, float3 point, float3 face) {
+    if(hit.field) {return field_emitter_pdf<PathGeometry>(path_fields<V>(),hit.instance,from);}
     let base=mesh_emitters();
     if (path_words[base]==0u || path_words[base+3u+hit.instance]==0xffffffffu) {return 0.;}
     let area=hit_emitter<PathGeometry>(hit.instance,hit.primitive,hit.object,hit.world_to_object,hit.barycentrics).area;
@@ -769,7 +772,7 @@ uint continuation_mask(uint bounce, uint diffuse, uint glossy, uint transmission
 float3 mesh_connection<V:IVariant,P:IProgram>(float3 origin, float3 direction, float distance, uint event, uint transparent, float incident_ior, inout uint rng) {
     var remaining=distance;var transmittance=float3(1.);
     for (;;) {
-        let hit=trace<P>(origin,direction,remaining,event);
+        let hit=trace<V,P>(origin,direction,remaining,event);
         if (hit.t<0.) {return transmittance;}
         float3 face;bool entering;float weight;HitSurface shading;
         let c=path_closure<V,P>(hit,direction,P.lobes ? path_random(rng) : 0.,P.lit ? pixel_hash(rng) : 0u,face,entering,weight,shading);
@@ -786,10 +789,10 @@ float3 mesh_connection<V:IVariant,P:IProgram>(float3 origin, float3 direction, f
 }
 struct ImplicitSourceSample {bool found;uint object;float3 point;float3 face;float3 direction;float distance;float pdf;float3 emitted;};
 ImplicitSourceSample implicit_source<V:IVariant,P:IProgram>(float3 world,PathSampler sampler) {
-    ImplicitSourceSample result={};let count=path_settings.implicit.w;
+    ImplicitSourceSample result={};let count=path_fields<V>().w;
     if(count==0u) {return result;}
     let u=path_triangle(sampler);
-    let selected=field_emitter<PathGeometry>(path_settings.implicit,min(uint(u.x*float(count)),count-1u));
+    let selected=field_emitter<PathGeometry>(path_fields<V>(),min(uint(u.x*float(count)),count-1u));
     if(!catcher_keeps(selected.object) || collapsed_endpoint(objects[selected.object].model)) {return result;}
     float density;let direction=field_emitter_direction<PathGeometry>(selected,world,u.yz,density);
     if(density<=0.) {return result;}
@@ -810,7 +813,7 @@ ImplicitSourceSample implicit_source<V:IVariant,P:IProgram>(float3 world,PathSam
     }
 }
 float3 implicit_next_event<V:IVariant,P:IProgram>(HitSurface receiver,Closure c,float3 view,float3 world,float3 error,float3 geometric,DielectricInterface media,uint continuation,uint transparent,TransportPreparation prepared,PathSampler sampler,float optical_length,inout uint rng) {
-    if(receiver.s.is_hair || path_settings.implicit.w==0u) {return float3(0.);}
+    if(receiver.s.is_hair || path_fields<V>().w==0u) {return float3(0.);}
     let source=implicit_source<V,P>(world,sampler);
     if(!source.found || !any(source.emitted>float3(0.))) {return float3(0.);}
     let axis=source.direction;let visible=objects[source.object].metadata.y;
@@ -861,7 +864,7 @@ float3 mesh_next_event<V:IVariant,P:IProgram>(HitSurface receiver, Closure c, fl
     let point=geometry.point;let delta=point-world;let distance=length(delta);
     if (distance<=0.) {return float3(0.);}
     let axis=delta/distance;let source_face=geometry.face;
-    let pdf=mesh_pdf(hit,world,point,source_face);if (pdf<=0.) {return float3(0.);}
+    let pdf=mesh_pdf<V>(hit,world,point,source_face);if (pdf<=0.) {return float3(0.);}
     let source=dielectric_surface<V,P,PathGeometry>(hit,axis,float2(0.),Lobe(0u,0.));
     if(source.s.discarded) {return float3(0.);}
     let emitted=path_spectrum(emitter_mesh_radiance<V,P>(source),true)*source.s.closure.geometry_opacity;
@@ -891,7 +894,7 @@ float3 phase_connection<V:IVariant,P:IProgram>(float3 world,float3 direction,flo
 float3 phase_analytic<V:IVariant,P:IProgram>(PathMediumInterval medium,PathPhaseDirection phase,float3 incident,float3 world,uint groups,uint transparent,PathBoundary optical,PathSampler sampler,float optical_length, inout uint rng) {
     if(uint(frame_light_count(frame))==0u) {return float3(0.);}
     let u=path_light(sampler);
-    float probability;let i=pick_light(u.z,probability);if(probability<=0.) {return float3(0.);}
+    float probability;let i=pick_light(u.zw,world,probability);if(probability<=0.) {return float3(0.);}
     let l=light_values<Unspecialized>(i);let contribution=lights[i].shadow_offsets[REG_LIGHT_CONTRIBUTION_WORD];
     if((contribution&REG_RAY_VOLUME)==0u) {return float3(0.);}
     let source=emitter_sample_li<V>(l,i,world,u.xy,uint(frame.temporal.x));var value=float3(0.);
@@ -988,7 +991,7 @@ void camera_surface_aovs<V:IVariant,P:IProgram>(float3 origin,float3 direction,u
             float3 transfer;
             if(!propagation_segment(origin,direction,escaped,previous_distance,pending,transfer)) return;
         }
-        let hit=trace<P>(origin,direction,pending,REG_RAY_CAMERA);
+        let hit=trace<V,P>(origin,direction,pending,REG_RAY_CAMERA);
         if(hit.t<0.) {
             if(pending==REG_FP32_MAX) return;
             origin+=direction*pending;pending=0.;continue;
@@ -1054,11 +1057,11 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
             }
             visibility_minimum=minimum;hit.t=-1.;
             if(minimum<segment_limit) {
-                hit=trace<P>(origin+direction*minimum,direction,max(0.,trace_limit-minimum),ray_event);
+                hit=trace<V,P>(origin+direction*minimum,direction,max(0.,trace_limit-minimum),ray_event);
                 if(hit.t>=0.) hit.t+=minimum;
             }
 #else
-            hit=trace<P>(origin,direction,trace_limit,ray_event);
+            hit=trace<V,P>(origin,direction,trace_limit,ray_event);
 #endif
 #ifdef VORK_PATH_MEDIA
             medium_hit=false;
@@ -1230,7 +1233,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
 #ifdef VORK_PROPAGATION
         let emission_mis=previous_pdf>0. ? mis_power(previous_pdf,1./(4.*REG_PI)) : 1.;
 #else
-        let emission_mis=previous_pdf>0. ? mis_power(previous_pdf,mesh_pdf(hit,previous_world,world,geometric)) : 1.;
+        let emission_mis=previous_pdf>0. ? mis_power(previous_pdf,mesh_pdf<V>(hit,previous_world,world,geometric)) : 1.;
 #endif
         // Lit can encode reflected receiver response in an unlit closure. It
         // remains a direction-only term, independent of source-emission MIS.
@@ -1450,9 +1453,9 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
     origin=camera_origin;
 #endif
 #ifndef VORK_PROPAGATION
-    if(path_settings.implicit.y>0u || (frame.camera_program.z&2u)!=0u) {
+    if(path_fields<V>().y>0u || (frame.camera_program.z&2u)!=0u) {
         var control_origin=origin;var control_direction=direction;
-        let primary=trace<P>(control_origin,control_direction,max(0.,camera_max-camera_min),REG_RAY_CAMERA);
+        let primary=trace<V,P>(control_origin,control_direction,max(0.,camera_max-camera_min),REG_RAY_CAMERA);
         float2 depth=float2(1.);float4 normal=float4(0.);uint id=0u;
         if(primary.t>=0.) {
             let h=dielectric_surface<V,P,PathGeometry>(primary,control_direction,float2(2.)/float2(width,height),Lobe(0u,0.));
@@ -1462,7 +1465,7 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
         field_depth[gid.xy]=depth;field_normals[gid.xy]=normal;field_ids[gid.xy]=id;
     }
 #endif
-    let occupancy_initial=camera_occupancy<V,P,PathGeometry,N>(path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_settings.implicit.x,path_settings.implicit.y);
+    let occupancy_initial=camera_occupancy<V,P,PathGeometry,N>(path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_fields<V>().x,path_fields<V>().y);
     var occupancy=occupancy_initial;
 #ifdef VORK_LIGHT_PATHS
     for(var k=0u;k<occupancy.count;k++) {
@@ -1491,7 +1494,7 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
             lit=float4(value.rgb,1.);
             catcher_without_cg=true;rng=initial_rng;
             // Rebuild camera containment after removing CG, including implicit solids.
-            var reference_occupancy=camera_occupancy<V,P,PathGeometry,N>(path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_settings.implicit.x,path_settings.implicit.y);
+            var reference_occupancy=camera_occupancy<V,P,PathGeometry,N>(path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_fields<V>().x,path_fields<V>().y);
 #ifdef VORK_LIGHT_PATHS
             for(var k=0u;k<reference_occupancy.count;k++) {
                 var boundary=reference_occupancy.at(k);boundary.color=path_spectrum(boundary.color);boundary.ior=spectral_ior(boundary.ior,vork_path_wavelength,boundary.dispersion_scale,boundary.dispersion_abbe);reference_occupancy.set(k,boundary);

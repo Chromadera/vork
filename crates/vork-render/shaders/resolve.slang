@@ -112,7 +112,9 @@ float3 screen_reflection(int2 p) {
     return sum;
 }
 // WORLD MEDIUM: medium.rs installs the volume integration entries here.
-bool colour_requires_controls() {return !fused_controls;}
+bool colour_requires_controls() {
+    return !fused_controls && (frame.flags.w>0. || (frame.projection.z==REG_REFLECTIONS_RAY && frame.sampling.w>0u));
+}
 float3 linear_color(int2 p) {
     // Spectral matching functions have signed RGB samples. Retain the signs
     // until exposure integration; clipping each sample biases their mean.
@@ -163,7 +165,7 @@ void store_color(float4 associated,float3 unassociated,float alpha,uint2 pixel,u
 }
 
 void resolve_pixel(uint3 gid) {
-    let size=dimensions(color);if (gid.x>=size.x || gid.y>=size.y) {return;}
+    let size=uint2(frame.display.yz);if (gid.x>=size.x || gid.y>=size.y) {return;}
     let p=int2(gid.xy);let i=gid.y*size.x+gid.x;let count=size.x*size.y;
     let full_i=gid.y*size.x+gid.x;
     let flags=uint(frame.projection.w);let final_sample=frame.temporal.x+1.>=frame.temporal.y;

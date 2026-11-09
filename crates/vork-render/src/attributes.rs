@@ -90,9 +90,6 @@ pub(crate) fn resolve<'a>(scene: &'a v2::Scene, node: &v2::Node, name: &str) -> 
     let instance = instances.as_ref().and_then(|i| i.attributes.get(name));
     ensure!(vertex.is_none() || instance.is_none(), "attribute {name:?} exists on both geometry and instances");
     let buffer = vertex.or(instance).with_context(|| format!("missing attribute {name:?}"))?;
-    if vertex.is_none() && scene.programs.values().any(|p| p.is_compute() && p.bindings.values().any(|b| b == buffer)) {
-        crate::warnings::dropped("computed_attribute", serde_json::json!({"node":node,"attribute":name,"buffer":buffer}), format!("warning: node {:?}: ignored compute updates to material attribute {name:?}; using authored values",node.name));
-    }
     Ok(scene.buffers.get_key_value(buffer).context("unknown attribute buffer")?.0)
 }
 

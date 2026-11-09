@@ -28,9 +28,9 @@ class InstallerTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def fixture(self, member='vork'):
+    def fixture(self, member='vork', binary=b'#!/bin/sh\necho fixture "$@"\n'):
         with tarfile.open(self.archive, 'w:gz') as tar:
-            for name, data, mode in [(member, b'#!/bin/sh\necho fixture "$@"\n', 0o755),
+            for name, data, mode in [(member, binary, 0o755),
                                      ('examples/scene.json', b'{}', 0o644),
                                      ('slang/bin/slangc', b'compiler', 0o755),
                                      ('oidn/lib/model', b'model', 0o644),
@@ -204,11 +204,75 @@ class InstallerTests(unittest.TestCase):
         self.env.update(SHELL='/bin/zsh', PATH='/usr/bin:/bin:/usr/sbin:/sbin')
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('prefix/bin:$PATH', result.stdout)
+        self.assertIn("prefix/bin':\"$PATH\"", result.stdout)
         del self.env['PREFIX']
         self.env['VORK_NO_MODIFY_PATH'] = '1'
         self.assertEqual(self.run_installer().returncode, 0)
         self.assertFalse((home / '.zshenv').exists())
+
+    def test_macos_floor_is_checked_before_download(self):
+        tools = self.root / 'tools'; tools.mkdir()
+        for name, content in [('uname', '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; esac\n'),
+                              ('sw_vers', '#!/bin/sh\necho "$TEST_MACOS_VERSION"\n')]:
+            path = tools / name; path.write_text(content); path.chmod(0o755)
+        self.env['PATH'] = str(tools) + os.pathsep + os.environ['PATH']
+        for version in ['15.7', '25.9', 'unknown', '']:
+            self.env['TEST_MACOS_VERSION'] = version
+            result = self.run_installer('--dry-run')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('bundled Slang', result.stderr)
+            self.assertIn('Nothing was downloaded', result.stderr)
+        for version in ['26.0', '26.1', '27.0']:
+            self.env['TEST_MACOS_VERSION'] = version
+            self.assertEqual(self.run_installer('--dry-run').returncode, 0)
+        self.assertFalse((self.root / 'prefix').exists())
+
+    def test_extraction_failure_is_bounded_and_preserves_old_tree(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        notice = (self.root / 'prefix/lib/vork/NOTICE').read_bytes()
+        tools = self.root / 'tools'; tools.mkdir()
+        real_tar = shutil.which('tar')
+        fake = tools / 'tar'
+        fake.write_text('#!/bin/sh\nif [ "$1" = -xzf ]; then i=0; while [ "$i" -lt 2000 ]; do echo "tar: No space left on device" >&2; i=$((i+1)); done; exit 2; fi\nexec "' + real_tar + '" "$@"\n')
+        fake.chmod(0o755)
+        self.env['PATH'] = str(tools) + os.pathsep + os.environ['PATH']
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not extract', result.stderr)
+        self.assertIn('No space left on device', result.stderr)
+        self.assertEqual(result.stderr.count('tar: No space left on device'), 8)
+        self.assertEqual((self.root / 'prefix/lib/vork/NOTICE').read_bytes(), notice)
+        self.assertEqual([p.name for p in (self.root / 'prefix/lib').iterdir()], ['vork'])
+
+    def test_failed_publication_restores_previous_tree(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        tools = self.root / 'tools'; tools.mkdir()
+        real_mv = shutil.which('mv')
+        fake = tools / 'mv'
+        fake.write_text('#!/bin/sh\ncase "$1" in */.vork-new.*) echo "injected rename failure" >&2; exit 1;; esac\nexec "' + real_mv + '" "$@"\n')
+        fake.chmod(0o755)
+        self.env['PATH'] = str(tools) + os.pathsep + os.environ['PATH']
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / 'prefix/bin/vork').resolve().is_file())
+        self.assertEqual([p.name for p in (self.root / 'prefix/lib').iterdir()], ['vork'])
+
+    def test_printed_commands_are_shell_literals(self):
+        self.env['PREFIX'] = str(self.root / "Zoë O'Neil $(touch injected) `touch injected2`")
+        self.fixture(binary=b'#!/bin/sh\n[ "$1" != setup ] || [ "${FIXTURE_FAIL_SETUP:-}" != 1 ]\n')
+        self.env['FIXTURE_FAIL_SETUP'] = '1'
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        retry = result.stderr.split('then run: ', 1)[1].splitlines()[0]
+        env = {**self.env, 'FIXTURE_FAIL_SETUP': '0'}
+        pasted = subprocess.run(['sh', '-c', retry], cwd=self.root, env=env, capture_output=True)
+        self.assertEqual(pasted.returncode, 0, pasted.stderr)
+        path_line = next(line.strip() for line in result.stderr.splitlines() if line.strip().startswith('export PATH='))
+        pasted = subprocess.run(['sh', '-c', path_line + '; command -v vork'], cwd=self.root,
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(pasted.stdout.strip(), self.env['PREFIX'] + '/bin/vork')
+        self.assertFalse((self.root / 'injected').exists())
+        self.assertFalse((self.root / 'injected2').exists())
 
     def test_dry_run_downloads_and_writes_nothing(self):
         self.env['VORK_DOWNLOAD_BASE'] = 'https://github.com/voyager-so/vork/releases/download/vtest'
@@ -216,6 +280,26 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('SHA256SUMS', result.stdout)
         self.assertFalse((self.root / 'prefix').exists())
+
+@unittest.skipUnless(shutil.which('pwsh') or (os.name == 'nt' and shutil.which('powershell')), 'needs PowerShell')
+class PowerShellLiteralTests(unittest.TestCase):
+    def test_retry_path_is_not_evaluated_as_shell_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "Zoë O'Neil $(throw 'injected') `x`"
+            folder.mkdir()
+            native = folder / 'native.ps1'
+            native.write_text("param([string]$action)\nif ($action -ne 'setup') { exit 1 }; 'native setup'\n", encoding='utf-8-sig')
+            source = PS_INSTALLER.read_text()
+            quote = source[source.index('function Quote-ShellLiteral'):source.index('$bin = $prefix')]
+            script = root / 'test.ps1'
+            script.write_text("$ErrorActionPreference = 'Stop'\n" + quote + "\n$exe = @'\n" + str(native) + "\n'@\n" +
+                              '$quotedExe = Quote-ShellLiteral $exe\nInvoke-Expression "& $quotedExe setup"\n', encoding='utf-8-sig')
+            shell = shutil.which('pwsh') or 'powershell'
+            result = subprocess.run([shell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), 'native setup')
 
 @unittest.skipUnless(os.name == 'nt', 'PowerShell installer is Windows-only')
 class PowerShellInstallerTests(unittest.TestCase):

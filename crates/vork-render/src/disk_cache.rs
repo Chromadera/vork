@@ -338,7 +338,8 @@ pub(crate) fn read_pipeline(path: &Path) -> Option<Vec<u8>> {
     read(path)
 }
 
-pub(crate) fn write_pipeline(path: &Path, payload: &[u8]) -> std::io::Result<bool> {
+/// Report whether publication committed; budget refusal is not a saved entry.
+pub(crate) fn write_entry(path: &Path, payload: &[u8]) -> std::io::Result<bool> {
     publish_parts(path, &[payload])
 }
 
@@ -570,7 +571,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("vork-pipeline-large-{}", std::process::id()));
         let path = root.join("driver.entry");
         let payload = vec![7; 64 * 1024 * 1024 + 1];
-        assert!(write_pipeline(&path, &payload).unwrap());
+        assert!(write_entry(&path, &payload).unwrap());
         assert_eq!(read_pipeline(&path).unwrap(), payload);
         fs::remove_dir_all(root).unwrap();
     }
@@ -579,8 +580,8 @@ mod tests {
     fn pipeline_budget_worker() {
         let Some(root) = std::env::var_os("VORK_PIPELINE_TEST_ROOT") else { return; };
         let path = PathBuf::from(root).join("driver.entry");
-        write_pipeline(&path, b"previous").unwrap();
-        assert!(!write_pipeline(&path, &[0; 1024]).unwrap());
+        write_entry(&path, b"previous").unwrap();
+        assert!(!write_entry(&path, &[0; 1024]).unwrap());
         assert_eq!(read_pipeline(&path).unwrap(), b"previous");
     }
 

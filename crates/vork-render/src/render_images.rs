@@ -285,15 +285,17 @@ impl CaptureView {
             // The shared stateless volume has its own exact input tracker. Retain
             // its revision, including updates made while this capture did not run.
             inputs.extend_from_slice(bytemuck::cast_slice(&lighting_revisions));
-            inputs.extend_from_slice(&s.environment.sample_key(base.scene[0])?);
-            // Captures share the first parent sample's pose (independent capture
+            inputs.extend_from_slice(&s.environment.sample_key(&frame.sample_request)?);
+            // Captures share the current parent sample's pose (independent capture
             // shutters are rejected). Include every immutable footage selection:
             // secondary hits, shadows and upstream captures can observe it too.
             // Use selected source frames, not publication revisions, so a seek or
             // another slot's overwrite cannot force replay of identical inputs.
             for source in s.footage.values().filter(|source|source.per_sample) {
-                let clock=s.animation.image_time(&frame.animation_values,&source.name,source.time.unwrap_or(base.scene[0]));
-                inputs.extend_from_slice(&(source.frame_index(clock,s.render.fps)? as u64).to_le_bytes());
+                let request=frame.sample_request.exact()?;
+                let base=source.time.as_ref().map(|t|vork_time::exact::Germ::point(t.exact())).unwrap_or_else(||request.clone());
+                let clock=s.animation.image_time_exact(&frame.animation_values,&request,&source.name,base)?;
+                inputs.extend_from_slice(&(source.frame_index(&clock,s.render.fps)? as u64).to_le_bytes());
             }
             // Native raster shading has no time input. Programs, media, compositors
             // and animated path seeds do; keep the actual uniforms unchanged.
@@ -392,6 +394,7 @@ impl CaptureView {
         last: bool,
         denoise_timing: &mut denoise::Timing,
         segments: &mut crate::command_finish::Segments,
+        changes: &mut crate::values::ChangeTracker,
     ) -> Result<()> {
         let samples = self.view.sample_count as u32;
         let frame = &mut self.view;
@@ -406,7 +409,7 @@ impl CaptureView {
             );
             environment.publish_metadata(encoder,&frame.uniform);
             if let Some(values) = &self.camera_selections {
-                frame.camera_cull.copy_sample(encoder, values, sample);
+                frame.camera_cull.copy_sample(encoder, changes, values, sample);
             }
             let bits = crate::graph::RunBits {
                 color: frame.color_enabled, final_sample: sample + 1 == samples,

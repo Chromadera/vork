@@ -47,6 +47,8 @@ pub const FEATURE_SPECIALIZED: FeatureMask = 1 << 63;
 pub const FEATURE_RECORD_WORDS: FeatureMask = FEATURE_CAMERA_RECEIVERS | FEATURE_REFLECTIONS | FEATURE_INDIRECT_CONTROLS;
 /// An unspecialized key takes `FEATURE_RECORD_WORDS` from its mask instead of enabling them.
 pub const FEATURE_EXACT_RECORD: FeatureMask = 1 << 70;
+/// Installed implicit geometry; path-only scene union, never a per-material key.
+pub const FEATURE_IMPLICIT_GEOMETRY: FeatureMask = 1 << 71;
 /// Hashed (dithered) camera coverage: the entry declares SV_PrimitiveID.
 /// Declaring that input costs every draw of the pipeline, measured +8% of a
 /// motion-blurred car's controls pass on L4, so table entries declare it only
@@ -197,6 +199,7 @@ pub fn variant_capabilities(f: FeatureMask, ray_shadows: bool, subsurface: bool,
         ("has_lobes", Capability::Bool(bit(FEATURE_LOBES))),
         ("has_lit", Capability::Bool(bit(FEATURE_LIT))),
         ("light_types", Capability::Uint(light_types)),
+        ("has_implicit_geometry", Capability::Bool(bit(FEATURE_IMPLICIT_GEOMETRY))),
     ]
 }
 
@@ -301,6 +304,17 @@ pub const METAL_TARGET: (&str, &str, &[&str]) = ("metal", "metal", &["-line-dire
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn implicit_geometry_is_conservative_for_generic_keys() {
+        let has_fields = |features| variant_capabilities(features, false, false, false)
+            .into_iter().find(|(name, _)| *name == "has_implicit_geometry").unwrap().1;
+        assert_eq!(has_fields(0), Capability::Bool(true));
+        assert_eq!(has_fields(FEATURE_SPECIALIZED), Capability::Bool(false));
+        assert_eq!(has_fields(FEATURE_SPECIALIZED | FEATURE_IMPLICIT_GEOMETRY), Capability::Bool(true));
+        // The new capability is appended: existing late-specialization IDs stay stable.
+        assert_eq!(variant_capabilities(0, false, false, false).last().unwrap().0, "has_implicit_geometry");
+    }
+
     #[test]
     fn late_capabilities_cover_the_shader_interface() {
         let source=include_str!("../shaders/variant.slang");

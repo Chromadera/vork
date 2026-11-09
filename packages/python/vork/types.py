@@ -10,6 +10,7 @@ Blend = Literal['replace', 'add']
 Buffer = Union['InlineBuffer', 'FileBuffer', 'DenseBuffer']
 BufferType = Literal['f32', 'i32', 'u32', 'vec2', 'vec3', 'vec4', 'uvec4', 'mat4']
 Channel = Literal['r', 'g', 'b', 'a', 'rgb']
+Clock = Union[float, str]
 ColorSpace = Literal['sRGB', 'Linear Rec.709', 'Non-Color']
 CompositeEntry = Union['NameOr', 'CompositeNode']
 CompositeResolution = Union[list[int], float]
@@ -37,6 +38,7 @@ Profile = 'ProfileFile'
 Program = Union['FileProgram', 'SourceProgram']
 Rotation = Union[list[float], 'Rotation1']
 SubdivisionType = Literal['catmull_clark', 'simple']
+Time = Union[float, str]
 Topology = Union[Literal['triangles', 'points', 'curves'], Literal['implicit']]
 Wrap = Literal['repeat', 'clamp_to_edge', 'mirrored_repeat']
 Aov = TypedDict('Aov', {'name': Required[str], 'type': Required['AovType']}, total=False)
@@ -52,7 +54,7 @@ CompositeNode = TypedDict('CompositeNode', {'material': Required['NameOr'], 'nam
 EdgeCrease = TypedDict('EdgeCrease', {'crease': Required[float], 'vertices': Required[list[int]]}, total=False)
 Geometry = TypedDict('Geometry', {'attributes': Required[dict[str, 'NameOr3']], 'count': Union['NameOr3', None], 'crease_edge': list['EdgeCrease'], 'curve_vertex_counts': Union['NameOr3', None], 'face_vertex_counts': Union[list[int], None], 'ids': Union['NameOr3', None], 'indices': Union['NameOr3', None], 'material_ranges': list['MaterialRange'], 'morphs': dict[str, 'Morph'], 'subdivision': Union['SubdivisionSurface', None], 'topology': 'Topology', 'widths': Union['NameOr3', None]}, total=False)
 GridBinding = TypedDict('GridBinding', {'grid': Required['NameOr3']}, total=False)
-Image = TypedDict('Image', {'color_space': Union['ColorSpace', None], 'file': Union[str, None], 'mag_filter': 'MagFilter', 'min_filter': 'MinFilter', 'render': Union['ImageRender', None], 'time': Union[float, None], 'wrap_s': 'Wrap', 'wrap_t': 'Wrap'}, total=False)
+Image = TypedDict('Image', {'color_space': Union['ColorSpace', None], 'file': Union[str, None], 'mag_filter': 'MagFilter', 'min_filter': 'MinFilter', 'render': Union['ImageRender', None], 'time': Union['Clock', None], 'wrap_s': 'Wrap', 'wrap_t': 'Wrap'}, total=False)
 ImageRender = TypedDict('ImageRender', {'background': 'Background', 'camera': Union[str, None], 'compositor': list['CompositeEntry'], 'resolution': list[int], 'root': Union[str, None]}, total=False)
 Instances = TypedDict('Instances', {'attributes': Required[dict[str, 'NameOr3']], 'count': Union['NameOr3', None]}, total=False)
 Keys1 = TypedDict('Keys1', {'times': Required['NameOr3'], 'values': Required['NameOr3']}, total=False)
@@ -72,10 +74,10 @@ ProfileFile = TypedDict('ProfileFile', {'description': str, 'level': Required[in
 FileProgram = TypedDict('FileProgram', {'bindings': dict[str, 'NameOr3'], 'dispatch': Union['ComputeDispatch', None], 'file': Required[Union[str]], 'schedule': Union['ComputeSchedule', None], 'source': None, 'source_origin': None}, total=False)
 SourceProgram = TypedDict('SourceProgram', {'bindings': dict[str, 'NameOr3'], 'dispatch': Union['ComputeDispatch', None], 'file': None, 'schedule': Union['ComputeSchedule', None], 'source': Required[Union[str]], 'source_origin': Union[str, None]}, total=False)
 Propagation = TypedDict('Propagation', {'bounds': Required[list[list[float]]], 'program': Required[str]}, total=False)
-Render = TypedDict('Render', {'aovs': list['Aov'], 'background': 'Background', 'camera': Union[str, None], 'compositor': list['CompositeEntry'], 'display': 'NameOr', 'duration': float, 'fps': float, 'motion_blur': Union['MotionBlur', None], 'resolution': list[int], 'root': Union[str, None]}, total=False)
+Render = TypedDict('Render', {'aovs': list['Aov'], 'background': 'Background', 'camera': Union[str, None], 'compositor': list['CompositeEntry'], 'display': 'NameOr', 'duration': 'Clock', 'fps': 'Time', 'motion_blur': Union['MotionBlur', None], 'resolution': list[int], 'root': Union[str, None]}, total=False)
 Rotation1 = TypedDict('Rotation1', {'euler': Required[list[float]]}, total=False)
 Settings = TypedDict('Settings', {'denoise': bool, 'samples': int, 'seed': int}, total=False)
-Simulation = TypedDict('Simulation', {'dt': Required[float], 'init': Required[list[str]], 'seed': Required[int], 'state': Required[list[str]], 'steps': Required[list[str]], 't0': Required[float]}, total=False)
+Simulation = TypedDict('Simulation', {'dt': Required['Clock'], 'init': Required[list[str]], 'seed': Required[int], 'state': Required[list[str]], 'steps': Required[list[str]], 't0': Required['Clock']}, total=False)
 Skin = TypedDict('Skin', {'inverse_bind_matrices': Required['NameOr3'], 'joints': Required[list[str]]}, total=False)
 SubdivisionSurface = TypedDict('SubdivisionSurface', {'render_levels': int, 'subdivision_type': 'SubdivisionType', 'use_limit_surface': bool}, total=False)
 TextureBinding = TypedDict('TextureBinding', {'image': Required['NameOr4']}, total=False)

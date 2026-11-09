@@ -195,10 +195,12 @@ fn camera_permutation(index: usize, count: usize, stream: u32) -> usize {
 }
 
 /// A separate stratified shutter dimension, centered for a one-sample exposure.
-pub(crate) fn shutter_time(index: usize, count: usize) -> f32 {
-    let count = count.max(1);
-    (camera_permutation(index, count, 0x73687574) as f32 + 0.5) / count as f32
+pub(crate) fn shutter_index(index:usize,count:usize)->usize {camera_permutation(index,count.max(1),0x73687574)}
+#[cfg(test)]
+pub(crate) fn shutter_time(index:usize,count:usize)->f32 {
+    (shutter_index(index,count) as f32+0.5)/count.max(1) as f32
 }
+
 
 pub(crate) fn projection(
     mut projection: Mat4,

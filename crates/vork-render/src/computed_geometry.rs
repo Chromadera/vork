@@ -33,7 +33,7 @@ pub(crate) struct Frame {
     readback: wgpu::Buffer,
     initial: wgpu::Buffer,
     identity: Option<wgpu::Buffer>,
-    history: std::sync::Mutex<std::collections::BTreeMap<u32, Vec<wgpu::Buffer>>>,
+    history: std::sync::Mutex<std::collections::BTreeMap<[u32;2], Vec<wgpu::Buffer>>>,
 }
 impl Mesh {
     pub fn new(
@@ -535,7 +535,7 @@ pub(crate) fn resources(r: &Renderer, s: &InstalledScene) -> Result<Vec<Option<F
         .collect()
 }
 
-fn snapshot_sources(r: &Renderer, mesh: &Mesh, frame: &Frame, encoder: &mut wgpu::CommandEncoder, key: u32) {
+fn snapshot_sources(r: &Renderer, mesh: &Mesh, frame: &Frame, encoder: &mut wgpu::CommandEncoder, key: [u32;2]) {
     let mut history = frame.history.lock().unwrap();
     if history.contains_key(&key) {return;}
     let snapshots = mesh.history_ranges.iter().enumerate().map(|(page,ranges)| {
@@ -553,7 +553,7 @@ fn snapshot_sources(r: &Renderer, mesh: &Mesh, frame: &Frame, encoder: &mut wgpu
 
 /// Retain only geometry source columns at the exposure's historical times.
 /// The submission owner calls this before any current shutter state is consumed.
-pub(crate) fn prepare_history(r: &Renderer, s: &InstalledScene, frames: &[Option<Frame>], times: &[f32], checkpoint: &mut Option<compute::Checkpoint>) -> Result<()> {
+pub(crate) fn prepare_history(r: &Renderer, s: &InstalledScene, frames: &[Option<Frame>], times: &[vork_time::Request], checkpoint: &mut Option<compute::Checkpoint>) -> Result<()> {
     if !frames.iter().any(Option::is_some) { return Ok(()); }
     let compute = s.compute.as_ref().context("computed geometry schedule")?;
     let mut cursor = compute.cursor.lock().unwrap();
@@ -561,12 +561,13 @@ pub(crate) fn prepare_history(r: &Renderer, s: &InstalledScene, frames: &[Option
     for (i,frame) in frames.iter().enumerate() {
         let Some(frame) = frame else {continue};
         let mesh = s.computed_geometry[i].as_ref().unwrap();
-        let keys: BTreeSet<_> = times.iter().map(|&t| compute.geometry_time_key(&mesh.sources,t)).collect::<Result<_>>()?;
+        let keys: BTreeSet<_> = times.iter().map(|t| compute.geometry_time_key(&mesh.sources,t)).collect::<Result<_>>()?;
         frame.history.lock().unwrap().retain(|key,_| keys.contains(key));
     }
-    let mut times = times.to_vec(); times.sort_by(f32::total_cmp); times.dedup();
+    let mut times=times.iter().map(|t|Ok((t.exact()?,t))).collect::<Result<Vec<_>>>()?;
+    times.sort_by(|a,b|a.0.compare(&b.0));times.dedup_by(|a,b|a.0==b.0);
     let mut encoder = r.device.create_command_encoder(&Default::default());
-    for time in times {
+    for (_,time) in times {
         let missing = frames.iter().enumerate().any(|(i,frame)| frame.as_ref().is_some_and(|frame| {
             let mesh = s.computed_geometry[i].as_ref().unwrap();
             !frame.history.lock().unwrap().contains_key(&compute.geometry_time_key(&mesh.sources,time).unwrap())
@@ -595,8 +596,8 @@ pub(crate) fn evaluate(
     frames: &[Option<Frame>],
     cached: &[Option<(Vec3, Vec3)>],
     changes: &mut values::ChangeTracker,
-    time: f32,
-    previous: f32,
+    time: &vork_time::Request,
+    previous: &vork_time::Request,
     checkpoint: &mut Option<compute::Checkpoint>,
 ) -> Result<Vec<Option<(Vec3, Vec3)>>> {
     if !frames.iter().any(Option::is_some) {
@@ -613,13 +614,13 @@ pub(crate) fn evaluate(
             label: Some("computed geometry before visibility"),
         });
     let mut advance =
-        |encoder: &mut wgpu::CommandEncoder, cursor: &mut compute::Cursor, t: f32| -> Result<()> {
+        |encoder: &mut wgpu::CommandEncoder, cursor: &mut compute::Cursor, t: &vork_time::Request| -> Result<()> {
             // Retain the two generations bracketing each current publication.
             // Previous-frame arithmetic can request the preceding canonical tick
             // at a float boundary. Copies observe only ticks already executing.
             let mut wanted: BTreeSet<_> = cursor.requested.keys().flat_map(|&tick|[tick.saturating_sub(1),tick]).collect();
             for mesh in s.computed_geometry.iter().flatten().filter(|mesh|compute.geometry_uses_simulation_clock(&mesh.sources)) {
-                let tick=compute.geometry_time_key(&mesh.sources,t)?;
+                let tick=compute.geometry_time_key(&mesh.sources,t)?[0];
                 wanted.extend([tick.saturating_sub(1),tick]);
             }
             let saved = compute.advance_observing(encoder, cursor, t, |encoder| {
@@ -631,7 +632,7 @@ pub(crate) fn evaluate(
                 for (i,frame) in frames.iter().enumerate() {
                     let Some(frame)=frame else {continue};
                     let mesh=s.computed_geometry[i].as_ref().unwrap();
-                    if compute.geometry_uses_simulation_clock(&mesh.sources) {snapshot_sources(r,mesh,frame,encoder,tick);}
+                    if compute.geometry_uses_simulation_clock(&mesh.sources) {snapshot_sources(r,mesh,frame,encoder,[tick,0]);}
                 }
             })?;
             if checkpoint.is_none() {
@@ -657,8 +658,8 @@ pub(crate) fn evaluate(
             key.extend(changes.stream_version(n).to_le_bytes());
         }
         if compute.varying(&mesh.position_sources) {
-            key.extend(time.to_le_bytes());
-            key.extend(previous.to_le_bytes());
+            key.extend(bytemuck::bytes_of(&compute.geometry_time_key(&mesh.sources,time)?));
+            key.extend(bytemuck::bytes_of(&compute.geometry_time_key(&mesh.sources,previous)?));
         }
         let dirty =
             changes.changed(values::ChangeKey::ComputedGeometry(i), &key) || cached[i].is_none();
@@ -726,8 +727,8 @@ pub(crate) fn evaluate(
             key.extend(changes.stream_version(n).to_le_bytes());
         }
         if compute.varying(&mesh.position_sources) {
-            key.extend(time.to_le_bytes());
-            key.extend(previous.to_le_bytes());
+            key.extend(bytemuck::bytes_of(&compute.geometry_time_key(&mesh.sources,time)?));
+            key.extend(bytemuck::bytes_of(&compute.geometry_time_key(&mesh.sources,previous)?));
         }
         changes.changed(values::ChangeKey::ComputedGeometry(i), &key);
         let mut key = Vec::new();
@@ -984,7 +985,7 @@ void compute(ComputeContext ctx,Inputs inputs) {
         v2::replace_integrator(&mut value,json!({"integrator":"raster","samples":1,"fast_gi":null,"reflections":"environment"}));
         let s=r.install(serde_json::from_value(value)?,Path::new("."))?;
         let frames=resources(&r,&s)?;let mut checkpoint=None;
-        prepare_history(&r,&s,&frames,&[0.,0.125,0.25],&mut checkpoint)?;
+        prepare_history(&r,&s,&frames,&[0_f32.into(),0.125_f32.into(),0.25_f32.into()],&mut checkpoint)?;
         for mesh in s.computed_geometry.iter().flatten() {
             assert_eq!(mesh.history_ranges.iter().flatten().map(|&(_,_,size)|size).sum::<u64>(),72,"history should retain only three positions and normals");
         }
@@ -998,12 +999,12 @@ void compute(ComputeContext ctx,Inputs inputs) {
         let mut changes=values::ChangeTracker::default();
         let mut cached=vec![None;frames.len()];
         for (time,previous) in [(0.375,0.),(0.5,0.125),(0.625,0.25)] {
-            cached=evaluate(&r,&s,&frames,&cached,&mut changes,time,previous,&mut checkpoint)?;
+            cached=evaluate(&r,&s,&frames,&cached,&mut changes,&vork_time::Request::Numeric(time),&vork_time::Request::Numeric(previous),&mut checkpoint)?;
         }
         assert_eq!(compute.cursor.lock().unwrap().replay_ticks-before,3,"historical gathers replayed the simulation");
-        evaluate(&r,&s,&frames,&cached,&mut changes,1.,0.25,&mut checkpoint)?;
+        evaluate(&r,&s,&frames,&cached,&mut changes,&vork_time::Request::Numeric(1.),&vork_time::Request::Numeric(0.25),&mut checkpoint)?;
         let crossed=compute.cursor.lock().unwrap().replay_ticks;
-        prepare_history(&r,&s,&frames,&[0.875],&mut checkpoint)?;
+        prepare_history(&r,&s,&frames,&[0.875_f32.into()],&mut checkpoint)?;
         assert_eq!(compute.cursor.lock().unwrap().replay_ticks,crossed,"the preceding published generation was replayed");
         Ok(())
     }
@@ -1081,6 +1082,7 @@ void compute(ComputeContext ctx,Inputs inputs) {
         };
         for (source, message) in [
             ("if(i==0u) live_store(0u,4u);", "capacity"),
+            ("if(i==0u) live_store(0u,0xffffffffu);", "capacity"),
             ("width_store(i,-1.);", "width"),
             ("p_store(i,float3(asfloat(0x7f800000u),0,0));", "nonfinite"),
         ] {
@@ -1092,8 +1094,8 @@ void compute(ComputeContext ctx,Inputs inputs) {
             let s = r.install(serde_json::from_value(value)?, Path::new("."))?;
             let mut f = s.create_frame_slot(&r, Default::default())?;
             for _ in 0..2 {
-                let err = f.submit(&s, &r, 0.).unwrap_err().to_string();
-                ensure!(err.contains(message), "{err}");
+                let err = f.submit(&s, &r, 0.).unwrap_err();
+                ensure!(format!("{err:#}").contains(message), "{err:#}");
             }
         }
         Ok(())

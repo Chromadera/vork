@@ -21,7 +21,7 @@ pub const OPENPBR: &[OpenPbrParam] = include!(concat!(env!("OUT_DIR"), "/openpbr
 
 /// Blender 5.2.1 render defaults: 1920 x 1080 at 24 fps.
 pub(super) const RESOLUTION: [u32; 2] = [1920, 1080];
-pub(super) const FPS: f32 = 24.;
+pub(super) const FPS: crate::Time = crate::Time::integer(24);
 /// Blender 5.2.1 motion blur: half-frame shutter (180 degrees).
 pub const MOTION_BLUR_SHUTTER: f32 = 0.5;
 
@@ -36,7 +36,7 @@ pub(super) const WHITE: [f32; 3] = [1.; 3];
 pub(super) const NONDEGENERATE_EPSILON: f32 = 1e-8;
 
 /// Blender factory scene frame range 1..250 at 24 fps, expressed as seconds.
-pub(super) const DURATION_SECONDS: f32 = 250. / 24.;
+pub(super) const DURATION_SECONDS: &str = "125/12";
 /// Blender area-light dimensions, metres; point source radius remains zero.
 pub(super) const AREA_DIMENSION_M: f32 = 1.;
 pub(super) fn area_dimension() -> f32 {

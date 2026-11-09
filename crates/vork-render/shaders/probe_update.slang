@@ -61,8 +61,12 @@ uint ray_hit_buffers_load(uint buffer,uint index) {
 }
 // Interleaved Fibonacci strata jointly cover the full exposure's angular
 // quadrature. Each instantaneous field is normalized by its own ray count.
-uint probe_sample_count() {return probe_grid().counts.w*max(probe_grid().visibility_policy.x,1u);}
-uint probe_sample_index(uint ray) {let strata=max(probe_grid().visibility_policy.x,1u);return ray*strata+uint(frame.temporal.x)%strata;}
+// Zero policy reserves the full budget for an animated shutter. Its current
+// exposure selects the same ray count and dimensions as a fixed-width shutter.
+uint probe_strata() {let fixed=probe_grid().visibility_policy.x;return fixed==0u ? max(uint(frame.temporal.z),1u) : fixed;}
+uint probe_ray_count() {let rays=probe_grid().counts.w;let strata=probe_strata();return probe_grid().visibility_policy.x==0u ? rays/strata+uint(rays%strata!=0u) : rays;}
+uint probe_sample_count() {return probe_ray_count()*probe_strata();}
+uint probe_sample_index(uint ray) {let strata=probe_strata();return ray*strata+uint(frame.temporal.x)%strata;}
 struct ProbeGeometry : IHitGeometry {
     static uint word(uint index) {return ray_alpha[index];}
     static uint load(uint buffer, uint index) {return ray_hit_buffers_load(buffer,index);}
@@ -199,7 +203,7 @@ ProbeSurfaceHit probe_surface_hit<P:IProgram,let directional:bool>(RayDesc desc,
 void probe_trace<V:IVariant,P:IProgram>(uint3 group,uint thread) {
     let index=probe_thread(group,thread);let size=batch.rays.y;
     let probe=index/size;let ray=batch.rays.x+index%size;
-    if (probe>=probe_count() || ray>=probe_grid().counts.w) {return;}
+    if (probe>=probe_count() || ray>=probe_ray_count()) {return;}
     // Invalid captures cannot contribute to any consumer or later generation.
     // Do not repeat their material/light/source work after validity is known.
     if((batch.rays.w&1u)!=0u && probe_irradiance[probe].support.x<probe_grid().bias.w) {return;}
@@ -264,7 +268,7 @@ void probe_gather(uint3 group,uint thread) {
     }
     // Scratch retains its full per-probe stride across both dispatch shapes.
     let record=probe*PROBE_SLOTS+slot;
-    let size=batch.rays.y;let first=batch.rays.x;let rays=probe_grid().counts.w;
+    let size=batch.rays.y;let first=batch.rays.x;let rays=probe_ray_count();
     let count=min(size,rays-first);
     var sum=select(first==0u,float4(0.),sums[record]);
     var axis=float3(0.);
@@ -364,7 +368,7 @@ float4 probe_directional_capture<V:IVariant,P:IProgram>(uint probe,uint ray,floa
 }
 void probe_directional_trace<V:IVariant,P:IProgram>(uint3 group,uint thread) {
     let index=probe_thread(group,thread);let size=batch.rays.y;let provider=index/size;let ray=batch.rays.x+index%size;
-    if(provider>=probe_grid().field.x || ray>=probe_grid().counts.w) {return;}
+    if(provider>=probe_grid().field.x || ray>=probe_ray_count()) {return;}
     let descriptor=visibility_output[probe_provider_base()+provider];if(descriptor.x<0.) {return;}
     let probe=uint(descriptor.x);let direction=probe_direction(probe,ray);
     let at=2u*(provider*size+index%size);
@@ -383,7 +387,7 @@ void probe_directional_gather(uint3 group,uint thread) {
     if(visibility_output[probe_provider_base()+provider].x<0.) {
         for(uint i=0u;i<REG_PROBE_RADIANCE_PAIRS;i++) {visibility_output[atlas+i]=float2(0.);}return;
     }
-    let first=batch.rays.x;let size=batch.rays.y;let count=min(size,probe_grid().counts.w-first);
+    let first=batch.rays.x;let size=batch.rays.y;let count=min(size,probe_ray_count()-first);
     let record=provider*(texels*2u+3u)+texel;
     let sh_record=provider*(texels*2u+3u)+texels*2u+texel;
     var sh=float4(0.);if(texel<3u && first!=0u) {sh=sums[sh_record];}
@@ -398,11 +402,11 @@ void probe_directional_gather(uint3 group,uint thread) {
     }
     sums[record]=sum;sums[record+texels]=depth;
     if(texel<3u) {sums[sh_record]=sh;}
-    if(first+count<probe_grid().counts.w) {return;}
+    if(first+count<probe_ray_count()) {return;}
     if(texel<3u) {
         // Raw radiance's first SH coefficient is 3*mean(L*direction); the
         // normalized rough GGX endpoint has moment 1/2, hence 1.5 here.
-        let value=float4(sh.x,1.5*sh.yzw)/float(probe_grid().counts.w);
+        let value=float4(sh.x,1.5*sh.yzw)/float(probe_ray_count());
         let at=probe_provider_base()+probe_grid().field.x+provider*REG_PROBE_RADIANCE_SH_PAIRS+2u*texel;
         visibility_output[at]=value.xy;visibility_output[at+1u]=value.zw;
     }

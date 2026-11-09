@@ -67,19 +67,21 @@ impl Integral {
     }
 }
 impl Environment {
+    pub(crate) fn has_media(&self)->bool {self.animated.as_ref().is_some_and(|a|a.program.has_media())}
     pub(crate) fn animated(&self) -> bool {
         self.animated.is_some()
     }
-    pub(crate) fn sample_key(&self,time:f32)->Result<Vec<u8>> {
-        Ok(self.animated.as_ref().map_or_else(Vec::new, |a|a.program.sample_key(time)))
+    pub(crate) fn sample_key(&self,time:impl Into<vork_time::Request>)->Result<Vec<u8>> {
+        self.animated.as_ref().map_or_else(||Ok(Vec::new()), |a|a.program.sample_key(time))
     }
     /// Only values change: source radiance, proposal, moments and the retained
     /// filter passes. Every consumer keeps the same installed texture views.
-    pub(crate) fn update(&self, r: &Renderer, time: f32, changes: &mut values::LightingTracker) -> Result<()> {
+    pub(crate) fn update(&self, r: &Renderer, time: impl Into<vork_time::Request>, changes: &mut values::LightingTracker) -> Result<()> {
         let Some(animated) = &self.animated else {
             return Ok(());
         };
-        let key=animated.program.sample_key(time);
+        let time=time.into();
+        let key=animated.program.sample_key(&time)?;
         if !changes.changed(values::LightingKey::EnvironmentRadiance,&key) {return Ok(());}
         animated.program.evaluate_source(r,time)?;
         let mut encoder = r.device.create_command_encoder(&Default::default());
@@ -124,6 +126,18 @@ impl Environment {
                 cache: r.cache.as_ref(),
             })
         })
+    }
+    /// Shared binding layouts still need typed placeholders when no requested
+    /// output reads scene lighting. Do not bake environments or initialize LUTs.
+    pub(crate) fn unused(r:&Renderer)->Self {
+        let d=&r.device;
+        let image=crate::texture(d,"unread environment",1,1,1,wgpu::TextureFormat::Rgba16Float,wgpu::TextureUsages::TEXTURE_BINDING).create_view(&Default::default());
+        let source=environment_program::source_texture(r,[1,1]).create_view(&Default::default());
+        let sampler=d.create_sampler(&Default::default());
+        Self {settings:environment_node::Settings {source:None,material:None,medium:None},
+            primary:None,mean:[0.;3],animated:None,initial_filter_scale:1.,node:None,
+            source,distribution:None,distribution_size:[1,1],specular:image.clone(),diffuse:image.clone(),
+            brdf:image.clone(),ltc:image,sampler:sampler.clone(),image_sampler:sampler}
     }
     pub fn new(
         r: &Renderer,

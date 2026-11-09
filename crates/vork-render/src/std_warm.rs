@@ -71,6 +71,15 @@ pub(crate) fn table_scenes(r: &Renderer) -> Vec<serde_json::Value> {
     })).collect()
 }
 
+/// A process-owned, ordinary image binding shared by setup configurations.
+fn setup_image() -> Result<PathBuf> {
+    static IMAGE_LOCK:std::sync::Mutex<()>=std::sync::Mutex::new(());
+    let _lock=IMAGE_LOCK.lock().unwrap();
+    let file=std::env::temp_dir().join(format!("vork-setup-image-{}.png",std::process::id()));
+    if !file.exists() {image::RgbaImage::from_pixel(4,4,image::Rgba([255;4])).save(&file)?;}
+    Ok(file)
+}
+
 /// One minimal setup scene.
 fn scene(compositor: serde_json::Value, motion_blur: serde_json::Value, meshes: Vec<serde_json::Value>, camera: serde_json::Value,
     world: serde_json::Value, materials: serde_json::Value, sun: serde_json::Value) -> serde_json::Value {
@@ -109,12 +118,7 @@ fn program_scenes(r: &Renderer, name: &'static str, source: &str) -> Result<Vec<
             let program=environment_program::compiled(r,source,&PathBuf::from(format!("{name}.slang")))?;
             let mut inputs=serde_json::Map::new();
             for field in program.inputs.fields.iter().filter(|field|field.ty==vork_slang::Type::Image) {
-                // Setup needs a valid ordinary image binding, not an authored HDRI.
-                // Publish one process-owned white image before any install reads it.
-                static IMAGE_LOCK:std::sync::Mutex<()>=std::sync::Mutex::new(());
-                let _lock=IMAGE_LOCK.lock().unwrap();
-                let file=std::env::temp_dir().join(format!("vork-setup-image-{}.png",std::process::id()));
-                if !file.exists() {image::RgbaImage::from_pixel(1,1,image::Rgba([255;4])).save(&file)?;}
+                let file=setup_image()?;
                 images["setup"]=serde_json::json!({"file":file,"color_space":"Non-Color","wrap_t":"clamp_to_edge"});
                 inputs.insert(field.name.clone(),serde_json::json!({"image":"setup"}));
             }
@@ -219,8 +223,12 @@ fn prepare(mut value: serde_json::Value, mut settings: v2::Settings) -> Result<v
 /// A configuration the renderer refuses for a scene (path transport of an unbounded
 /// sampled world medium) is one no render compiles: setup skips it.
 fn run(r: &Renderer, jobs: impl Iterator<Item = (serde_json::Value, v2::Settings)>, options: InstallOptions) -> Result<()> {
-    let jobs = std::sync::Mutex::new(jobs.collect::<Vec<_>>().into_iter());
-    vork_slang::progress::phase("Setup: warming configurations", jobs.lock().unwrap().len());
+    let jobs:Vec<_>=jobs.collect();
+    let phase=if jobs.iter().all(|(_,settings)|settings.integrator.is_path()) {
+        "Setup: warming path configurations"
+    } else {"Setup: warming configurations"};
+    vork_slang::progress::phase(phase,jobs.len());
+    let jobs = std::sync::Mutex::new(jobs.into_iter());
     let completed = std::sync::atomic::AtomicUsize::new(0);
     let workers = std::thread::available_parallelism().map_or(1, usize::from).min(4);
     std::thread::scope(|scope| {
@@ -239,7 +247,8 @@ fn run(r: &Renderer, jobs: impl Iterator<Item = (serde_json::Value, v2::Settings
                 let compile = || -> Result<()> {
                     let scene = prepare(scene, integrator)?;
                     let installed = r.install_with_options(scene, Path::new("."), InstallOptions {
-                        variants, ..Default::default() })?;
+                        variants, readback: options.readback, gpu_color: options.gpu_color,
+                        ..Default::default() })?;
                     // Volume, resolve and composite pipelines belong to the frame slot.
                     let _frame = installed.create_frame_slot(r, Default::default())?;
                     Ok(())
@@ -256,10 +265,8 @@ fn run(r: &Renderer, jobs: impl Iterator<Item = (serde_json::Value, v2::Settings
     })
 }
 
-/// Startup warms opaque and thin-transmitting table receivers at the draft, default and previs profiles.
-/// Other configurations and authored programs use the same on-demand constructors.
-/// Release preparation keeps the exhaustive catalog through `warm` below.
-pub(crate) fn warm_startup(r: &Renderer) -> Result<()> {
+/// The exhaustive setup catalogue includes table materials with both camera links.
+fn warm_raster_tables(r: &Renderer) -> Result<()> {
     let Some(opaque)=table_scenes(r).into_iter().next() else {return Ok(());};
     let mut scene=opaque.clone();
     if r.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | crate::rt::HIT_BUFFER_FEATURES) {
@@ -287,8 +294,40 @@ pub(crate) fn warm_startup(r: &Renderer) -> Result<()> {
     run(r,jobs.into_iter(), InstallOptions {variants:pipelines::VariantCompile::SetupPlain,..Default::default()})
 }
 
+/// The exact init scene and the render command's default profile. Use ordinary
+/// color delivery and the same foreground choices as a one-frame render.
+fn starter_scene() -> Result<v2::Scene> {
+    let mut value: serde_json::Value = serde_json::from_str(vork_scene::STARTER_SCENE)?;
+    vork_std::expand_scene(&mut value, Path::new("."))?;
+    let mut scene = v2::Scene::from_json(&serde_json::to_vec(&value)?)?;
+    scene.render.settings = v2::Profile::load(v2::DEFAULT_PROFILE)?.resolve(&Default::default())?;
+    scene.validate()?;
+    Ok(scene)
+}
+
+pub(crate) fn warm_startup(r: &Renderer, variants: pipelines::VariantCompile) -> Result<()> {
+    vork_slang::progress::phase("Setup: warming the init starter at the default profile", 1);
+    let mut scene = starter_scene()?;
+    if !r.release_preparation {
+        let profile = v2::Profile::load(v2::DEFAULT_PROFILE)?;
+        crate::denoise::resolve_default(r, &mut scene, &profile.name, profile.level, false);
+    }
+    let installed = r.install_with_options(scene, Path::new("."), InstallOptions {
+        variants,
+        readback: ReadbackOutputs { color: true, ..Default::default() },
+        gpu_color: false,
+        ..Default::default()
+    })?;
+    let _frame = installed.create_frame_slot(r, Default::default())?;
+    vork_slang::progress::completed(1);
+    Ok(())
+}
+
 pub(crate) fn warm(r: &Renderer) -> Result<()> {
-    warm_startup(r)?;
+    warm_raster_tables(r)?;
+    // Retain exact starter keys even after the exhaustive catalogue recorded
+    // generic alternatives. Portable preparation captures these artifacts too.
+    warm_startup(r, pipelines::VariantCompile::Inline)?;
     let mut all = table_scenes(r);
     all.extend(scenes(r, vork_scene::libraries::prebuilt_programs())?);
     compile(r, &all)
@@ -308,7 +347,10 @@ mod tests {
             // must be the sole source of known keys for the first install.
             let keys=r.disk_cache.path("test-plain-hit-keys",1,blake3::hash(b""));
             r.compiler = pipelines::Compiler::new(&r.device, r.cache.as_ref(), pipelines::Known::load(keys,false));
-            r.warm_startup_shaders()?;
+            // This regression covers the exhaustive catalogue's raster hit selection.
+            passes::decoupled::warm_shaders(&r);
+            warm_raster_tables(&r)?;
+            r.finish_shader_warmup()?;
             let mut scene = crate::test_scene(serde_json::json!({"version":2,
                 "render":{"resolution":[64,48]},
                 "nodes":[
@@ -323,6 +365,12 @@ mod tests {
             scene.render.settings = v2::Profile::load(v2::DEFAULT_PROFILE)?.resolve(
                 &serde_json::from_value(serde_json::json!({"denoise":false}))?)?;
             let draw = |mode, expect_plain| -> Result<Vec<[f32;4]>> {
+                let gate = match &mode {pipelines::VariantCompile::Gated(gate) => Some(gate.clone()), _ => None};
+                struct Release(Option<std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>);
+                impl Drop for Release {
+                    fn drop(&mut self) {if let Some(gate)=&self.0 {*gate.0.lock().unwrap()=true;gate.1.notify_all();}}
+                }
+                let _release = Release(gate.clone());
                 r.compiler.hit_selections.lock().unwrap().clear();
                 let mut installed = r.install_with_options(scene.clone(), Path::new("."), InstallOptions { variants: mode, ..Default::default() })?;
                 let selections = r.compiler.hit_selections.lock().unwrap().clone();
@@ -337,12 +385,28 @@ mod tests {
                     assert_eq!(selected,if expect_plain {plain} else {requested},"actual installed hit selection");
                 }
                 let mut slot = installed.create_frame_slot(&r, ReadbackPrecision::Float)?;
-                installed.render_frame(&r, &mut slot, 0.)?.linear_rgba.context("float readback")
+                let first = installed.render_frame(&r, &mut slot, 0.)?.linear_rgba.context("float readback")?;
+                if let Some(gate) = gate {
+                    assert!(!installed.variants_ready(), "hit variants must not block the first frame");
+                    assert!(slot.view.variants_pending());
+                    *gate.0.lock().unwrap() = true;
+                    gate.1.notify_all();
+                    r.settle_pipelines()?;
+                    let promoted = installed.render_frame(&r, &mut slot, 0.)?.linear_rgba.context("promoted float readback")?;
+                    assert!(!slot.view.variants_pending(), "the retained slot must promote at an exposure boundary");
+                    assert_eq!(first, promoted, "promoting hit kernels changed scene-linear pixels");
+                }
+                Ok(first)
             };
-            let plain = draw(pipelines::VariantCompile::Background, true)?;
+            let plain = draw(pipelines::VariantCompile::Fallback, true)?;
+            let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let background = draw(pipelines::VariantCompile::Gated(gate), true)?;
             r.settle_pipelines()?;
+            let promoted = draw(pipelines::VariantCompile::Background, false)?;
             let exact = draw(pipelines::VariantCompile::Inline, false)?;
             assert_eq!(plain, exact, "metalness {metalness}: setup hit evaluator changed the frame");
+            assert_eq!(background, exact, "background hit promotion changed the frame");
+            assert_eq!(promoted, exact, "settled installs must select exact hit keys");
         }
         Ok(())
     }

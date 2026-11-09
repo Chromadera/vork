@@ -18,7 +18,6 @@ fn medium_materials(nodes: &[Node]) -> BTreeSet<&str> {
 impl Scene {
     pub(super) fn validate_image_sources(&self, nodes: &BTreeMap<&str, &Node>) -> Result<()> {
         for (name, image) in &self.images {
-            ensure!(image.time.is_none_or(f32::is_finite), "image {name}: time must be finite");
             ensure!(
                 image.file.is_some() != image.render.is_some(),
                 "image {name}: requires exactly one of file or render"
@@ -48,9 +47,10 @@ impl Scene {
             }
             Ok(())
         }
+        let medium_materials = medium_materials(&self.nodes);
         for (name, material) in &self.materials {
             let medium = material.program == "std/fog"
-                || medium_materials(&self.nodes).contains(name.as_str());
+                || medium_materials.contains(name.as_str());
             for (field, input) in &material.inputs {
                 let image = match input {
                     Input::Texture(binding) => Some(&binding.image),
@@ -181,7 +181,7 @@ mod tests {
         parent.settings=crate::v2::from_test_value(json!({"integrator":"path","samples":8})).unwrap();
         let image: ImageRender=crate::v2::from_test_value(json!({"camera":"other","resolution":[32,16]})).unwrap();
         let resolved=image.resolve(&parent);
-        assert_eq!(resolved.fps,48.);
+        assert_eq!(resolved.fps,crate::Time::integer(48));
         assert_eq!(resolved.settings.integrator,parent.settings.integrator);
         assert_eq!(resolved.aovs,parent.aovs);
         assert_eq!(resolved.settings.samples,8);
@@ -273,6 +273,24 @@ mod tests {
                 .to_string()
                 .contains("medium")
         );
+    }
+    #[test]
+    fn medium_membership_follows_nested_lights_and_edits() {
+        let mut v = valid();
+        v["programs"] = json!({"custom":{"source":"struct Inputs { Image scattering; }; MediumCoefficients medium(MediumContext c, Inputs i) { return MediumCoefficients(); }"}});
+        v["materials"]["screen"] = json!({"program":"custom","inputs":{"scattering":{"image":"feed"}}});
+        v["nodes"].as_array_mut().unwrap().push(json!({"type":"node","children":[
+            {"type":"node","children":[{"type":"light","shape":"environment","medium":"screen"}]}
+        ]}));
+        let mut scene: Scene = crate::v2::from_test_value(v).unwrap();
+        // Membership, rather than the program's name, makes this a medium input.
+        assert!(scene.validate().unwrap_err().to_string().contains("medium material screen"));
+        // Validation must rediscover membership after an edit; no cached rejection.
+        scene.nodes.pop();
+        scene.validate().unwrap();
+        let light: Node = crate::v2::from_test_value(json!({"type":"light","shape":"environment","medium":"screen"})).unwrap();
+        scene.nodes.push(light);
+        assert!(scene.validate().unwrap_err().to_string().contains("medium material screen"));
     }
     #[test]
     fn source_camera_defaults_match_primary_render() {

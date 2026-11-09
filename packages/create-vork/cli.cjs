@@ -31,10 +31,13 @@ if (fs.existsSync(path.join(project, 'package.json')) || fs.existsSync(path.join
   process.exit(1);
 }
 const initialized = run(process.execPath, [cli, 'init', ...args], undefined, ['inherit', 'pipe', 'inherit']);
-process.stdout.write(initialized.stdout.toString().replace(/^  vork /gm, '  npx vork '));
 const version = require(metadata).version;
-fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({private: true, type: 'module', dependencies: {'@voyager-so/vork': version}}, null, 2) + '\n', {flag: 'wx'});
+// TypeScript init owns its manifest. For the other languages, create it here.
+// npm owns recording the installed dependency in either manifest.
+if (!fs.existsSync(path.join(project, 'package.json'))) {
+  fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({private: true, type: 'module'}, null, 2) + '\n', {flag: 'wx'});
+}
 // npm create has already cached this exact dependency and its selected native package.
 // Never fetch during initialization; propagate the caller's private registry settings.
-run(process.execPath, [process.env.npm_execpath, 'install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund'], project);
-console.log('Ready. Enter the project and run:\n  npx vork render scene.json --profile std/draft --out render.png\n  npx vork help');
+run(process.execPath, [process.env.npm_execpath, 'install', `@voyager-so/vork@${version}`, '--save-exact', '--offline', '--ignore-scripts', '--no-audit', '--no-fund'], project);
+process.stdout.write(initialized.stdout.toString().replace(/^  vork /gm, '  npm exec --no --package=@voyager-so/vork -- vork '));

@@ -30,84 +30,68 @@ pub(crate) fn medium_use_sites(nodes: &[Node], media: &std::collections::BTreeSe
     labels
 }
 
-/// Ignore retired medium bindings before planning any GPU work. Stage reflection
-/// distinguishes medium-only boundaries from combined surface/medium programs.
-pub(crate) fn ignore_participating_media(r: &Renderer, scene: &mut Scene, base: &Path) -> Result<Vec<String>> {
-    let stages = programs::mesh_stages(r, scene, base)?;
-    let mut media: std::collections::BTreeSet<String> = stages.iter()
-        .filter(|(_, stage)| stage.medium).map(|(name, _)| name.clone()).collect();
-    fn worlds(nodes: &[Node], media: &mut std::collections::BTreeSet<String>) {
+/// Resolve delivered bindings before choosing providers. Reflection identifies
+/// medium stages; native ranges and selected glTF scenes identify uses. This is
+/// the single admission decision for effects with no delivery evaluator, not an
+/// authored-scene rewrite. Approximate surface/environment providers remain live.
+pub(crate) fn admit_delivery_effects(r:&Renderer,scene:&Scene,base:&Path,allow_media:bool)->Result<std::collections::BTreeMap<String,programs::Stages>> {
+    let stages=programs::mesh_stages(r,scene,base)?;
+    let mut refused=std::collections::BTreeSet::new();
+    let mut environments=Vec::new();
+    let mut documents=std::collections::HashMap::new();
+    fn visit(nodes:&[Node],scene:&Scene,base:&Path,stages:&std::collections::BTreeMap<String,programs::Stages>,
+        documents:&mut std::collections::HashMap<PathBuf,gltf::Document>,environments:&mut Vec<String>,refused:&mut std::collections::BTreeSet<String>,next:&mut usize,allow_media:bool)->Result<()> {
         for node in nodes {
-            if let NodeKind::Light { medium: Some(name), .. } = &node.kind { media.insert(name.clone()); }
-            worlds(&node.children, media);
-        }
-    }
-    worlds(&scene.nodes, &mut media);
-    let mut sites = medium_use_sites(&scene.nodes, &media.iter().map(String::as_str).collect());
-    fn volumes(nodes: &[Node], geometry: &vork_scene::v2::Table<vork_scene::v2::Geometry>, sites: &mut Vec<String>) {
-        for node in nodes {
-            if let NodeKind::Mesh { geometry: name, .. } = &node.kind {
-                if matches!(geometry[name].topology, vork_scene::v2::Topology::Volume) {
-                    sites.push(format!("node {:?}.geometry {name:?} (volume topology)", node.name));
+            let index=*next;*next+=1;
+            let label=format!("node {index} ({:?})",node.name);
+            let mut medium=|slot:String,name:&str| {
+                if !allow_media && stages.get(name).is_some_and(|stage|stage.medium) {
+                    refused.insert(format!("{label}.{slot}: participating media are unavailable in delivery (material {name:?}); bake the medium into an image plate and composite it, or render the medium externally"));
                 }
+            };
+            match &node.kind {
+                NodeKind::Mesh {geometry,..} => {
+                    let geometry=&scene.geometry[geometry];
+                    let bindings=MaterialBindings::compile(scene,node,None,stages)?;
+                    let slots:std::collections::BTreeSet<_>=if geometry.material_ranges.is_empty() {[0].into_iter().collect()}
+                        else {geometry.material_ranges.iter().filter(|range|range.count>0).map(|range|range.material_index as usize).collect()};
+                    for slot in slots {if let Some(name)=bindings.select(Some(slot)) {medium(format!("materials[{slot}]"),name);}}
+                    if !allow_media && matches!(geometry.topology,vork_scene::v2::Topology::Volume) {
+                        refused.insert(format!("{label}: participating media are unavailable in delivery (volume topology); bake the volume into an image plate and composite it, or render the volume externally"));
+                    }
+                }
+                NodeKind::Asset {file,materials,..} if !allow_media && materials.values().any(|name|stages[name].medium) => {
+                    // Only medium remaps need primitive reachability here. An
+                    // ordinary asset contributes no unavailable effect and keeps
+                    // its single normal installation read.
+                    let path=base.join(file);
+                    if !documents.contains_key(&path) {documents.insert(path.clone(),crate::import::open(&path).with_context(||format!("read installed material bindings from {}",path.display()))?.document);}
+                    let doc=&documents[&path];
+                    let bindings=MaterialBindings::compile(scene,node,Some(doc),stages)?;
+                    for slot in imported_material_slots(doc)? {
+                        if let Some(name)=bindings.select(slot) {medium(format!("materials[{slot:?}]"),name);}
+                    }
+                }
+                NodeKind::Light {shape:vork_scene::LightShape::Environment,medium,..} => {
+                    environments.push(label.clone());
+                    if let Some(name)=medium.as_ref().filter(|_|!allow_media) {
+                        refused.insert(format!("{label}.medium: participating media are unavailable in delivery (world material {name:?}); bake the medium into an image plate and composite it, or render the medium externally"));
+                    }
+                }
+                _=>{}
             }
-            volumes(&node.children, geometry, sites);
+            visit(&node.children,scene,base,stages,documents,environments,refused,next,allow_media)?;
+        }
+        Ok(())
+    }
+    visit(&scene.nodes,scene,base,&stages,&mut documents,&mut environments,&mut refused,&mut 0,allow_media)?;
+    if let Some(first)=environments.first() {
+        for extra in &environments[1..] {
+            refused.insert(format!("{extra}: additional environment lights are unavailable; combine its contribution with {first} in one environment program or precomposite the environment maps"));
         }
     }
-    volumes(&scene.nodes, &scene.geometry, &mut sites);
-    fn clear(nodes: &mut [Node], stages: &std::collections::BTreeMap<String, programs::Stages>, geometry: &vork_scene::v2::Table<vork_scene::v2::Geometry>) {
-        for node in nodes {
-            match &mut node.kind {
-                NodeKind::Light { medium, .. } => *medium=None,
-                NodeKind::Mesh { materials, geometry: name, .. } if matches!(geometry[&*name].topology,vork_scene::v2::Topology::Volume) || (!materials.is_empty() && materials.iter().all(|name| stages.get(name).is_some_and(|s|s.medium && !s.surface))) => node.kind=NodeKind::Node {},
-                _ => {},
-            }
-            clear(&mut node.children, stages, geometry);
-        }
-    }
-    let medium_request = serde_json::json!({"sites":sites,"materials":media.iter().filter_map(|name| scene.materials.get(name).map(|m|(name,m))).collect::<std::collections::BTreeMap<_,_>>()});
-    clear(&mut scene.nodes, &stages, &scene.geometry);
-    fn one_world(nodes:&mut [Node],found:&mut Option<String>,ignored:&mut std::collections::BTreeSet<String>,next:&mut usize) {
-        for node in nodes {
-            let index = *next; *next += 1;
-            if matches!(node.kind,NodeKind::Light {shape:vork_scene::LightShape::Environment,..}) {
-                if let Some(first) = found.as_ref() {
-                    crate::warnings::additional_environment(node, first, index);
-                    ignored.insert(node.name.clone());node.kind=NodeKind::Node {};
-                } else {*found=Some(format!("node {index} ({:?})", node.name));}
-            }
-            one_world(&mut node.children,found,ignored,next);
-        }
-    }
-    let mut ignored_worlds=std::collections::BTreeSet::new();
-    one_world(&mut scene.nodes,&mut None,&mut ignored_worlds,&mut 0);
-    // Report the exact authored keys as well as the dropped light itself.
-    for layer in &scene.animation {
-        for track in layer.tracks.iter().flatten() {
-            if matches!(track.path.as_slice(),[root,name,field,..] if root=="nodes" && ignored_worlds.contains(name) && !matches!(field.as_str(),"translation"|"rotation"|"scale"|"visible")) {
-                crate::warnings::dropped("additional_environment_track", serde_json::json!({"track":track}), "additional environment light-property animation; retaining the first environment".into());
-            }
-        }
-    }
-    for layer in &mut scene.animation {
-        if let Some(tracks)=&mut layer.tracks {tracks.retain(|t|!matches!(t.path.as_slice(),[root,name,field,..] if root=="nodes" && ignored_worlds.contains(name) && !matches!(field.as_str(),"translation"|"rotation"|"scale"|"visible")));}
-    }
-    // Asset remaps and mixed material slots keep their surface geometry. Pure
-    // medium slots become invisible, rather than an opaque default material.
-    let pure: std::collections::BTreeSet<_> = media.iter().filter(|name| stages.get(*name).is_none_or(|s|!s.surface)).cloned().collect();
-    for name in &pure {
-        scene.materials.insert(name.clone(), serde_json::from_value(serde_json::json!({"program":"std/openpbr","inputs":{"geometry_opacity":0}}))?);
-    }
-    for layer in &mut scene.animation {
-        if let Some(tracks)=&mut layer.tracks { tracks.retain(|t| {
-            let dropped = t.path.first().is_some_and(|p|p=="materials") && t.path.get(1).is_some_and(|p|pure.contains(p));
-            if dropped { crate::warnings::dropped("participating_media_track", serde_json::json!({"track":t}), "participating-medium material animation; medium transport is disabled".into()); }
-            !dropped
-        }); }
-    }
-    scene.media_disabled=true;
-    if !sites.is_empty() { crate::warnings::dropped("participating_media", medium_request, format!("warning: ignored participating media for this release: {}", sites.join(", "))); }
-    Ok(sites)
+    ensure!(refused.is_empty(),"unsupported effects:\n{}",refused.into_iter().collect::<Vec<_>>().join("\n"));
+    Ok(stages)
 }
 
 /// Authored material names bound to a mesh's material slots (glTF material
@@ -273,12 +257,14 @@ impl MeshRoot {
 /// Structural choices fixed for one install, independent of other installs.
 pub struct InstallOptions {
     /// Initial requested scene time in seconds, used for pose and camera initialization.
-    pub initial_time: f32,
+    pub initial_time: vork_time::Request,
     /// Per-install render settings; None uses the scene's render settings.
     pub render: Option<vork_scene::Render>,
     /// CPU planes frames may read back. The graph prunes readback, and its
     /// pixel buffer, when nothing is read; frames may request only these planes.
     pub readback: crate::ReadbackOutputs,
+    /// Internal delivery intent; library installs retain GPU colour by default.
+    pub(crate) gpu_color: bool,
     /// Initial frame storage; collection can request growth through `FrameRedo`.
     pub reservations: crate::Reservations,
     pub(crate) variants: pipelines::VariantCompile,
@@ -292,12 +278,13 @@ pub struct InstallOptions {
 impl Default for InstallOptions {
     fn default() -> Self {
         Self {
-            initial_time: 0.,
+            initial_time: vork_time::Request::Numeric(0.),
             render: None,
             readback: crate::ReadbackOutputs {
                 float: crate::FloatOutputs::ALL,
                 ..crate::ReadbackOutputs::ALL
             },
+            gpu_color: true,
             reservations: Default::default(),
             variants: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -322,6 +309,8 @@ pub struct InstalledScene {
     pub(crate) dense: Option<crate::dense::Dense>,
     pub(crate) computed_geometry: Vec<Option<crate::computed_geometry::Mesh>>,
     pub(crate) compositor: std::collections::HashMap<String, compositor::Program>,
+    pub(crate) image_order: Vec<String>,
+    pub(crate) main_outputs: compositor::Dependencies,
     pub(crate) main_subset: Option<crate::render_images::Subset>,
     pub(crate) capture_controls: bool,
     /// CPU planes this install may read back.
@@ -332,10 +321,10 @@ pub struct InstalledScene {
     pub(crate) graph: crate::graph::Graph,
     pub(crate) transients: crate::graph::Transients,
     pub(crate) path: Option<crate::passes::path::Pipeline>,
-    pub(crate) reflections: Option<wgpu::ComputePipeline>,
+    pub(crate) reflections: Option<pipelines::Drawn<wgpu::ComputePipeline>>,
     /// Decoupled shading kernels and the camera's draw table.
     pub(crate) decoupled: Option<crate::passes::decoupled::Install>,
-    pub(crate) gi: Option<wgpu::ComputePipeline>,
+    pub(crate) gi: Option<pipelines::Drawn<wgpu::ComputePipeline>>,
     /// The irradiance volume when the scene enables probes.
     pub(crate) probes: Option<crate::probes::Volume>,
     pub(crate) fibre: Option<crate::fibre_transport::Persistent>,
@@ -470,22 +459,47 @@ impl InstalledScene {
         scope: &'scope std::thread::Scope<'scope, '_>,
     ) -> Result<Self> {
         let InstallOptions { readback, ref variants, reservations, .. } = *options;
+        let compositor = compositor::install(r, &scene, base)?;
+        let (mut output_dependencies, _) = compositor::dependencies(&compositor, &scene.render.compositor);
+        if !options.gpu_color && !readback.color && !readback.float.color {output_dependencies=Default::default();}
+        output_dependencies.depth |= readback.depth_ids || readback.float.depth;
+        output_dependencies.ids |= readback.depth_ids;
+        output_dependencies.normals |= readback.normals || readback.float.normals;
+        output_dependencies.motion |= readback.motion || readback.float.motion;
+        output_dependencies.aov_output = readback.aovs && !scene.render.aovs.is_empty();
+        output_dependencies.aovs |= output_dependencies.aov_output;
+        output_dependencies.catcher |= readback.aovs && crate::catcher::has_catchers(&scene);
+        // Captures retain their own scene producers. File images need no scene passes.
+        output_dependencies.images &= scene.images.values().any(|i|i.render.is_some());
+        let (allocation_dependencies, planned_image_order)=compositor::image_plan(&scene,&compositor,output_dependencies)?;
+        effects.outputs = Some(allocation_dependencies);
+        effects.denoise &= allocation_dependencies.beauty;
+        if !allocation_dependencies.beauty && !allocation_dependencies.catcher {
+            effects.indirect=false; effects.ray_indirect=false; effects.reflections=false;
+            effects.probes=false; effects.fibre=false; effects.subsurface=false; effects.denoise=false;
+        }
         let input = &scene;
         if !input.render.aovs.is_empty() {
-            crate::aov::check_storage(&r.device.limits(), &input.render)?;
-            for name in input.image_order(None)? {
-                crate::aov::check_storage(&r.device.limits(), &input.images[&name].render.as_ref().unwrap().resolve(&input.render))?;
+            if output_dependencies.beauty || output_dependencies.aovs || output_dependencies.catcher {
+                crate::aov::check_storage(&r.device.limits(), &input.render)?;
+            }
+            for name in &planned_image_order {
+                let render=input.images[name].render.as_ref().unwrap();
+                let (d,_)=compositor::dependencies(&compositor,&render.compositor);
+                if d.beauty || d.aovs || d.catcher {
+                    crate::aov::check_storage(&r.device.limits(), &render.resolve(&input.render))?;
+                }
             }
         }
         let display_program = crate::display_program::prepare(r, &scene, base)?.install(r)?;
         let mut render = scene.render.clone();
         let environment_start = Instant::now();
-        let mut environment = environment::Environment::new(
-            r,
-            environment_node::Settings::from_scene(&scene)?,
-            &scene,
-            base,
-        )?;
+        let scene_inputs=allocation_dependencies.beauty || allocation_dependencies.controls()
+            || allocation_dependencies.aovs || allocation_dependencies.catcher;
+        if !scene_inputs {effects.implicit=false;}
+        let mut environment = if scene_inputs {environment::Environment::new(
+            r, environment_node::Settings::from_scene(&scene)?, &scene, base,
+        )?} else {environment::Environment::unused(r)};
         let environment_install_ms = environment_start.elapsed().as_secs_f64() * 1000.;
         // Preorder: an authored node's index is its position in the scene tree walk.
         let mut nodes = Vec::new();
@@ -516,7 +530,7 @@ impl InstalledScene {
         let propagation=crate::propagation::prepare(r,input,base)?;
         let buffer_data = buffers::SceneBuffers::decode(input, base)?;
         let mut animation = animation::Plan::compile_with_buffers(input, base, Some(&buffer_data.data))?;
-        let camera_views=crate::camera_program::views(input,&nodes,&animation,options.initial_time);
+        let camera_views=crate::camera_program::views(input,&nodes,&animation,&options.initial_time);
         let mut camera_programs=crate::camera_program::install(r,input,&mut nodes,base,&camera_views)?;
         let spectral=crate::camera_program::scene_spectral(r,input,base)?;
         let camera_native=(spectral || !camera_programs.is_empty()).then(||std::sync::Arc::new(crate::camera_program::native(&camera_programs)));
@@ -550,7 +564,7 @@ impl InstalledScene {
         let mut imported_camera_materials=vork_scene::v2::Table::new();
         let pipeline_start = Instant::now();
         let mut program_material_names = std::collections::BTreeSet::new();
-        for node in &nodes {
+        for node in nodes.iter().filter(|_|scene_inputs) {
             match &node.node.kind {
                 NodeKind::Mesh { materials, .. } => program_material_names.extend(materials.iter()),
                 NodeKind::Asset { materials, .. } => {
@@ -563,7 +577,7 @@ impl InstalledScene {
         let mut decoded = std::collections::HashMap::new();
         let mut image_decoders = materials::ImageDecoders::default();
         // Imported glTF keeps its factors and texture taps in the shared material table.
-        let image_order = scene.image_order(None)?;
+        let image_order = planned_image_order.clone();
         let image_slots = image_order.iter().enumerate().map(|(slot,name)|(name.clone(),slot)).collect();
         let mut textures = TextureInstaller::new(r, &image_slots);
         textures.fps = render.fps;
@@ -577,6 +591,7 @@ impl InstalledScene {
             }
             let ((doc,_,images),_,keys)=&**decoded.get(&asset_key).unwrap();
             let doc=doc.as_deref().unwrap();
+            if !scene_inputs {continue;}
             let bindings=MaterialBindings::compile(input,&node.node,Some(doc),&stages)?;
             let reachable=imported_material_slots(doc)?;
             for source in std::iter::once(None).chain(doc.materials().map(Some)) {
@@ -593,7 +608,7 @@ impl InstalledScene {
             .map(|name| Ok(programs::instance(input, name)?.map(|p| (name.as_str(), p))))
             .filter_map(Result::transpose)
             .collect::<Result<Vec<_>>>()?;
-        let attribute_names = crate::attributes::names(input)?;
+        let attribute_names = if scene_inputs {crate::attributes::names(input)?} else {Vec::new()};
         let attributes=attribute_names.len() as u32;
         let required_locations=vork_slang::registry::VISIBILITY_LENS_LOCATION+1+attributes.saturating_sub(8);
         let limits=r.device.limits();
@@ -681,8 +696,8 @@ impl InstalledScene {
         effects.subsurface = effects.raster_diffusion(spatial_subsurface);
         effects.fibre = !effects.path && programs.as_ref().is_some_and(|p|p.has_physical_hair());
 
-        let mut medium = medium::install(r, input, environment.settings.medium.as_deref(), base, &stages)?;
-        let filtered_media=medium.is_some() && !effects.path;
+        let mut medium = if scene_inputs && !input.delivery {medium::install(r, input, environment.settings.medium.as_deref(), base, &stages)?} else {None};
+        let mut filtered_media=medium.is_some() && !effects.path;
         if effects.path && let Some(error)=medium.as_ref().and_then(|m|m.native.sampled_error.as_ref()) {return Err(anyhow::anyhow!("{error}").context(crate::failure::FailureKind::Scene));}
         let raster_samples = raster_samples(&scene.render);
         let mut light_shadow_rays=crate::rt::installed_shadow_rays(&scene,&nodes);
@@ -716,7 +731,7 @@ impl InstalledScene {
                 attributes: attribute_names.len() as u32,
                 textures: 1, samplers: 1,
                 ray_refraction,
-                connection_transmission, surface_coverage:false, shadow_capacity:0,
+                connection_transmission, surface_coverage:false, attribute_coverage:false, shadow_capacity:0,
                 no_shadow_containment: false,
                 probes: effects.probes,
                 fibre: effects.fibre,
@@ -735,7 +750,7 @@ impl InstalledScene {
         let mut word_offsets = std::collections::HashMap::<(u32, Vec<u32>), u32>::new();
         let mut pipeline_ms = pipeline_start.elapsed().as_secs_f64() * 1000.;
         let mut asset_decode_ms = 0.;
-        let image_order = scene.image_order(None)?;
+        let image_order = planned_image_order.clone();
         let mut views: Vec<_> = std::iter::once(render.clone()).chain(image_order.iter()
             .map(|name| input.images[name].render.as_ref().unwrap().resolve(&render))).map(|mut view| {
                 if let Some(raster)=view.settings.integrator.raster_mut() {
@@ -769,6 +784,7 @@ impl InstalledScene {
             std::ops::Range<usize>,
         >::new();
         for (node_id, node) in nodes.iter().enumerate() {
+            if !scene_inputs && matches!(node.node.kind,NodeKind::Mesh {..}) {continue;}
             let (native_mesh, asset_source) = match &node.node.kind {
                 NodeKind::Mesh {
                     geometry,
@@ -931,6 +947,9 @@ impl InstalledScene {
                     asset_source.unwrap().2,
                 )?);
             }
+            // Imported cameras and their animation remain live without mesh
+            // consumers; material installation and geometry uploads do not.
+            if !scene_inputs {continue;}
             let asset_animated = if native_mesh.is_some() {
                 native_deformation
             } else {
@@ -1240,13 +1259,13 @@ impl InstalledScene {
         }
         drop(decoded);
         buffers::instances(&nodes, &mut roots, &mut objects, &mut draws, &buffer_data)?;
+        let mut refused_geometry_effects = std::collections::BTreeSet::new();
         for draw in &mut draws {
             let node = &nodes[roots[draw.object as usize].node].node;
             if let NodeKind::Mesh { geometry, skin, .. } = &node.kind {
                 draw.computed = crate::computed_geometry::dynamic(input, &input.geometry[geometry]);
                 if draw.computed && (skin.is_some() || materials[draw.material].record.extra[1]>0. || materials[draw.material].transmissive) {
-                    crate::warnings::dropped("computed_geometry", serde_json::json!({"node":node}), format!("warning: node {:?}: ignored computed geometry updates combined with skinning, opacity or transmission; using authored geometry",node.name));
-                    draw.computed=false;
+                    refused_geometry_effects.insert(format!("node {:?}: computed geometry with skinning, opacity or transmission would be omitted; use opaque unskinned geometry or bake the geometry updates", node.name));
                 }
             }
         }
@@ -1346,7 +1365,7 @@ impl InstalledScene {
         nodes.extend(embedded);
         if !imported_camera_materials.is_empty() {
             let imported: vork_scene::Scene=serde_json::from_value(serde_json::json!({"version":2,"nodes":[],"materials":imported_camera_materials,"render":{"resolution":render.resolution}}))?;
-            let camera_views=crate::camera_program::views(input,&nodes,&animation,options.initial_time);
+            let camera_views=crate::camera_program::views(input,&nodes,&animation,&options.initial_time);
             let mut added=crate::camera_program::install(r,&imported,&mut nodes,base,&camera_views)?;
             for camera in &mut added {camera.id+=camera_programs.len() as u32;camera.offset=material_words.len();material_words.extend_from_slice(&camera.words);}
             camera_programs.extend(added);
@@ -1355,7 +1374,7 @@ impl InstalledScene {
         // Resolve only the omitted start camera, after buffers and clips are compiled.
         // Use the same ordered layer sampling as every rendered frame.
         if render.camera.is_none() {
-            render.camera = animation.start_camera(&render, options.initial_time);
+            render.camera = animation.start_camera(&render, &options.initial_time);
         }
         let camera = nodes
             .iter()
@@ -1442,7 +1461,7 @@ impl InstalledScene {
         }
         animation.mark_nodes(&mut nodes, camera)?;
         let targets = crate::targets::Plan::compile(&mut nodes)?;
-        animation.validate_asset_bindings()?;
+        animation.finish_asset_bindings()?;
         let mut samples = animation.samples();
         let mut values = crate::values::sample_storage(&nodes);
         let mut worlds = nodes.iter().map(|node| node.world).collect::<Vec<_>>();
@@ -1461,7 +1480,7 @@ impl InstalledScene {
                 .map(|(i,_)|canonical_worlds[i].w_axis.truncate()).collect::<Vec<_>>();
             (Some(crate::probes::placement::Frame::for_camera(&nodes[camera],canonical_worlds[camera],&draws,&canonical_objects,&render)),Some(eyes))
         } else {(None,None)};
-        crate::values::sample_pose(&nodes, &assets, &animation, &targets, &environment, options.initial_time,
+        crate::values::sample_pose(&nodes, &assets, &animation, &targets, &environment, options.initial_time.clone(),
             &mut samples, &mut values, &mut worlds)?;
         for (node, world) in nodes.iter_mut().zip(&worlds) { node.world = *world; }
         // Object tables predate animation compilation; downstream bounds and probe
@@ -1568,9 +1587,18 @@ impl InstalledScene {
             }));
         rays |= medium_sources;
         ray_shadows |= medium_sources;
+        let transport_needed=allocation_dependencies.beauty || allocation_dependencies.aovs
+            || allocation_dependencies.catcher || effects.implicit;
+        if !transport_needed {
+            rays=false; ray_shadows=false; ray_refraction=false; medium=None; filtered_media=false;
+            effects.path=false; effects.subsurface=false; effects.fibre=false;
+            slang.ray_refraction=false; slang.connection_transmission=false;
+            slang.medium=None; slang.volume_visibility=false;
+        }
         // This is the lowered/compiled proof, including imported and program alpha.
         // Resolve it before choosing the shared opaque pipeline registry.
         slang.surface_coverage = draws.iter().any(|draw|materials[draw.material].surface_coverage());
+        slang.attribute_coverage = attributes != 0 && draws.iter().any(|draw|materials[draw.material].attribute_coverage());
         slang.connection_transmission = rays && (draws.iter().any(|draw|materials[draw.material].transmissive) || input.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit)));
         // Field carriers are absent from the triangle ray masks. Their exact
         // crossing walk owns absorption; triangle containment cannot find them.
@@ -1608,7 +1636,9 @@ impl InstalledScene {
             else {crate::passes::path::solids_for(&draws,&roots,|m|materials[m].solid_absorption())?};
         slang.shadow_capacity=if nodes.iter().any(|n|crate::compute::places_instances(input,&n.node)) {contained.count}
             else {crate::passes::path::occupancy(&contained,&draws,&roots,&nodes,&objects,None,&animation,&targets).1};
-        let program_coverage = medium_sources || slang.connection_transmission
+        // The same installed fact selects both the candidate evaluator and
+        // the hit tables it reads, including shadow-only raster views.
+        let program_coverage = medium_sources || slang.connection_transmission || slang.attribute_coverage
             || programs.as_ref().and_then(|p|p.native.as_ref()).is_some_and(|p|p.coverage)
             || (effects.fibre && rays);
         if let Some(medium)=&mut medium {
@@ -1751,6 +1781,9 @@ impl InstalledScene {
         // existing reserved object word addresses them in the retained table.
         let mut generated_offsets = std::collections::HashMap::new();
         let mut instance_attribute_rows = std::collections::HashMap::new();
+        let mut material_attribute_sources = Vec::new();
+        let computed_attribute_sources: std::collections::HashSet<_> = input.programs.values()
+            .filter(|program| program.is_compute()).flat_map(|program| program.bindings.values()).collect();
         for (draw_index, draw) in draws.iter().enumerate() {
             let (minimum, maximum) = draw.generated_bounds;
             let extent = maximum - minimum;
@@ -1765,13 +1798,30 @@ impl InstalledScene {
                 let root = &roots[object as usize];
                 let node = &nodes[root.node].node;
                 let mut row = vec![0u32; 1 + attribute_names.len() * 4];
+                let mut published = Vec::new();
                 for (slot, name) in attribute_names.iter().enumerate() {
-                    if let Some(value) = crate::attributes::instance_value(node, root.instance_index, name, &buffer_data) {
+                    let source = match &node.kind {
+                        NodeKind::Mesh { instances: Some(instances), .. } => instances.attributes.get(name),
+                        _ => None,
+                    };
+                    if let Some(source) = source.filter(|source| computed_attribute_sources.contains(source)) {
+                        row[0] |= 1 << slot;
+                        if vork_scene::v2::is_color_attribute(name) { row[1 + slot * 4 + 3] = 1f32.to_bits(); }
+                        published.push((source.clone(), root.instance_index.expect("instance row"), slot));
+                    } else if let Some(value) = crate::attributes::instance_value(node, root.instance_index, name, &buffer_data) {
                         row[0] |= 1 << slot;
                         row[1+slot*4..1+(slot+1)*4].copy_from_slice(&value.map(f32::to_bits));
                     }
                 }
-                let attribute_row = if row[0] == 0 { 0 } else {
+                // Computed rows cannot alias by their initial values: each row
+                // retains its source identity and publishes into frame-private words.
+                let attribute_row = if !published.is_empty() {
+                    let offset = record_words + material_words.len() as u32;
+                    material_words.extend_from_slice(&row);
+                    material_attribute_sources.extend(published.into_iter().map(|(source, index, slot)|
+                        (source, index, offset + 1 + slot as u32 * 4)));
+                    offset
+                } else if row[0] == 0 { 0 } else {
                     *instance_attribute_rows.entry(row).or_insert_with_key(|row| {
                         let offset = record_words + material_words.len() as u32;
                         material_words.extend_from_slice(row);
@@ -1821,17 +1871,24 @@ impl InstalledScene {
         // Surface/compute consumers sample the exposure clock. Main final-only
         // compositor images sample the nominal output clock after accumulation.
         let mut sampled_media:std::collections::BTreeSet<_>=textures.footage.keys().cloned().collect();
-        for image in input.images.values().filter_map(|i|i.render.as_ref()) {
-            sampled_media.extend(input.compositor_image_reads(&image.compositor));
+        for name in &planned_image_order {
+            let image=input.images[name].render.as_ref().unwrap();
+            sampled_media.extend(compositor::image_reads(&compositor,&image.compositor));
         }
-        let final_media=input.compositor_image_reads(&input.render.compositor);
+        let final_media=if output_dependencies.color {compositor::image_reads(&compositor,&input.render.compositor)} else {Default::default()};
         let mut file_images = std::collections::BTreeMap::new();
         // Compositor image handles reuse the exact scene texture installation.
-        let post_materials: std::collections::BTreeSet<_> = input.render.compositor.iter()
-            .chain(input.images.values().filter_map(|i|i.render.as_ref()).flat_map(|r|r.compositor.iter())).map(|entry|entry.material()).collect();
+        let mut post_materials=std::collections::BTreeSet::new();
+        let mut add=|names:&[vork_scene::v2::CompositeEntry]| {
+            let (_,live)=compositor::dependencies(&compositor,names);
+            post_materials.extend(names.iter().zip(live).filter(|(_,live)|*live).map(|(entry,_)|entry.material().clone()));
+        };
+        if output_dependencies.color {add(&input.render.compositor);}
+        for name in &planned_image_order {add(&input.images[name].render.as_ref().unwrap().compositor);}
         for name in post_materials {
-            let material=&input.materials[name];
-            for value in material.inputs.values() {
+            let material=&input.materials[&name];
+            for (field,value) in &material.inputs {
+                if !compositor[&name].reads_input(field) {continue;}
                 if let vork_scene::v2::Input::Texture(binding) = value {
                     let image = &input.images[&binding.image];
                     if image.render.is_none() && !file_images.contains_key(&binding.image) {
@@ -1853,16 +1910,34 @@ impl InstalledScene {
         if rays {
             crate::rt::prepare_coverage(&mut draws, &materials)?;
         }
-        let displacement = if programs.as_ref().is_some_and(|p| p.has_displacement()) {
-            let mut displacement_seam_nodes = std::collections::HashSet::new();
+        // Decide geometry-effect admission once, from installed draws, bindings and
+        // material facts. None of these failures has an approximate evaluator.
+        if programs.as_ref().is_some_and(|p| p.has_displacement()) {
             let mut assignment_groups = std::collections::HashMap::<_, Vec<&Draw>>::new();
             for draw in &draws {
                 let root = &roots[draw.object as usize];
                 assignment_groups.entry((root.node, root.instance_index, draw.gltf_node.0))
                     .or_default().push(draw);
             }
+            // Displacement precedes the compute/material publication. Resolve
+            // this unsupported bound dependency per material owner, preserving
+            // static uses of the same program on other nodes.
+            let computed_instance_displacement: std::collections::HashSet<_> = if computed_attribute_sources.is_empty() {
+                std::collections::HashSet::new()
+            } else { draws.iter().filter_map(|draw| {
+                let program = programs.as_ref().unwrap();
+                let record = &records[draw.material];
+                if !program.displaces(record.tag[0]) { return None; }
+                let node = roots[draw.object as usize].node;
+                let NodeKind::Mesh { instances: Some(instances), .. } = &nodes[node].node.kind else { return None; };
+                program.displacement_descriptors(record.tag[0], (record.tag[3] - record_words) as usize, &material_words)
+                    .iter().any(|(_, descriptor)| instances.attributes.get(&attribute_names[(descriptor[0] & 255) as usize])
+                        .is_some_and(|source| computed_attribute_sources.contains(source)))
+                    .then_some((draw.material, node))
+            }).collect() };
             let displaces = |draw: &Draw| programs.as_ref().unwrap()
-                .displaces(records[draw.material].tag[0]);
+                .displaces(records[draw.material].tag[0])
+                && !computed_instance_displacement.contains(&(draw.material, roots[draw.object as usize].node));
             for group in assignment_groups.values() {
                 // Single-material domains and surface-only differences cannot conflict.
                 // Avoid per-vertex storage for those common cases.
@@ -1881,8 +1956,8 @@ impl InstalledScene {
                             let identity = geometry.vertex_ids.get(vertex as usize)
                                 .copied().unwrap_or(u64::from(vertex));
                             if let Some(&material) = assignments.get(&identity) {
-                                if material!=draw.material && displacement_seam_nodes.insert(roots[draw.object as usize].node) {
-                                    crate::warnings::dropped("conflicting_displacement", serde_json::json!({"node":nodes[roots[draw.object as usize].node].node}), format!("warning: node {:?}: ignored conflicting displacement materials on shared geometry",nodes[roots[draw.object as usize].node].node.name));
+                                if material!=draw.material {
+                                    refused_geometry_effects.insert(format!("node {:?}: conflicting displacement materials on shared geometry would omit displacement; use one displacement material or split the geometry",nodes[roots[draw.object as usize].node].node.name));
                                 }
                             }
                             if displaced_pass { assignments.insert(identity, draw.material); }
@@ -1898,7 +1973,7 @@ impl InstalledScene {
                 };
                 let node=&nodes[roots[draw.object as usize].node].node;
                 let implicit=matches!(&node.kind,NodeKind::Mesh {geometry,..} if matches!(input.geometry[geometry].topology,vork_scene::v2::Topology::Implicit));
-                if draw.computed || implicit { continue; }
+                if draw.computed || implicit || computed_instance_displacement.contains(&(draw.material, roots[draw.object as usize].node)) { continue; }
                 let root = &roots[draw.object as usize];
                 let descriptors = programs.displacement_descriptors(
                     record.tag[0],
@@ -1949,26 +2024,45 @@ impl InstalledScene {
                     }
                     let key = (root.node, root.instance_index, draw.gltf_node.0, identity);
                     if let Some(before) = displacement_seams.insert(key, values.clone()) {
-                        if before!=values && displacement_seam_nodes.insert(root.node) {
-                            crate::warnings::dropped("displacement_attributes", serde_json::json!({"node":nodes[root.node].node,"vertex":identity}), format!("warning: node {:?}: ignored displacement across inconsistent attributes at shared vertex {identity}",nodes[root.node].node.name));
+                        if before!=values {
+                            refused_geometry_effects.insert(format!("node {:?}: inconsistent displacement attributes at shared vertices would omit displacement; use continuous attributes or split the geometry",nodes[root.node].node.name));
                         }
                     }
                 }
             }
+            for draw in &draws {
+                let program = programs.as_ref().unwrap();
+                let tag = records[draw.material].tag[0];
+                if !program.displaces(tag) { continue; }
+                let node = &nodes[roots[draw.object as usize].node].node;
+                let alternative = if computed_instance_displacement.contains(&(draw.material, roots[draw.object as usize].node)) {
+                    Some("displacement sampling computed instance attributes; use static/authored attribute values or pre-baked displaced geometry")
+                } else if draw.computed {
+                    Some("displacement on computed geometry; compute the displaced positions in the geometry producer")
+                } else if matches!(&node.kind, NodeKind::Mesh {geometry,..} if matches!(input.geometry[geometry].topology,vork_scene::v2::Topology::Implicit)) {
+                    Some("displacement on implicit geometry; evolve the scalar field or use pre-baked triangle geometry")
+                } else if draw.exit_geometry.as_ref().is_some_and(|g| !g.point_centers.is_empty()) && program.displacement_uses_normal(tag) {
+                    Some("normal-dependent point displacement; use an authored direction attribute or triangle geometry")
+                } else { None };
+                if let Some(alternative) = alternative {
+                    refused_geometry_effects.insert(format!("node {:?}: entirely omitted {alternative}", node.name));
+                }
+            }
+        }
+        let compute_nodes: std::collections::HashSet<usize> = nodes.iter().enumerate()
+            .filter_map(|(i, node)| crate::compute::places_instances(input, &node.node).then_some(i))
+            .collect();
+        for &i in &compute_nodes {
+            if draws.iter().any(|d| roots[d.object as usize].node == i && materials[d.material].transparent) {
+                refused_geometry_effects.insert(format!("node {:?}: computed instance placement on transparent material would be omitted; use an opaque material or authored placements", nodes[i].node.name));
+            }
+        }
+        ensure!(refused_geometry_effects.is_empty(), "unsupported geometry effects:\n{}", refused_geometry_effects.into_iter().collect::<Vec<_>>().join("\n"));
+
+        let displacement = if programs.as_ref().is_some_and(|p| p.has_displacement()) {
             let mut displacement_meshes = std::collections::HashMap::new();
             for draw in &mut draws {
-                if programs
-                    .as_ref()
-                    .is_some_and(|p| p.displaces(records[draw.material].tag[0]))
-                {
-                    let node=&nodes[roots[draw.object as usize].node].node;
-                    let implicit=matches!(&node.kind,NodeKind::Mesh {geometry,..} if matches!(input.geometry[geometry].topology,vork_scene::v2::Topology::Implicit));
-                    let point_normal=draw.exit_geometry.as_ref().is_some_and(|g|!g.point_centers.is_empty()) && programs.as_ref().unwrap().displacement_uses_normal(records[draw.material].tag[0]);
-                    if displacement_seam_nodes.contains(&roots[draw.object as usize].node) {continue;}
-                    if draw.computed || implicit || point_normal {
-                        crate::warnings::dropped("displacement_geometry", serde_json::json!({"node":node}), format!("warning: node {:?}: ignored displacement on computed/implicit geometry or points using NORMAL",node.name));
-                        continue;
-                    }
+                if programs.as_ref().unwrap().displaces(records[draw.material].tag[0]) {
                     ensure!(
                         draw.layout.deform,
                         "displacement geometry must carry evaluated vertex frames"
@@ -2059,19 +2153,6 @@ impl InstalledScene {
                 deform.job = *jobs.entry(key).or_insert(next);
             }
         }
-        // A compute node owns one transform/count domain; never coalesce it with
-        // another node even if geometry and material happen to match.
-        let compute_nodes: std::collections::HashSet<usize> = nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, node)| {
-                if !crate::compute::places_instances(input,&node.node) {return None;}
-                if draws.iter().any(|d| roots[d.object as usize].node==i && materials[d.material].transparent) {
-                    crate::warnings::dropped("computed_instances", serde_json::json!({"node":node.node}), format!("warning: node {:?}: ignored computed instance placement on transparent material; using authored placements",node.node.name));
-                    None
-                } else {Some(i)}
-            })
-            .collect();
         // CPU-fitted fibre captures cannot bound GPU-written placements.
         // Probe support covers the cameras' complete clip regions and captures
         // through the current computed TLAS after placement publication.
@@ -2115,10 +2196,11 @@ impl InstalledScene {
             .values()
             .any(|p| p.is_compute())
             .then_some(()).or_else(|| (input.buffers.values().any(|b| b.dims.is_some()) || draws.iter().any(|d|d.computed)).then_some(()))
+            .filter(|_| scene_inputs)
             .map(|_| buffers::ProgramBuffers::install(r, input, &buffer_data))
             .transpose()?;
         let (dense_destinations,dense_certificates)=medium.as_ref().map(|m|m.dense_bindings(input,medium_base,&draws,&native_ids)).transpose()?.unwrap_or_default();
-        let dense=crate::dense::Dense::install(r,input,program_buffers.as_ref(),dense_destinations,dense_certificates)?;
+        let dense=if scene_inputs {crate::dense::Dense::install(r,input,program_buffers.as_ref(),dense_destinations,dense_certificates)?} else {None};
         ensure!(!draws.iter().any(|d|d.computed) || render.settings.integrator.probe_volume().is_none(),
             "computed geometry cannot use CPU-planned probe support; automatic lighting selects complete path transport");
         let computed_geometry = draws.iter().map(|draw| {
@@ -2171,7 +2253,7 @@ impl InstalledScene {
         }
         let sources: Vec<_> = nodes.iter().enumerate().map(|(i,n)|
             (!crate::compute::places_instances(input,&n.node) || compute_nodes.contains(&i)).then_some(&n.node)).collect();
-        let mut compute = compute::Compute::install(
+        let mut compute = if scene_inputs {compute::Compute::install(
             r,
             input,
             base,
@@ -2180,8 +2262,11 @@ impl InstalledScene {
             &roots,
             &draws,
             render.fps,
-            render.duration,
-        )?;
+            render.duration.clone(),
+        )?} else {None};
+        if let Some(compute) = &mut compute {
+            compute.bind_material_attributes(program_buffers.as_ref().unwrap(), material_attribute_sources)?;
+        }
         if let Some(compute) = &compute {
             for (i, draw) in draws.iter().enumerate() {
                 if compute.computed_draw(i) {
@@ -2209,6 +2294,11 @@ impl InstalledScene {
             effects, &render, &draws, &materials, &nodes, &roots, &objects, &light_plan, &animation,
             rays, compute.as_ref(), filtered_media,
         );
+        let mut plan = plan;
+        if !allocation_dependencies.beauty && !allocation_dependencies.aovs && !allocation_dependencies.catcher && !effects.implicit {
+            plan.decoupled=false; plan.screen_refraction=false; plan.volume=false; plan.cluster=false;
+            plan.effects.path=false;
+        }
         let mut solids = if plan.effects.path || ray_refraction || shadow_occupancy {
             crate::passes::path::solids(&draws, &roots, &materials)?
         } else { Default::default() };
@@ -2225,12 +2315,14 @@ impl InstalledScene {
         let refraction_capacity=if ray_refraction {boundary_capacity.max(1)} else {0};
         if plan.decoupled {
             crate::passes::decoupled::supported(&plan, !ray_refraction && medium.as_ref().is_some_and(|m|m.words[1]>0) && draws.iter().any(|d|materials[d.material].solid_transmission))?;
+            let main_graph=crate::graph::Graph::for_outputs(&plan,readback.any(),Some(output_dependencies))?;
+            if main_graph.runs(crate::graph::Pass::Visibility) || (effects.implicit && main_graph.runs(crate::graph::Pass::Forward)) {
             crate::passes::decoupled::check_view(&r.device.limits(), render.resolution,
                 plan.visibility_samples, crate::passes::decoupled::ViewShape {transparent: plan.transparent,
                 diffusion: plan.effects.subsurface, reflections: plan.effects.reflections, screen_refraction: plan.screen_refraction, table_only: records.iter().all(|r| r.tag[0] == 0),
                 boundaries: refraction_capacity, reserved: reservations.visibility_pool})?;
+            }
         }
-        let mut plan = plan;
         plan.effects.image_feedback = (rays || effects.probes || effects.fibre)
             && input.image_reads(None).iter().any(|name|
                 input.images.get(name).is_some_and(|image| image.render.is_some()));
@@ -2291,6 +2383,12 @@ impl InstalledScene {
             // at path hits. Its variant needs the installed light capabilities
             // as well as the material response proofs.
             let features = if features & materials::FEATURE_LIT != 0 { features | light_features } else { features };
+            // Geometry is fixed at install: animation/compute can change field values,
+            // but cannot introduce a new implicit draw. Include off-camera fields and
+            // non-emitting fields; material emission/visibility can change at runtime.
+            let features = features | if draws.iter().any(|draw| draw.implicit.is_some()) {
+                crate::forward_variant::FEATURE_IMPLICIT_GEOMETRY
+            } else { 0 };
             // Beauty convergence does not establish independently authored AOV convergence.
             Some(crate::passes::path::Pipeline::new(r, crate::constants::PATH_USE_ADAPTIVE_SAMPLING && render.aovs.is_empty() && !crate::catcher::has_catchers(input), crate::catcher::has_catchers(input), random_walk, features, boundary_capacity, !emitter_profiles.is_empty(), path_media, options, &pipelines)?)
         } else { None };
@@ -2316,6 +2414,7 @@ impl InstalledScene {
         // raster’s receiver-only alpha expansion would erase that global proof.
         let features = hit_material_features | light_features;
         let mut visibility = vec![plan.visibility_samples];
+        if animation.has_shutter_animation() { visibility.push(1); }
         if plan.decoupled {
             for settings in &views[1..] {
                 visibility.push(crate::render_images::camera_sampling(&nodes, settings, camera)?.2);
@@ -2331,7 +2430,7 @@ impl InstalledScene {
                 .iter()
                 .zip(&plan.draws)
                 .flat_map(|(draw, flags)| {
-                    pipelines::Role::kinds(flags, plan.decoupled).iter().copied().chain(crate::fibre_transport::Stage::ALL.into_iter().filter(|_|plan.effects.fibre && flags.hair).map(|stage|crate::bundles::Kind::Fibre(stage,false))).map(|kind| {
+                    pipelines::Role::kinds(flags, plan.decoupled).iter().copied().chain(crate::fibre_transport::Stage::ALL.into_iter().filter(|_|plan.effects.fibre && flags.hair).map(|stage|crate::bundles::Kind::Fibre(stage,false))).filter(|&kind|graph.draws(kind)).map(|kind| {
                         (
                             draw.layout,
                             pipelines::Role::of(kind, flags, &materials[draw.material]),
@@ -2452,14 +2551,14 @@ impl InstalledScene {
             {
                 let mut field=probe_field.context("retained indirect lighting: missing receiver field")?;
                 if let Some(rays)=rays.as_ref().filter(|r|r.probe_emitters) {field.header.visibility_policy[3]=rays.emitters;}
-                crate::probes::Volume::new(r, &pipelines, field, bounces, timed, plan.exposure_samples, dependencies, dependencies.time || compute.is_some() || plan.deform || animation.has_material_bindings(), !programs.as_ref().is_some_and(|p|p.has_lit()), features, variants)
+                crate::probes::Volume::new(r, &pipelines, field, bounces, timed, plan.exposure_samples, animation.has_shutter_animation(), dependencies, dependencies.time || compute.is_some() || plan.deform || animation.has_material_bindings(), !programs.as_ref().is_some_and(|p|p.has_lit()), features, variants)
             }
         }).transpose()?;
         for draw in &mut draws {
             draw.ray_corners = None;
             if draw.computed {draw.exit_geometry=None;}
         }
-        let compositor = compositor::install(r, &scene, base)?;
+
         let effect_wait = Instant::now();
         if let Some(compiler) = effects_compiler {
             compiler.join().map_err(|_| anyhow::anyhow!("scene effect pipeline compiler panicked"))??;
@@ -2467,12 +2566,14 @@ impl InstalledScene {
         pipeline_ms += effect_wait.elapsed().as_secs_f64() * 1000.;
         let sampling = crate::sampling::Parameters::new(&r.device, &scene, &render);
         Ok(Self {
-            has_catchers: crate::catcher::has_catchers(&scene),
+            has_catchers: crate::catcher::has_catchers(&scene) && (allocation_dependencies.beauty || allocation_dependencies.catcher),
             footage: std::mem::take(&mut textures.footage), file_images,
             reservations,
             sampling,
             displacement,
             compositor,
+            image_order: planned_image_order,
+            main_outputs: output_dependencies,
             shadows: crate::residency::Cache::new(&r.residency),
             compute,
             dense,
@@ -2536,6 +2637,9 @@ impl InstalledScene {
         &self.render
     }
     /// The name of the camera that renders at `time` (camera cuts included).
+    pub fn camera_name_at_request(&self, time:&vork_time::Request) -> Result<&str> {
+        Ok(&self.nodes[self.animation.camera_at_request(time,self.camera)?].node.name)
+    }
     pub fn camera_name_at(&self, time: f32) -> &str {
         &self.nodes[self.animation.camera_at(time, self.camera)].node.name
     }
@@ -2583,7 +2687,7 @@ impl InstalledScene {
                 Ok(output) => return Ok(output),
                 Err(error) => {
                     let Some(redo) = error.downcast_ref::<crate::FrameRedo>() else { return Err(error); };
-                    self.redo_frame(r, std::slice::from_mut(slot), redo.0, (time * self.render.fps).round() as usize)?;
+                    self.redo_frame(r, std::slice::from_mut(slot), redo.0, (time * self.render.fps.as_f32()).round() as usize)?;
                 }
             }
         }
@@ -2651,7 +2755,7 @@ impl InstalledScene {
             slot.write_color = true;
             // Restore the previous published generation before pre-capture readers.
             // Seek replay also restores temporal history and frame simulations.
-            let warm = slot.submit_outputs(self, r, (frame - 1) as f32 / self.render.fps, crate::ReadbackOutputs::default())
+            let warm = slot.submit_indexed_outputs(self, r, u32::try_from(frame - 1)?, vork_time::Request::Frame(u32::try_from(frame-1)?,self.render.fps), crate::ReadbackOutputs::default())
                 .and_then(|()| slot.collect_readback(r).map(drop));
             match warm {
                 Ok(()) => return Ok(growths),

@@ -22,7 +22,7 @@ pub struct Shot {
     /// Empty selects the built-in control set and every scene-declared AOV.
     pub outputs: Vec<Output>,
     pub out: Vec<PathBuf>,
-    pub at: Option<f32>,
+    pub at: Option<vork_time::Clock>,
     /// First and last frame index to render (inclusive, absolute; Blender's
     /// frame start/end). None selects the clip's first or last frame.
     pub frame_start: Option<usize>,
@@ -60,6 +60,23 @@ pub struct RenderedShot {
     _slots: Vec<FrameSlot>,
     _scene: InstalledScene,
     _renderer: Renderer,
+}
+impl RenderedShot {
+    /// End a successful one-shot process after its caller has flushed reports.
+    /// Files, encoders and decoder children are already finished. Library
+    /// callers instead drop this value to reclaim GPU owners normally.
+    #[doc(hidden)]
+    pub fn exit_process(self) -> ! {
+        // libc exit can run CUDA/NVENC atexit hooks against intentionally live
+        // owners. Match process delivery: the OS reclaims completed resources
+        // and discards unfinished optional compiler work without driver teardown.
+        #[cfg(unix)]
+        // SAFETY: Shot::render joined file writers, reaped muxers and finished
+        // outputs; the caller flushed Rust streams before consuming this value.
+        unsafe { libc::_exit(0) }
+        #[cfg(not(unix))]
+        std::process::exit(0)
+    }
 }
 impl Default for Shot {
     fn default() -> Self {
@@ -119,7 +136,7 @@ fn push_encoders(encoders: &mut [Encoder], slot: &mut FrameSlot, frame: usize, s
 /// File sidecars retain the destination name, including its format, without an
 /// EXR frame placeholder: `x.%06d.exr` → `x.exr.meta.json`, `exr/%06d.exr` →
 /// `exr/meta.json` (as a directory destination).
-fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let name = match name.find("%06d") {
         Some(i) => {
@@ -273,11 +290,12 @@ impl Shot {
             if let Output::Aov(name)=output {ensure_usage!(name=="shadow_catcher" || scene.render.aovs.iter().any(|a| &a.name==name),"unknown AOV output {name}");}
         }
         let outputs = resolve_outputs(outputs, &scene.render.aovs);
-        let alpha = scene.render.background.transparent();
         let scene_parse_ms = parse_start.elapsed().as_secs_f64() * 1000.;
+        let authored_at=at;
+        let at=authored_at.as_ref().map(|time|vork_time::Request::from(time).numeric()).transpose().map_err(|error|error.context(FailureKind::Usage))?;
         if let Some(t) = at {
             ensure_usage!(
-                t.is_finite() && t >= 0.,
+                t.is_finite() && authored_at.as_ref().is_none_or(|t|t.exact()>=Default::default()),
                 "--at must be nonnegative and finite"
             );
         }
@@ -302,7 +320,13 @@ impl Shot {
         let video_paths: Vec<_> = out.iter().filter(|p| is_video(p)).collect();
         let directory_paths: Vec<_> = out.iter().filter(|p| !is_video(p)).collect();
         let video = !video_paths.is_empty();
-        let clip_frames = (fps * scene.render.duration).ceil() as usize;
+        let count = scene.render.duration.exact() * vork_time::exact::decimal(&fps.to_string())?;
+        let clip_frames: usize = count.ceil().to_integer().try_into().context("output frame count exceeds usize")?;
+        ensure_usage!(clip_frames > 0 && clip_frames <= u32::MAX as usize, "output frame count exceeds u32");
+        if directory_paths.iter().any(|p|is_exr(p)) {
+            i32::try_from(fps.numerator()).context("EXR rate numerator exceeds i32")?;
+            u32::try_from(fps.denominator()).context("EXR rate denominator exceeds u32")?;
+        }
         for path in &directory_paths {
             ensure_usage!(
                 !is_png(path) || !has_frame_pattern(path),
@@ -334,20 +358,19 @@ impl Shot {
         // Loop positions count from the range's first frame; files, sidecars and
         // times use absolute frame indices.
         let index = |frame: usize| first_frame + frame;
-        let frame_time = |frame: usize| {
-            if video {
-                index(frame) as f32 / fps
-            } else {
-                at.unwrap_or(index(frame) as f32 / fps)
-            }
+        // Frame identity stays integer; evaluation receives numeric seconds.
+        let frame_request=|frame:usize| -> vork_time::Request {
+            if video || at.is_none() {vork_time::Request::Frame(index(frame) as u32,fps)}
+            else {authored_at.as_ref().map(vork_time::Request::from).unwrap_or(vork_time::Request::Numeric(0.))}
         };
-        ensure_usage!(
-            !alpha
-                || video_paths
-                    .iter()
-                    .all(|p| p.extension().is_some_and(|s| s.eq_ignore_ascii_case("mov"))),
-            "transparent background video requires .mov (ProRes 4444)"
-        );
+        let frame_time = |frame: usize| frame_request(frame).numeric().expect("validated output time");
+        let still_request=|| authored_at.as_ref().map(vork_time::Request::from).unwrap_or(vork_time::Request::Numeric(0.));
+        let still_index=at.map(|_| -> Result<u32> {
+            let frame=still_request().exact()?.scale(&vork_time::exact::decimal(&fps.to_string())?)
+                .add(&vork_time::exact::Germ::point(vork_time::exact::decimal("1/2")?)).floor();
+            u32::try_from(frame).context("still frame index exceeds u32 identity capacity").context(FailureKind::Usage)
+        }).transpose()?;
+        let output_index = |frame: usize| if video || at.is_none() { index(frame) as u32 } else { still_index.unwrap() };
         for (i, path) in out.iter().enumerate() {
             ensure_usage!(
                 !out[..i].contains(path),
@@ -365,10 +388,13 @@ impl Shot {
                 "video output cannot be combined with --no-write or --gpu-only"
             );
             ensure_usage!(
-                fps.fract() == 0. && fps <= i32::MAX as f32 / 2.,
-                "video output requires integer fps"
+                fps.numerator() <= i32::MAX as i64 && fps.denominator() <= i32::MAX as i64,
+                "video output rate exceeds encoder limits"
             );
             ensure_usage!(w % 2 == 0 && h % 2 == 0, "video output requires even dimensions");
+        }
+        if video {
+            i64::try_from(last_frame - first_frame)?.checked_mul(fps.denominator()).context("video timestamp overflow")?;
         }
         for path in &video_paths {
             ensure_usage!(!path.is_dir(), "video output path is a directory: {}", path.display());
@@ -404,6 +430,11 @@ impl Shot {
                 std::fs::create_dir_all(path)?;
             }
         }
+        let output_run = if no_write || gpu_only {
+            None
+        } else {
+            Some(crate::output_run::OutputRun::begin(&out)?)
+        };
         let outputs = Outputs::new(outputs);
         let readback = outputs.readback(
             directory_paths.iter().any(|p| !is_exr(p)),
@@ -430,7 +461,7 @@ impl Shot {
                                     Backend::Auto,
                                     w,
                                     h,
-                                    fps as u32,
+                                    fps,
                                     EncodeSettings { diagnostics, ..EncodeSettings::default() },
                                     path,
                                 ).map_err(setup)
@@ -476,8 +507,9 @@ impl Shot {
                                 scene,
                                 scene_path.parent().unwrap_or(Path::new(".")),
                                 crate::InstallOptions {
-                                    initial_time: frame_time(0),
+                                    initial_time: frame_request(0),
                                     readback: install_readback,
+                                    gpu_color: video || gpu_only,
                                     variants: if frames == 1 { crate::pipelines::VariantCompile::Fallback } else { Default::default() },
                                     ..Default::default()
                                 },
@@ -509,6 +541,8 @@ impl Shot {
                         let installed = install
                             .join()
                             .map_err(|_| anyhow::anyhow!("scene install worker panicked"))??;
+                        validate_clock_requests(&installed,(0..frames).map(&frame_request)
+                            .chain(still_pass.then(&still_request)))?;
                         Ok((installed, encoders, preparation_ms, encoder_attach_ms))
                     })?;
                 Ok((
@@ -586,6 +620,7 @@ impl Shot {
                         exr_codec,
                         ring_entries,
                         if still_pass { 0 } else { first_frame },
+                        if is_exr(path) {(fps.numerator() as i32,fps.denominator() as u32)} else {(1,1)},
                     )
                 })
                 .collect()
@@ -632,11 +667,10 @@ impl Shot {
                             }
                         }
                     }
-                    let time = frame_time(next_submit);
                     if gpu_only || (video && (directory_paths.is_empty() || still_pass)) {
-                        slot.submit_gpu(&installed, &renderer, time).map_err(device)?;
+                        slot.submit_indexed_outputs(&installed, &renderer, output_index(next_submit), frame_request(next_submit), crate::ReadbackOutputs::default()).map_err(device)?;
                     } else {
-                        slot.submit_outputs(&installed, &renderer, time, readback).map_err(device)?;
+                        slot.submit_indexed_outputs(&installed, &renderer, output_index(next_submit), frame_request(next_submit), readback).map_err(device)?;
                     }
                     submit_cpu[i] = cpu_elapsed(cpu_start);
                     next_submit += 1;
@@ -655,7 +689,7 @@ impl Shot {
                     redo_started.get_or_insert_with(Instant::now);
                     // The exposure's own frame keys its shadow requests: a
                     // still at `at` is not loop frame `index(frame)`.
-                    let exposure = (frame_time(frame) * fps).round() as usize;
+                    let exposure = output_index(frame) as usize;
                     redos += installed.redo_frame(&renderer, &mut slots, redo.0, exposure)?;
                     next_submit = frame;
                     continue;
@@ -671,6 +705,13 @@ impl Shot {
             // Portable encoders map the copy already recorded in this ring entry.
             // Deliver after collection, with later frames already queued; wait only
             // for this frame rather than draining unrelated work.
+            // The existing final display reduction observes the exact RGBA8
+            // image delivered to the encoder, after every compositor entry.
+            // Check each accepted frame, including animated alpha, before push.
+            if video_paths.iter().any(|path|has_format(path,"mp4")) {
+                ensure_usage!(p.exposure.is_some_and(|e|e.coverage==1.),
+                    "MP4 requires an opaque final image; transparency requires .mov (ProRes 4444)");
+            }
             let encode_push_ms = push_encoders(&mut encoders, slot, frame, &submission)?;
             if diagnostics && (frame == 0 || frame + 1 == frames) {
                 if let Some(memory) = renderer.device.generate_allocator_report() {
@@ -689,7 +730,7 @@ impl Shot {
                 first_frame_ms = loop_start.elapsed().as_secs_f64() * 1000.;
                 drop(foreground.take());
             }
-            metadata_frames.push(serde_json::json!({"index":index(frame),"time":frame_time(frame),"camera":installed.camera_name_at(frame_time(frame)),"depth_unit_m":p.camera.depth_unit_m,"exposure":p.exposure.map(|e|e.json())}));
+            metadata_frames.push(serde_json::json!({"index":output_index(frame),"time":frame_time(frame),"camera":installed.camera_name_at_request(&frame_request(frame))?,"depth_unit_m":p.camera.depth_unit_m,"exposure":p.exposure.map(|e|e.json())}));
             if let Some(e) = p.exposure { frame_exposures.push((index(frame), e)); }
             samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"sample_count":p.timing.sample_count}));
             if !still_pass {
@@ -710,11 +751,11 @@ impl Shot {
         };
         if still_pass {
             vork_slang::progress::phase("Rendering selected still", 1);
-            let still_frame = (at.unwrap() * fps).round() as usize;
+            let still_frame = still_index.unwrap() as usize;
             let pixels = loop {
                 let slot = &mut slots[0];
                 slot.write_color = false;
-                let attempt = slot.submit_outputs(&installed, &renderer, at.unwrap(), readback)
+                let attempt = slot.submit_indexed_outputs(&installed, &renderer, still_index.unwrap(), still_request(), readback)
                     .and_then(|()| slot.collect_readback(&renderer));
                 match attempt {
                     Ok(pixels) => break pixels,
@@ -780,7 +821,7 @@ impl Shot {
         if implicit_still && !no_write && !gpu_only {
             eprintln!("rendered t=0; use --at SECONDS for another time, or a directory for every frame");
         }
-        let mut report = serde_json::json!({"version":1,"device":renderer.adapter_info.name,"backend":format!("{:?}",renderer.adapter_info.backend),"pipeline_cache_supported":renderer.pipeline_cache_supported(),"pipeline_cache_status":renderer.pipeline_cache_status,"pipeline_cache_input_bytes":renderer.pipeline_cache_input_bytes,"pipeline_cache_rejection":renderer.pipeline_cache_rejection,"frames":frames,"frame_start":at.is_none().then_some(first_frame),"still_time":at,"resolution":[w,h],"png_write":!no_write && !gpu_only && !directory_paths.is_empty(),"video_write":video,"output":out,"renderer_pixel_readback":readback.any() && (!gpu_only && !directory_paths.is_empty()),"encoder_pixel_readback":encoder_readback,"encoder_open_ms":encoder_prepare_ms+encoder_attach_ms,"encoder_prepare_ms":encoder_prepare_ms,"encoder_attach_ms":encoder_attach_ms,"encoder_finish_ms":encoder_finish_ms,"scene_parse_ms":scene_parse_ms,"pipeline_ms":installed.pipeline_ms,"pipeline_creation_ms":renderer.pipeline_timings(),"environment_install_ms":installed.environment_install_ms,"material_bind_ms":installed.material_bind_ms,"asset_decode_ms":installed.asset_decode_ms,"texture_upload_ms":installed.texture_upload_ms,"texture_cache_hits":installed.texture_cache_hits,"first_frame_ms":first_frame_ms,"device_ms":renderer.startup.as_secs_f64()*1000.,"device_stages_ms":renderer.startup_stages_ms,"geometry_vertex_bytes":installed.geometry_vertex_bytes,"install_ms":installed.install_time.as_secs_f64()*1000.,"ready_ms":ready_ms,"loop_wall_ms":loop_start.elapsed().as_secs_f64()*1000.,"wall_ms":wall.elapsed().as_secs_f64()*1000.,"frames_in_flight":in_flight,"transient_bytes":installed.transient_bytes(),"gpu_timing_readback":true,"png_workers":png_workers,"samples":samples});
+        let mut report = serde_json::json!({"version":3,"device":renderer.adapter_info.name,"backend":format!("{:?}",renderer.adapter_info.backend),"pipeline_cache_supported":renderer.pipeline_cache_supported(),"pipeline_cache_status":renderer.pipeline_cache_status,"pipeline_cache_input_bytes":renderer.pipeline_cache_input_bytes,"pipeline_cache_rejection":renderer.pipeline_cache_rejection,"frames":frames,"frame_start":at.is_none().then_some(first_frame),"still_time":at,"resolution":[w,h],"png_write":!no_write && !gpu_only && !directory_paths.is_empty(),"video_write":video,"output":out,"renderer_pixel_readback":readback.any() && (!gpu_only && !directory_paths.is_empty()),"encoder_pixel_readback":encoder_readback,"encoder_open_ms":encoder_prepare_ms+encoder_attach_ms,"encoder_prepare_ms":encoder_prepare_ms,"encoder_attach_ms":encoder_attach_ms,"encoder_finish_ms":encoder_finish_ms,"scene_parse_ms":scene_parse_ms,"pipeline_ms":installed.pipeline_ms,"pipeline_creation_ms":renderer.pipeline_timings(),"environment_install_ms":installed.environment_install_ms,"material_bind_ms":installed.material_bind_ms,"asset_decode_ms":installed.asset_decode_ms,"texture_upload_ms":installed.texture_upload_ms,"texture_cache_hits":installed.texture_cache_hits,"first_frame_ms":first_frame_ms,"device_ms":renderer.startup.as_secs_f64()*1000.,"device_stages_ms":renderer.startup_stages_ms,"geometry_vertex_bytes":installed.geometry_vertex_bytes,"install_ms":installed.install_time.as_secs_f64()*1000.,"ready_ms":ready_ms,"loop_wall_ms":loop_start.elapsed().as_secs_f64()*1000.,"wall_ms":wall.elapsed().as_secs_f64()*1000.,"frames_in_flight":in_flight,"transient_bytes":installed.transient_bytes(),"gpu_timing_readback":true,"png_workers":png_workers,"samples":samples});
         // Background feature variants that initially drew with a superset fallback.
         report["shader_creation"] = serde_json::to_value(crate::timing::creations(&renderer.device))?;
         report["frame_redos"] = redos.into();
@@ -797,20 +838,21 @@ impl Shot {
         // The profile asked for intent; `settings` records the techniques this
         // device actually ran (automatic choices resolved at install).
         let metadata = |frames: &[serde_json::Value]| serde_json::json!({
-            "version": 1, "fps": fps, "frames": frames,
+            "version": 3, "fps": fps, "frames": frames,
             "object_ids": &*installed.object_ids,
             "warnings": warnings.snapshot(),
             "profile": profile_record, "settings": installed.render().settings,
             "denoiser": installed.render().settings.integrator.denoiser().and_then(|_| crate::denoise::device_kind(&renderer)),
         });
         let mut exposures = Vec::new();
-        for path in &out {
+        let mut pending_metadata = Vec::new();
+        for path in out.iter().filter(|_| output_run.is_some()) {
             let file_path = |suffix: &str| {
                 if is_video(path) || is_file(path) { sidecar(path, suffix) }
                 else { path.join(suffix) }
             };
             let mut frames = if !is_video(path) && still_pass {
-                vec![serde_json::json!({"index":0,"time":at.unwrap(),"camera":installed.camera_name_at(at.unwrap()),
+                vec![serde_json::json!({"index":still_index.unwrap(),"time":at.unwrap(),"camera":installed.camera_name_at_request(&still_request())?,
                     "depth_unit_m":still_camera.as_ref().unwrap().depth_unit_m,"exposure":still_exposure.map(|e: crate::Exposure|e.json())})]
             } else { metadata_frames.clone() };
             let still_rows: Vec<_> = still_exposure.map(|e| (0, e)).into_iter().collect();
@@ -828,7 +870,7 @@ impl Shot {
                 meta["exposure"] = summary.clone();
                 exposures.push(serde_json::json!({"output": path, "exposure": summary}));
             }
-            std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)?;
+            pending_metadata.push((meta_path.clone(), serde_json::to_vec_pretty(&meta)?));
             sidecars.push(meta_path);
             if diagnostics {
                 let timing_path = file_path("timings.json");
@@ -839,6 +881,7 @@ impl Shot {
         report["warnings"] = serde_json::to_value(warnings.snapshot())?;
         report["sidecars"] = serde_json::to_value(sidecars)?;
         report["exposure"] = exposures.into();
+        if let Some(run) = &output_run { run.complete(&pending_metadata)?; }
         Ok(RenderedShot {
             report,
             _encoders: encoders,
@@ -950,4 +993,38 @@ mod channel_tests {
             assert_eq!(resolve_outputs(explicit.clone(), &aovs), explicit);
         }
     }
+}
+
+/// Admission of the finite output request set, before any replay or exposure.
+/// Simulation and shutter consumers need this traversal; ordinary animation
+/// does not get an extra evaluation. Each shutter envelope is derived independently from its
+/// nominal integer identity and existing numeric shutter controls.
+fn validate_clock_requests(scene:&InstalledScene,requests:impl Iterator<Item=vork_time::Request>)->Result<()> {
+    let compute=scene.compute.as_ref().filter(|compute|compute.has_simulation());
+    let animated_shutter=scene.animation.has_shutter_animation();
+    if compute.is_none() && !animated_shutter && scene.render.motion_blur.as_ref().is_none_or(|m| m.shutter == 0.) {return Ok(())}
+    use vork_time::exact::{Germ,decimal,ieee};
+    let mut samples=scene.animation.samples();
+    let rate=decimal(&scene.render.fps.to_string())?;
+    for request in requests {
+        request.numeric()?;
+        if let Some(compute)=compute {compute.validate_request(&request)?;}
+        let nominal=request.exact()?;
+        let previous=request.previous(scene.render.fps)?.exact()?;
+        let cut=scene.animation.clamp_camera_request(&nominal,&previous,scene.camera)?!=previous;
+        if animated_shutter {scene.animation.sample_shutter(request.numeric()?,&mut samples,&scene.render);}
+        let shutter=if animated_shutter {samples.render.as_ref().unwrap().motion_blur.as_ref()}else{scene.render.motion_blur.as_ref()};
+        let span=ieee(if cut {0.}else{shutter.map_or(0.,|s|s.shutter)})?/&rate;
+        anyhow::ensure!(span>=Default::default(),"animated shutter must be nonnegative");
+        let offset=ieee(shutter.map_or(0.,|s|s.position.offset()))?;
+        for position in [decimal("-1/2")?,decimal("1/2")?] {
+            let endpoint=nominal.add(&Germ::point((&position+&offset)*&span));
+            let endpoint=if endpoint.compare_point(&Default::default()).is_lt() {Germ::point(Default::default())}else{endpoint};
+            let endpoint=scene.animation.clamp_camera_request(&nominal,&endpoint,scene.camera)?;
+            let endpoint=vork_time::Request::Exact(endpoint);
+            endpoint.numeric()?;
+            if let Some(compute)=compute {compute.validate_request(&endpoint)?;}
+        }
+    }
+    Ok(())
 }

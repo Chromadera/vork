@@ -102,7 +102,7 @@ impl Profile {
 pub struct CallOverrides {
     pub settings: serde_json::Map<String, serde_json::Value>,
     pub resolution: Option<[u32;2]>,
-    pub fps: Option<f32>,
+    pub fps: Option<crate::Time>,
 }
 impl CallOverrides {
     pub const KEYS: &'static [&'static str] = &["resolution", "fps", "seed", "samples", "denoise"];
@@ -132,8 +132,8 @@ impl CallOverrides {
                     result.resolution=Some(size);
                 }
                 "fps"=> {
-                    let fps:f32=serde_json::from_value(value).context("--set fps: expected positive number")?;
-                    ensure!(fps.is_finite() && fps>0.,"--set fps: must be positive and finite");result.fps=Some(fps);
+                    let fps:crate::Time=serde_json::from_value(value).context("--set fps: expected positive number or rational string")?;
+                    ensure!(fps>crate::Time::ZERO && fps.as_f32().is_finite(),"--set fps: must be positive and finite");result.fps=Some(fps);
                 }
                 _=>anyhow::bail!("--set {key}: allowed fields: {}; scene fields belong in the scene; quality uses --profile std/previs, std/draft, std/final or std/path", Self::KEYS.join(", ")),
             }

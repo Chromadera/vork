@@ -26,11 +26,12 @@ extrude: {name?:string="extrude",outline:vec2[],holes?:vec2[][],depth?:number=1,
 <!-- generated-shapes:end -->
 
 SHADER REFERENCE
-std/hair: Principled Hair (Chiang); curves only; parametrization color|melanin|absorption, color,
-melanin, melanin_redness, tint, absorption_coefficient, roughness, radial_roughness, coat, ior,
-offset, random_roughness, random_color, random. Physical hair selects path transport with Chiang fibre scattering.
+std/hair: Principled Hair (Chiang); curves only. Physical hair selects path transport
+with Chiang fibre scattering. Typed inputs/defaults/ranges: vork help field std/hair (also below).
 std/environment_image: Image image; optional Image lighting_weight; lat-long +Y up, longitude atan2(z,x)/2pi+0.5; lighting_weight.r weights lighting only (unbound = 1).
-std/sky: Nishita scattering atmosphere; sun_elevation, sun_rotation, altitude, air_density, aerosol_density, ozone_density.
+std/sky: Nishita scattering atmosphere.
+Typed sky inputs/defaults/ranges: vork help field std/sky (also below).
+Text defaults and units: vork help field std/text (also below).
 vork std sky: atmosphere plus declared solar light; sun_size is full angle, sun_intensity scales solar emission.
 vork std environment: {file,output,name?,threshold?,color_space?,fps?}; weight EXR plus environment program and declared sun; threshold defaults to 10.
 std/bloom: add prepare(original={channel:color}), named highlights, then combine(original={channel:color},source={node:highlights}) to render.compositor. stage is an input; adjust prepare threshold=1 and combine strength=1. Full JSON: vork help compositor.

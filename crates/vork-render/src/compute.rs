@@ -53,7 +53,6 @@ pub(crate) struct Compute {
     pages: Vec<wgpu::Buffer>,
     initial: Vec<wgpu::Buffer>,
     previous: Vec<wgpu::Buffer>,
-    ticks: wgpu::Buffer,
     device: wgpu::Device,
     timestamp_period: f32,
     simulation: Option<v2::Simulation>,
@@ -64,9 +63,13 @@ pub(crate) struct Compute {
     identity: blake3::Hash,
     tick: wgpu::Buffer,
     fps: f32,
+    rate: vork_time::Time,
     frames: u32,
     pub(crate) cursor: Mutex<Cursor>,
     instances: Vec<Instance>,
+    /// Installed copies from retained source ranges to object-owned material rows.
+    material_attributes: Vec<(usize, u64, u64, u64)>,
+    material_attribute_sources: Vec<String>,
     bridge: Option<(
         wgpu::ComputePipeline,
         u32,
@@ -233,16 +236,17 @@ impl ReplayGroup {
 }
 
 /// Convert a render request to a canonical tick, never rounding to output frames.
-fn simulation_tick(sim: &v2::Simulation, time: f32) -> Result<u32> {
-    ensure!(time.is_finite(), "simulation time must be finite");
-    if f64::from(time) < sim.t0 { return Ok(0); }
-    let n = ((f64::from(time) - sim.t0) / sim.dt).floor().max(0.);
-    ensure!(n.is_finite() && n < f64::from(u32::MAX), "simulation time exceeds tick capacity");
-    let mut tick = n as u32;
-    // Requests use f32 scene time: round canonical boundaries once to that domain.
-    if time >= (sim.t0 + f64::from(tick + 1) * sim.dt) as f32 { tick += 1; }
+fn simulation_tick(sim:&v2::Simulation,time:impl Into<vork_time::Request>)->Result<u32> {
+    let time=time.into().exact()?;
+    let dt=sim.dt.exact();
+    ensure!(dt>vork_time::exact::Rational::from_integer(0.into()),"simulation dt must be positive");
+    let tick=time.sub(&vork_time::exact::Germ::point(sim.t0.exact())).scale(&dt.recip()).floor();
+    if tick<0.into() {return Ok(0)}
+    let tick:u32=tick.try_into().context("simulation time exceeds tick capacity")?;
+    ensure!(tick<u32::MAX,"simulation time exceeds tick capacity");
     Ok(tick)
 }
+
 struct Instance {
     draw: usize,
     trs: [Option<AttributeBinding>; 3],
@@ -270,12 +274,13 @@ impl Compute {
         sources: &[Option<&v2::Node>],
         roots: &[install::MeshRoot],
         draws: &[install::Draw],
-        fps: f32,
-        duration: f32,
+        rate: vork_time::Time,
+        duration: impl Into<vork_time::Clock>,
     ) -> Result<Option<Self>> {
         if !source.programs.values().any(|p| p.is_compute()) && !draws.iter().any(|draw|draw.computed) {
             return Ok(None);
         }
+        let fps=rate.as_f32();
         let attributes = attributes.context("compute requires named buffers")?;
         let pages = attributes.storage.clone();
         let mut dispatches = Vec::new();
@@ -615,34 +620,11 @@ impl Compute {
                 },
             ));
         }
-        let frame_count = if dispatches.iter().any(|d| d.schedule == ComputeSchedule::Frame) {
-            (duration * fps).ceil().max(1.)
-        } else { 1. };
-        ensure!(
-            frame_count.is_finite() && f64::from(frame_count) <= f64::from(u32::MAX),
-            "compute frame grid exceeds u32 capacity"
-        );
-        let frames = frame_count as u32;
-        ensure!(
-            u64::from(frames) * 16 <= r.device.limits().max_buffer_size,
-            "compute frame grid exceeds device buffer limit"
-        );
-        let ticks: Vec<[u32; 4]> = (0..frames)
-            .map(|i| {
-                [
-                    i,
-                    (i as f32 / fps).to_bits(),
-                    (if i == 0 { 0. } else { 1. / fps }).to_bits(),
-                    0,
-                ]
-            })
-            .collect();
-        let ticks = init(
-            &r.device,
-            "simulation frame grid",
-            bytemuck::cast_slice(&ticks),
-            wgpu::BufferUsages::COPY_SRC,
-        );
+        let count=if dispatches.iter().any(|d|d.schedule==ComputeSchedule::Frame) {
+            (duration.into().exact()*vork_time::exact::decimal(&rate.to_string())?).ceil().to_integer()
+        }else{1.into()};
+        let frames:u32=count.try_into().context("compute frame grid exceeds u32 capacity")?;
+        ensure!(frames>0,"compute frame grid must be nonempty");
         // Geometry adds immutable retained columns to these pages. Only producer-
         // owned ranges reset and publish on seeks; sharing a page is not a write.
         let frame_sources: Vec<String> = dispatches.iter()
@@ -663,7 +645,6 @@ impl Compute {
             pages,
             initial,
             previous,
-            ticks,
             device: r.device.clone(),
             timestamp_period: r.queue.get_timestamp_period(),
             simulation: source.simulation.clone(),
@@ -674,17 +655,20 @@ impl Compute {
             identity: identity.finalize(),
             tick,
             fps,
+            rate,
             frames,
             cursor: Mutex::new(Cursor::default()),
             instances,
+            material_attributes: Vec::new(),
+            material_attribute_sources: Vec::new(),
             bridge: None,
         };
         // Install dispatches run now; seeks replay them from the same initial bytes.
         let mut cursor = result.cursor.lock().expect("compute cursor poisoned");
         result.run(&mut encoder, &mut cursor, ComputeSchedule::Install, 0);
         if let Some(sim) = &result.simulation {
-            result.set_tick(&mut encoder, 0, sim.t0, 0., sim.seed);
-            result.run_named(&mut encoder, &mut cursor, &sim.init, sim.t0 as f32);
+            result.set_tick(&mut encoder, 0, sim.t0.as_f64(), 0., sim.seed);
+            result.run_named(&mut encoder, &mut cursor, &sim.init, sim.t0.as_f64() as f32);
         }
         crate::command_finish::Segments::submit(&r.queue, encoder);
         drop(cursor);
@@ -702,9 +686,55 @@ impl Compute {
     pub(crate) fn geometry_uses_simulation_clock(&self, sources: &[String]) -> bool {
         self.simulation.is_some() && !self.dispatches.iter().any(|d|d.schedule==ComputeSchedule::Frame && d.writes.iter().any(|n|sources.contains(n)))
     }
-    pub(crate) fn geometry_time_key(&self, sources: &[String], time: f32) -> Result<u32> {
-        if self.geometry_uses_simulation_clock(sources) {return simulation_tick(self.simulation.as_ref().unwrap(),time);}
-        Ok(time.to_bits())
+    pub(crate) fn geometry_time_key(&self,sources:&[String],time:impl Into<vork_time::Request>)->Result<[u32;2]> {
+        let time=time.into();
+        let simulation=self.simulation.as_ref().filter(|_|self.dispatches.iter().any(|d|d.schedule==ComputeSchedule::Simulation && d.writes.iter().any(|n|sources.contains(n))))
+            .map(|sim|simulation_tick(sim,&time)).transpose()?.unwrap_or(0);
+        let frame=if self.dispatches.iter().any(|d|d.schedule==ComputeSchedule::Frame && d.writes.iter().any(|n|sources.contains(n))) {
+            nominal_frame(&time,self.rate,self.frames)?
+        }else{0};
+        Ok([simulation,frame])
+    }
+    pub(crate) fn request_key(&self,time:&vork_time::Request)->Result<[u32;2]> {
+        let tick=self.simulation.as_ref().map(|sim|simulation_tick(sim,time)).transpose()?.unwrap_or(0);
+        let frame=if self.dispatches.iter().any(|d|d.schedule==ComputeSchedule::Frame) {
+            nominal_frame(&time,self.rate,self.frames)?
+        }else{0};
+        Ok([tick,frame])
+    }
+    pub(crate) fn validate_request(&self,time:&vork_time::Request)->Result<()> {
+        time.numeric()?;
+        if let Some(sim)=&self.simulation {
+            let tick=simulation_tick(sim,time)?;
+            vork_time::Request::Tick(tick,sim.t0.clone(),sim.dt.clone()).numeric()?;
+        }
+        Ok(())
+    }
+    pub(crate) fn bind_material_attributes(&mut self, buffers: &ProgramBuffers, rows: Vec<(String, u32, u32)>) -> Result<()> {
+        for (source, index, destination) in rows {
+            let binding = &buffers.bindings[&source];
+            ensure!(index < binding.count, "material attribute row exceeds source capacity");
+            let span = binding.spans.iter().find(|span| index >= span.first && index < span.first + span.count)
+                .context("material attribute row has no installed range")?;
+            self.material_attributes.push((span.page as usize,
+                u64::from(span.offset + (index - span.first) * binding.width) * 4,
+                u64::from(destination) * 4, u64::from(binding.width) * 4));
+            self.material_attribute_sources.push(source);
+        }
+        self.material_attribute_sources.sort();
+        self.material_attribute_sources.dedup();
+        Ok(())
+    }
+    pub(crate) fn has_material_attributes(&self) -> bool { !self.material_attributes.is_empty() }
+    pub(crate) fn publish_material_attributes(&self, encoder: &mut wgpu::CommandEncoder,
+        cursor: &Cursor, changes: &mut values::ChangeTracker, records: &wgpu::Buffer) {
+        let versions: Vec<u64> = self.material_attribute_sources.iter()
+            .map(|source| cursor.publications.get(source).copied().unwrap_or(0)).collect();
+        if changes.changed(values::ChangeKey::MaterialAttributes, bytemuck::cast_slice(&versions)) {
+            for &(page, source, destination, size) in &self.material_attributes {
+                encoder.copy_buffer_to_buffer(&self.pages[page], source, records, destination, size);
+            }
+        }
     }
     pub(crate) fn has_simulation(&self) -> bool { self.simulation.is_some() }
     pub(crate) fn has_instances(&self) -> bool {
@@ -785,8 +815,8 @@ impl Compute {
         let end=first+count;
         let mut data=Vec::with_capacity(count as usize*words_per_tick);
         for step in first..end {
-            let time=sim.t0+f64::from(step)*sim.dt;
-            data.extend_from_slice(&[step,(time as f32).to_bits(),(sim.dt as f32).to_bits(),sim.seed]);
+            let time=sim.t0.as_f64()+f64::from(step)*sim.dt.as_f64();
+            data.extend_from_slice(&[step,(time as f32).to_bits(),(sim.dt.as_f64() as f32).to_bits(),sim.seed]);
             for (index,dispatch) in self.dispatches.iter().enumerate() {
                 if inputs[index].is_none() {continue;}
                 let (_,words,Some(animation))=dispatch.inputs.as_ref().unwrap() else {unreachable!()};
@@ -832,7 +862,7 @@ impl Compute {
     }
     // Resident and disk snapshots represent the same canonical declared state.
     // Cursor ownership and queue order make restoration safe across frame slots.
-    pub(crate) fn plan_requests(&self, cursor: &mut Cursor, times: impl Iterator<Item = f32>) -> Result<()> {
+    pub(crate) fn plan_requests(&self, cursor: &mut Cursor, times: impl Iterator<Item = vork_time::Request>) -> Result<()> {
         cursor.requested.clear();
         cursor.retention_stride=None;
         if let Some(sim) = &self.simulation {
@@ -840,7 +870,7 @@ impl Compute {
         }
         Ok(())
     }
-    pub(crate) fn consume_request(&self, cursor: &mut Cursor, time: f32) -> Result<()> {
+    pub(crate) fn consume_request(&self, cursor: &mut Cursor, time: impl Into<vork_time::Request>) -> Result<()> {
         if let Some(sim) = &self.simulation {
             let tick=simulation_tick(sim,time)?;
             if let Some(count)=cursor.requested.get_mut(&tick) {
@@ -930,20 +960,20 @@ impl Compute {
         Some(Checkpoint {buffers,path:self.checkpoint_path(tick)})
     }
     #[cfg(test)]
-    fn advance(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, time: f32) -> Result<Option<Checkpoint>> {
+    fn advance(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, time: impl Into<vork_time::Request>) -> Result<Option<Checkpoint>> {
         self.advance_with(encoder, cursor, time, |_| {})
     }
     pub(crate) fn advance_with(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         cursor: &mut Cursor,
-        time: f32,
+        time: impl Into<vork_time::Request>,
         boundary: impl FnMut(&mut wgpu::CommandEncoder),
     ) -> Result<Option<Checkpoint>> {
         self.advance_paged(encoder,cursor,time,constants::SCENE_BUFFER_PAGE_BYTES as u64,boundary)
     }
     pub(crate) fn advance_observing(
-        &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, time: f32,
+        &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, time: impl Into<vork_time::Request>,
         boundary: impl FnMut(&mut wgpu::CommandEncoder),
         observe: impl FnMut(&mut wgpu::CommandEncoder,u32),
     ) -> Result<Option<Checkpoint>> {
@@ -951,20 +981,21 @@ impl Compute {
     }
     fn advance_paged(
         &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor,
-        time: f32, upload_page_bytes: u64,
+        time: impl Into<vork_time::Request>, upload_page_bytes: u64,
         boundary: impl FnMut(&mut wgpu::CommandEncoder),
     ) -> Result<Option<Checkpoint>> {
         self.advance_paged_observing(encoder,cursor,time,upload_page_bytes,boundary,|_,_| {})
     }
     fn advance_paged_observing(
         &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor,
-        time: f32, upload_page_bytes: u64,
+        time: impl Into<vork_time::Request>, upload_page_bytes: u64,
         mut boundary: impl FnMut(&mut wgpu::CommandEncoder),
         mut observe: impl FnMut(&mut wgpu::CommandEncoder,u32),
     ) -> Result<Option<Checkpoint>> {
+        let time=time.into();
         let mut checkpoint = None;
         if let Some(sim) = &self.simulation {
-            let target = simulation_tick(sim, time)?;
+            let target = simulation_tick(sim, &time)?;
             if let Some(tick) = self.restore_resident(encoder,cursor,target) {
                 for name in &sim.state {cursor.publish_source(name);}
                 if self.dispatches.iter().any(|d|d.schedule==ComputeSchedule::Simulation && d.writes_placement) {cursor.publish_placement();}
@@ -976,8 +1007,8 @@ impl Compute {
                 }
                 for name in &sim.state { cursor.publish_source(name); }
                 if self.dispatches.iter().any(|d| d.schedule == ComputeSchedule::Simulation && d.writes_placement) { cursor.publish_placement(); }
-                self.set_tick(encoder, 0, sim.t0, 0., sim.seed);
-                self.run_named(encoder, cursor, &sim.init, sim.t0 as f32);
+                self.set_tick(encoder, 0, sim.t0.as_f64(), 0., sim.seed);
+                self.run_named(encoder, cursor, &sim.init, sim.t0.as_f64() as f32);
                 cursor.simulation = None;
             }
             if let Some(tick) = self.restore_checkpoint(encoder, target, cursor.simulation.unwrap_or(0)) {
@@ -1007,7 +1038,7 @@ impl Compute {
                 }
                 let page=upload.as_ref().unwrap();
                 encoder.copy_buffer_to_buffer(&page.buffer,page.offset(step),&self.tick,0,16);
-                self.run_named_uploaded(encoder, cursor, &sim.steps, (sim.t0 + f64::from(step) * sim.dt) as f32,Some((page,step)),probe.as_ref().map(|p|&p.queries));
+                self.run_named_uploaded(encoder, cursor, &sim.steps, (sim.t0.as_f64() + f64::from(step) * sim.dt.as_f64()) as f32,Some((page,step)),probe.as_ref().map(|p|&p.queries));
                 if let Some(probe)=probe {cursor.replay_cost=probe.resolve(encoder,self.timestamp_period);}
                 observe(encoder,step+1);
                 self.retain_resident(encoder,cursor,step+1);
@@ -1027,7 +1058,7 @@ impl Compute {
             }
             return Ok(checkpoint);
         }
-        let frame = nominal_frame(time, self.fps, self.frames);
+        let frame=nominal_frame(&time,self.rate,self.frames)?;
 
         if cursor.frame.is_some_and(|last| frame < last) {
             for &(page, offset, bytes) in &self.frame_ranges {
@@ -1035,7 +1066,7 @@ impl Compute {
             }
             for name in &self.frame_sources { cursor.publish_source(name); }
             if self.dispatches.iter().any(|d| d.schedule != ComputeSchedule::Simulation && d.writes_placement) { cursor.publish_placement(); }
-            encoder.copy_buffer_to_buffer(&self.ticks, 0, &self.tick, 0, 16);
+            self.set_tick(encoder,0,0.,0.,0);
             self.run(encoder, cursor, ComputeSchedule::Install, 0);
             cursor.frame = None;
         }
@@ -1044,7 +1075,7 @@ impl Compute {
             for &(page, offset, bytes) in &self.frame_ranges {
                 encoder.copy_buffer_to_buffer(&self.pages[page], offset, &self.previous[page], offset, bytes);
             }
-            encoder.copy_buffer_to_buffer(&self.ticks, u64::from(step) * 16, &self.tick, 0, 16);
+            self.set_tick(encoder,step,f64::from(step)*self.rate.denominator() as f64/self.rate.numerator() as f64,if step==0 {0.}else{self.rate.denominator() as f64/self.rate.numerator() as f64},0);
             self.run(encoder, cursor, ComputeSchedule::Frame, step);
             // Initialization at t=0 has no preceding simulation frame. Its
             // previous transforms must equal the initialized state, including
@@ -1407,12 +1438,8 @@ fn dispatch_tiles(groups: [u32; 3], limit: u32) -> Vec<([u32; 3], [u32; 4])> {
     tiles
 }
 
-fn nominal_frame(time: f32, fps: f32, frames: u32) -> u32 {
-    // Time arrives as f32; rounding in f64 recovers nominal frame timestamps
-    // without an absolute epsilon that fails once f32 spacing grows.
-    (f64::from(time) * f64::from(fps))
-        .round()
-        .clamp(0., f64::from(frames - 1)) as u32
+fn nominal_frame(time:&vork_time::Request,fps:vork_time::Time,frames:u32)->Result<u32> {
+    Ok(time.exact()?.scale(&vork_time::exact::decimal(&fps.to_string())?).floor_clamped(0,i64::from(frames)-1)? as u32)
 }
 
 /// Typed element access over the shared tightly packed storage pages.
@@ -1499,8 +1526,8 @@ fn water_simulation_and_reconstruction_timing() -> Result<()> {
         for (phase,names) in [&sim.steps[..split],&sim.steps[split..]].into_iter().enumerate() {
             let start=std::time::Instant::now();
             let mut encoder=r.device.create_command_encoder(&Default::default());
-            compute.set_tick(&mut encoder,tick,sim.t0+f64::from(tick)*sim.dt,sim.dt,sim.seed);
-            compute.run_named(&mut encoder,&mut cursor,names,(sim.t0+f64::from(tick)*sim.dt) as f32);
+            compute.set_tick(&mut encoder,tick,sim.t0.as_f64()+f64::from(tick)*sim.dt.as_f64(),sim.dt.as_f64(),sim.seed);
+            compute.run_named(&mut encoder,&mut cursor,names,(sim.t0.as_f64()+f64::from(tick)*sim.dt.as_f64()) as f32);
             let submission=r.queue.submit([encoder.finish()]);r.wait(Some(submission))?;
             let seconds=start.elapsed().as_secs_f64();
             eprintln!("water phase tick={tick} phase={} wall_s={seconds:.6}",if phase==0 {"simulation"} else {"reconstruction"});

@@ -331,6 +331,59 @@ pub(crate) fn projected_sides(
         TrackTarget::Node {node, property: P::Rotation | P::Scale} => Some(node.as_str()),
         _ => None,
     }).collect();
+    // Unlike the broad swept-sphere flags, a fixed aim is a static pose.
+    // Propagate animation through both evaluator dependency edges to a fixed point.
+    let mut pose_dynamic: Vec<_> = nodes.iter().map(|n| moving.contains(n.node.name.as_str())).collect();
+    loop {
+        let mut changed = false;
+        for (i, node) in nodes.iter().enumerate() {
+            let target = match &node.node.target {
+                Some(vork_scene::AimTarget::Node(name)) => nodes.iter().position(|n| n.node.name == *name),
+                _ => None,
+            };
+            if !pose_dynamic[i] && (node.parent.is_some_and(|p| pose_dynamic[p])
+                || target.is_some_and(|t| pose_dynamic[t])) {
+                pose_dynamic[i] = true;
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    // Planning precedes import/pose initialization. Resolve static authored
+    // parent/aim dependencies through the evaluator, not the un-aimed TRS worlds.
+    let mut planned_nodes:Vec<_>=nodes.iter().map(|n|crate::install::EvalNode {
+        node:n.node.clone(),camera:n.camera.clone(),parent:n.parent,world:n.world,
+        dynamic:n.dynamic,embedded:n.embedded,
+    }).collect();
+    let has_object_focus=nodes.iter().any(|n|views.contains_key(&n.node.name)
+        && matches!(n.node.kind,NodeKind::Camera {focus_object:Some(_),..}));
+    let targets=match crate::targets::Plan::compile(&mut planned_nodes) {
+        Ok(plan)=>Some(plan),
+        // Imported target names do not exist until geometry installation. Numeric
+        // focus retains the existing orientation-independent swept-sphere path.
+        Err(_) if !has_object_focus=>None,
+        Err(error)=>return Err(error).context("curve/point camera bounds: cannot resolve parent/aim/focus dependencies; use numeric material.inputs.focus_distance or an authored focus/aim node"),
+    };
+    if let Some(targets)=targets {
+        let mut worlds:Vec<_>=nodes.iter().map(|n|n.world).collect();
+        for &i in &targets.order {
+            if !pose_dynamic[i] {
+                let world=nodes[i].parent.map_or(Mat4::IDENTITY,|p|worlds[p])*nodes[i].node.transform.matrix();
+                worlds[i]=targets.aim(i,world,&worlds,&nodes[i].node)?;
+            }
+        }
+        for (i,node) in planned_nodes.iter_mut().enumerate() {
+            if !pose_dynamic[i] {node.world=worlds[i];}
+        }
+        for &(camera,target) in &targets.focus {
+            if !pose_dynamic[camera] && !pose_dynamic[target] {
+                if let Some(state)=&mut planned_nodes[camera].camera {
+                    state.focus=crate::targets::focus_distance(worlds[camera],worlds[target]);
+                }
+            }
+        }
+    }
+    let nodes=&planned_nodes;
     let mut dynamic = vec![false; nodes.len()];
     let mut linear_dynamic = vec![false; nodes.len()];
     let mut max_scale = vec![1.; nodes.len()];
@@ -425,7 +478,9 @@ pub(crate) fn projected_sides(
             let Some(resolutions)=views.get(&camera.node.name) else {continue;};
             for &resolution in resolutions {
                 let [w,h]=resolution.map(|v|v as f32);
-                let Some(c)=camera.camera.as_ref().map(|c|c.calibration(w/h)).transpose()?.flatten() else {
+                let Some(c)=camera.camera.as_ref().map(|c|c.calibration(w/h)).transpose()
+                    .with_context(|| format!("node {:?}, camera {:?}: cannot bound curve/point projection; check camera optics and focus depth, or use numeric material.inputs.focus_distance instead of object focus",
+                        mesh.node.name, camera.node.name))?.flatten() else {
                     radius_pixels=radius_pixels.max(w.hypot(h));continue;
                 };
                 let optics_animated=matches!(&camera.node.kind,NodeKind::Camera {material:Some(name),..} if animation.material_inputs().iter().any(|(material,_)|material==name));
@@ -434,11 +489,75 @@ pub(crate) fn projected_sides(
                 // Unknown widths or instance scales need the screen-domain fallback.
                 if computed_width || optics_animated {radius_pixels=radius_pixels.max(w.hypot(h));}
                 let near=c[1][0];let pixels_per_unit=h*c[0][1]*0.5;let ortho=c[1][2]!=0.;
-                // Bound the whole visible cone, including shifted film and
-                // defocused aperture samples. Object focus can approach zero
-                // under animation; its evaluator owns the same positive floor.
-                let focus = if matches!(&camera.node.kind,NodeKind::Camera {focus_object:Some(_),..}) {
-                    crate::constants::MIN_FOCUS_DISTANCE
+                // Focus uses world camera-axis metres, exactly as the evaluator,
+                // rather than camera-space Z (which includes inherited scale).
+                let focus = if let NodeKind::Camera {focus_object:Some(target),..} = &camera.node.kind {
+                    let target_index = nodes.iter().position(|n| n.node.name == *target)
+                        .with_context(|| format!("camera {:?}: unknown focus object {target:?}", camera.node.name))?;
+                    if !pose_dynamic[camera_index] && !pose_dynamic[target_index] {
+                        let depth = crate::targets::focus_distance(camera.world, nodes[target_index].world);
+                        ensure!(c[2][0] == 0. || depth > crate::constants::MIN_FOCUS_DISTANCE,
+                            "node {:?}, camera {:?}: focus object {:?} is on the camera plane; use numeric material.inputs.focus_distance or move the focus object away from the camera plane",
+                            mesh.node.name, camera.node.name, target);
+                        c[2][1]
+                    } else {
+                        let standard=match &camera.node.kind {
+                            NodeKind::Camera {material:Some(name),..} => scene.materials[name].program == "std/camera",
+                            _ => true,
+                        };
+                        ensure!(standard,
+                            "node {:?}, camera {:?}: animated object focus {:?} has no certified custom-camera projection bound; use numeric material.inputs.focus_distance or std/camera",
+                            mesh.node.name, camera.node.name, target);
+                        let axis = camera.world.z_axis.truncate().normalize();
+                        let lower = if !linear_dynamic[camera_index] || !pose_dynamic[camera_index] {
+                            ((origin_centres[target_index] - origin_centres[camera_index]).dot(axis).abs()
+                                - origin_radii[target_index] - origin_radii[camera_index]).max(0.)
+                        } else if camera.node.transform.resolved_rotation() == [0., 0., 0., 1.]
+                            && !animation.targets().any(|t| matches!(t,
+                                TrackTarget::Node {node, property:P::Rotation} if node == &camera.node.name))
+                            && camera.node.target.is_some()
+                        {
+                            // QR aiming retains parent stretch H. With no local
+                            // rotation offset, |Hzz| / |H*z| >= sigma_min / sigma_max.
+                            // Thus even animated affine parents retain this much
+                            // axial separation. A distinct focus loses at most its
+                            // distance to the aim origin.
+                            let (aim_centre, aim_radius, focus_offset) = match camera.node.target.as_ref().unwrap() {
+                                vork_scene::AimTarget::Node(name) => {
+                                    let i=nodes.iter().position(|n| n.node.name == *name)
+                                        .context("unknown camera aim target")?;
+                                    let offset=if i==target_index {0.} else {
+                                        origin_centres[i].distance(origin_centres[target_index])
+                                            + origin_radii[i] + origin_radii[target_index]
+                                    };
+                                    (origin_centres[i],origin_radii[i],offset)
+                                }
+                                vork_scene::AimTarget::Point(point) => {
+                                    let centre=Vec3::from_array(*point);
+                                    (centre,0.,centre.distance(origin_centres[target_index])+origin_radii[target_index])
+                                }
+                            };
+                            let alignment=camera.parent.map_or(1.,|p|
+                                min_scale[p] / max_scale[p].max(f32::MIN_POSITIVE));
+                            ((aim_centre.distance(origin_centres[camera_index])
+                                - aim_radius - origin_radii[camera_index]).max(0.) * alignment
+                                - focus_offset).max(0.)
+                        } else { 0. };
+                        ensure!(c[2][0] == 0. || lower > crate::constants::MIN_FOCUS_DISTANCE,
+                            "node {:?}, camera {:?}: animated focus object {:?} has no positive camera-axis depth bound; use numeric material.inputs.focus_distance, constrain the camera/target motion, or disable DOF",
+                            mesh.node.name, camera.node.name, target);
+                        if c[2][0] > 0. {
+                            // A loose but positive envelope must not resurrect
+                            // the near-zero-focus allocation blowup. Certify the
+                            // lower endpoint against the camera's own optics.
+                            let mut bound=camera.camera.as_ref().unwrap().clone();
+                            bound.focus=lower;
+                            bound.calibration(w/h).with_context(|| format!(
+                                "node {:?}, camera {:?}: cannot certify animated focus object {:?} within valid camera optics; use numeric material.inputs.focus_distance or constrain the camera/target motion",
+                                mesh.node.name,camera.node.name,target))?;
+                        }
+                        lower.max(crate::constants::MIN_FOCUS_DISTANCE)
+                    }
                 } else {c[2][1]};
                 let blur = if c[2][0]>0. {c[2][0]*(1./near+1./focus)} else {0.};
                 let perspective_bound=if ortho {1.} else {
@@ -547,6 +666,139 @@ mod projected_tests {
         // No fixed angular ceiling, including widths beyond f64 acos precision.
         assert!(radial_sides(1e20) > radial_sides(1e10));
         assert!(crate::points::triangles_per_point(usize::MAX).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn object_focus_depth_bounds_cover_curves_points_and_capture_views() -> Result<()> {
+        let program = std::sync::Arc::new(vork_slang::Compiler::discover().compile_camera(
+            &crate::programs::abi(), vork_slang::module_source("std/camera").unwrap(),
+            Path::new("std/camera.slang"), "objectfocusbounds")?);
+        let base = serde_json::json!({
+            "version":2,"render":{"resolution":[640,480]},
+            "nodes":[{"type":"camera","name":"cam","translation":[0,0,3]},
+                {"type":"node","name":"focus","translation":[1,0,0]},
+                {"type":"mesh","name":"groom","geometry":"g"}],
+            "buffers":{"p":{"type":"vec3","data":[[0,0,0],[0,1,0]]},
+                "w":{"type":"f32","data":[0.02,0.02]},"n":{"type":"u32","data":[2]}},
+            "geometry":{"g":{"topology":"curves","attributes":{"POSITION":"p"},
+                "widths":"w","curve_vertex_counts":"n"}}
+        });
+        let detail = |mut value:serde_json::Value, focus:f32, resolution:[u32;2]| -> Result<usize> {
+            value["nodes"].as_array_mut().unwrap().push(serde_json::json!({
+                "type":"camera","name":"main","translation":[0,0,1000]}));
+            value["render"]["camera"]=serde_json::json!("main");
+            value["images"]=serde_json::json!({"feed":{"render":{"camera":"cam","resolution":resolution}}});
+            let scene:Scene = vork_scene::v2::from_test_value(value)?;
+            let words = program.inputs.pack(&serde_json::from_value(serde_json::json!({
+                "use_dof":true,"aperture_fstop":3.5,"focus_distance":focus}))?,
+                |name,_| anyhow::bail!("unexpected image {name}"))?;
+            fn flatten(defs:&[vork_scene::Node], parent:Option<usize>, nodes:&mut Vec<crate::install::EvalNode>) {
+                for node in defs {
+                    let i=nodes.len();
+                    nodes.push(crate::install::EvalNode {
+                        node:node.clone(),parent,world:parent.map_or(Mat4::IDENTITY,|p|nodes[p].world)*node.transform.matrix(),
+                        dynamic:false,embedded:None,camera:None,
+                    });
+                    flatten(&node.children,Some(i),nodes);
+                }
+            }
+            let mut nodes=Vec::new();
+            flatten(&scene.nodes,None,&mut nodes);
+            for node in &mut nodes {
+                if matches!(node.node.kind,NodeKind::Camera {..}) {
+                    node.camera=Some(crate::camera_program::State {
+                        program:program.clone(),words:words.clone(),offset:0,focus:-1.,time:0.,evaluated:Default::default(),
+                    });
+                }
+            }
+            let buffers=crate::buffers::SceneBuffers::decode(&scene,Path::new("."))?;
+            let plan=crate::animation::Plan::compile(&scene,Path::new("."))?;
+            let views=crate::camera_program::views(&scene,&nodes,&plan,0.);
+            assert_eq!(views["cam"],vec![resolution]);
+            Ok(projected_sides(&scene,&nodes,&buffers,&plan,&views)?["g"])
+        };
+        for points in [false,true] {
+            let mut numeric=base.clone();
+            if points {
+                numeric["geometry"]["g"]["topology"]=serde_json::json!("points");
+                numeric["geometry"]["g"].as_object_mut().unwrap().remove("curve_vertex_counts");
+            }
+            let mut object=numeric.clone();
+            object["nodes"][0]["focus_object"]=serde_json::json!("focus");
+            for resolution in [[640,480],[2048,1024]] {
+                assert_eq!(detail(object.clone(),10.,resolution)?,detail(numeric.clone(),3.,resolution)?);
+            }
+            let mut aimed_numeric=numeric.clone();
+            let mut aimed_object=object.clone();
+            aimed_numeric["nodes"][0]["target"]=serde_json::json!([0,1,0]);
+            aimed_object["nodes"][0]["target"]=serde_json::json!([0,1,0]);
+            assert_eq!(detail(aimed_object,10.,[640,480])?,
+                detail(aimed_numeric,9./10f32.sqrt(),[640,480])?,"static aiming must be evaluated before focus calibration");
+            // Focus origins include parent motion and inherited camera scale.
+            let mut hierarchy=object.clone();
+            let focus_node=hierarchy["nodes"][1].take();
+            hierarchy["nodes"][1]=serde_json::json!({"type":"node","name":"rig","children":[focus_node]});
+            hierarchy["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","rig","translation"],"keys":[[0,[0,0,0]],[1,[0,0,2]]]
+            }]}]);
+            assert_eq!(detail(hierarchy.clone(),10.,[640,480])?,detail(numeric.clone(),1.,[640,480])?);
+            let mut scaled_numeric=numeric.clone();
+            let mut scaled_object=object.clone();
+            scaled_numeric["nodes"][0]["scale"]=serde_json::json!([2,2,2]);
+            scaled_object["nodes"][0]["scale"]=serde_json::json!([2,2,2]);
+            assert_eq!(detail(scaled_object,10.,[640,480])?,detail(scaled_numeric,3.,[640,480])?);
+            let mut approach=object.clone();
+            approach["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","cam","translation"],"keys":[[0,[0,0,3]],[1,[0,0,0.1]]]
+            }]}]);
+            assert!(detail(approach.clone(),10.,[640,480]).is_ok());
+            approach["animation"][0]["tracks"][0]["keys"][1][1]=serde_json::json!([0,0,0.01]);
+            assert!(detail(approach.clone(),10.,[640,480]).is_err(),"a positive near-zero bound must be rejected before expansion too");
+            approach["animation"][0]["tracks"][0]["keys"][1][1]=serde_json::json!([0,0,0]);
+            assert!(detail(approach,10.,[640,480]).is_err());
+            // Translation-only focus motion has a finite axis-depth envelope.
+            object["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","focus","translation"],"keys":[[0,[1,0,0]],[1,[1,0,2.9]]]
+            }]}]);
+            let near=detail(object.clone(),10.,[640,480])?;
+            assert!(near>=detail(numeric.clone(),3.,[640,480])?);
+            assert_eq!(near,detail(numeric.clone(),0.1,[640,480])?);
+            object["animation"][0]["tracks"][0]["keys"][1][1]=serde_json::json!([1,0,3]);
+            let error=detail(object.clone(),10.,[640,480]).unwrap_err().to_string();
+            for text in ["groom","cam","focus","focus_distance"] { assert!(error.contains(text),"{error}"); }
+            let mut cubic=object.clone();
+            cubic["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","focus","translation"],"interpolation":"CUBICSPLINE",
+                "keys":[[0,[1,0,0],[0,0,0],[0,0,16]], [1,[1,0,0],[0,0,-16],[0,0,0]]]
+            }]}]);
+            assert!(detail(cubic,10.,[640,480]).is_err(),"cubic overshoot crosses the camera plane between safe keys");
+            // An animated aim may rotate while retaining a useful separation bound.
+            object["nodes"][0]["target"]=serde_json::json!("focus");
+            object["animation"][0]["tracks"][0]["keys"][1][1]=serde_json::json!([1,0,0.5]);
+            assert!(detail(object.clone(),10.,[640,480]).is_ok());
+            let mut aimed_hierarchy=object.clone();
+            let cam=aimed_hierarchy["nodes"][0].take();
+            aimed_hierarchy["nodes"][0]=serde_json::json!({
+                "type":"node","name":"camera-rig","scale":[2,1,1],"children":[cam]});
+            aimed_hierarchy["nodes"][1]["translation"]=serde_json::json!([0,0,-10]);
+            aimed_hierarchy["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","camera-rig","rotation"],
+                "keys":[[0,{"euler":[0,0,0]}],[1,{"euler":[0,0.2,0]}]]
+            }]}]);
+            assert!(detail(aimed_hierarchy.clone(),10.,[640,480]).is_ok(),"aimed camera retains a depth bound through affine parents");
+            aimed_hierarchy["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","camera-rig","scale"],"keys":[[0,[2,1,1]],[1,[0,1,1]]]
+            }]}]);
+            assert!(detail(aimed_hierarchy,10.,[640,480]).is_err(),"singular parent stretch has no positive alignment bound");
+            // Independent rotation cannot promise any positive focus-axis depth.
+            object["nodes"][0].as_object_mut().unwrap().remove("target");
+            object["animation"]=serde_json::json!([{"tracks":[{
+                "path":["nodes","cam","rotation"],
+                "keys":[[0,{"euler":[0,0,0]}],[1,{"euler":[0,1.57,0]}]]
+            }]}]);
+            assert!(detail(object,10.,[640,480]).is_err());
+        }
         Ok(())
     }
 

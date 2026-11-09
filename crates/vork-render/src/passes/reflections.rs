@@ -12,18 +12,9 @@ pub(crate) fn record_fields(buffer:&wgpu::Buffer, bytes:u64)->Vec<wgpu::BufferBi
     (0..constants::VISIBILITY_REFLECTION_WORDS).map(|field|wgpu::BufferBinding {buffer,offset:u64::from(field)*bytes,size:std::num::NonZeroU64::new(bytes)}).collect()
 }
 /// One retained hit-shading specialization for the complete installed scene.
-pub(crate) fn pipeline(r: &Renderer, cached: &crate::pipelines::CachedPipelines, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<wgpu::ComputePipeline> {
-    let kernel=cached.drawn_kernel(crate::pipelines::ProgramKernel::Reflections { features }, mode,&r.compiler);
-    #[cfg(test)]
-    r.compiler.hit_selections.lock().unwrap().push((crate::pipelines::ProgramKernel::Reflections { features },kernel));
-    let (module, entry) = cached.program_kernel(kernel)?;
+pub(crate) fn pipeline(r: &Renderer, cached: &std::sync::Arc<crate::pipelines::CachedPipelines>, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<crate::pipelines::Drawn<wgpu::ComputePipeline>> {
     let layout=crate::rt::reflections_hits_layout(&r.device,&cached.mat_layout,probes,cached.resolve_native.as_ref().map_or(0,|n| if n.visibility_lights>0 {n.sample_pages} else {0}));
-    let pipeline=r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label:Some("hardware reflections"),layout:Some(&layout),module:&module,entry_point:Some(entry),
-        compilation_options:Default::default(),cache:r.cache.as_ref(),
-    });
-    r.compiler.remember(cached.kernel_content_key(kernel));
-    Ok(pipeline)
+    cached.install_hit(r, crate::pipelines::ProgramKernel::Reflections { features }, mode, layout, "hardware reflections")
 }
 
 pub(crate) struct Resources {
@@ -46,9 +37,10 @@ impl Resources {
         rays: Option<&crate::rt::FrameRays>,
         material: &wgpu::BindGroup,
         volume_samples: &[wgpu::Buffer],
+        enabled: bool,
         recorder: &mut crate::graph::Recorder,
     ) -> Result<Self> {
-        let enabled = s.plan.effects.reflections;
+        let enabled = enabled && s.plan.effects.reflections;
         let (rw,rh)=if enabled {(w,h)} else {(1,1)};
         let output=s.transients.texture(d,&wgpu::TextureDescriptor {
             label:Some("full-resolution reflection estimates"),size:wgpu::Extent3d {width:rw,height:rh,depth_or_array_layers:constants::REFLECTION_CLASSES},
@@ -90,7 +82,7 @@ impl Resources {
             .as_ref()
             .context("ray reflections need the scene TLAS")?
             .alpha;
-        let pipeline = s.reflections.as_ref()
+        let pipeline = s.reflections.as_ref().map(|pipeline|pipeline.current(false))
             .context("incomplete installed ray reflection plan")?;
         let medium_pages=s.pipelines.resolve_native.as_ref().map_or(0,|n| if n.visibility_lights>0 {n.sample_pages} else {0});
         let geometry=frame_rays.hit_bindings();
@@ -130,7 +122,7 @@ impl Resources {
             entries: &entries,
         });
         let dispatch = crate::graph::Dispatch::new(pipeline, trace, [constants::REFLECTION_DISPATCH_PIXELS.div_ceil(crate::native::REFLECTIONS_HITS_COMPUTE.threads.0), 1, constants::REFLECTION_CLASSES])
-            .with_material(material);
+            .with_pipeline(s.reflections.as_ref().unwrap().clone()).with_material(material);
         // Unseen hits read the irradiance volume instead of the world.
         let dispatch = dispatch.with_hits(field_bind.clone()).with_read_table(s.probes.as_ref().map(|p| p.read_bind(d)));
         // The ray-traced trace binds the material table for its alpha tests and hit surfaces.

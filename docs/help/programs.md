@@ -23,6 +23,8 @@ defaults; meshes require surface (lit/displace supplement surface):
   void compute(ComputeContext, Inputs)               buffers: <binding>_load/_store/_count; dense grids also <binding>_dims (uint3)
 Initialized read-only global tables (including static const arrays) are allowed.
 Global resources and mutable globals are refused; use Inputs or compute buffers.
+Compiler names beginning vork_ or __ and ## token pasting are unavailable to authored
+programs. Supplied helper modules vork_sampling and vork_openpbr_constants remain importable.
 Inputs bind numbers, bools and enum tokens directly; Image {"image"}, Aov {"aov"},
 FloatGrid/VectorGrid {"grid"}, Attribute<float..float4> {"attribute"}.
 [InputRange(min, max, min_closed, max_closed)] on numeric Inputs fields validates
@@ -52,7 +54,8 @@ GPU barriers; use separate generations for neighbour reads/writes. u32 bindings 
 _atomic_min(index,value), returning the previous value; out-of-bounds returns UINT_MAX.
 Seeking replays from initialization or a compatible bounded shared-cache checkpoint.
 Keep kernels race-free for reproducible seeking on the same backend. Use computed
-placement for opaque, unskinned geometry; author material attributes and transparent placements.
+placement for opaque, unskinned geometry. Computed instance material attributes
+follow GPU updates; displacement cannot read them. Author transparent placements.
 
 EnvironmentContext: normalized direction, time (seconds), camera (camera escape versus lighting).
 Environment programs depend on direction and may sample file images.

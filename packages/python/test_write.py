@@ -148,7 +148,7 @@ class WriteScene(unittest.TestCase):
         for file in [path, sidecar]:
             self.assertEqual(stat.S_IMODE(os.stat(file).st_mode), 0o600)
 
-    def test_atomic_publication_and_failure_keep_existing_snapshots(self):
+    def test_atomic_publication_and_failure_keep_current_scene(self):
         from unittest.mock import patch
         from concurrent.futures import ThreadPoolExecutor
         path = os.path.join(self.directory, 'shot.json')
@@ -157,10 +157,12 @@ class WriteScene(unittest.TestCase):
                     'buffers': {'x': {'type': 'f32', 'data': [n] * 1024}}}
         write_scene(scene(0), path)
         snapshots = [self.read(path)]
+        before_files = sorted(os.listdir(self.directory))
         with patch('os.replace', side_effect=OSError('publication failed')):
             with self.assertRaisesRegex(OSError, 'publication failed'):
                 write_scene(scene(99), path)
         self.assertEqual(self.read(path), snapshots[0])
+        self.assertEqual(sorted(os.listdir(self.directory)), before_files)
         with ThreadPoolExecutor(max_workers=4) as pool:
             writes = [pool.submit(write_scene, scene(n), path) for n in range(1, 21)]
             while not all(f.done() for f in writes):
@@ -168,7 +170,7 @@ class WriteScene(unittest.TestCase):
             for f in writes:
                 f.result()
         snapshots.append(self.read(path))
-        for snapshot in snapshots:
+        for snapshot in snapshots[-1:]:
             with open(os.path.join(self.directory, snapshot['buffers']['x']['file']), 'rb') as f:
                 values = struct.unpack('<1024f', f.read())
             self.assertEqual(set(values), {float(snapshot['nodes'][0]['name'])})
@@ -209,11 +211,11 @@ class WriteScene(unittest.TestCase):
         self.assertEqual(struct.unpack_from('<I', binary, 4096)[0], 0xffffffff)
         self.assertEqual(struct.unpack_from('<f', binary, 8192 + 12 * 4)[0], 2)
         self.assertEqual(struct.unpack_from('<f', binary, 12288)[0], struct.unpack('<f', struct.pack('<f', 0.1))[0])
-        # Saved snapshots keep their immutable sidecar even after subsequent saves.
+        # A reused buffer stays alive until it is no longer referenced.
         write_scene(saved, path, self.directory)
         self.assertEqual(os.path.getsize(os.path.join(self.directory, sidecar)), len(binary))
         write_scene({'version': 2, 'nodes': []}, path)
-        self.assertTrue(os.path.exists(os.path.join(self.directory, sidecar)))
+        self.assertFalse(os.path.exists(os.path.join(self.directory, sidecar)))
 
     def test_invalid_packed_scalars_are_rejected(self):
         for kind, row in (('u32', -1), ('i32', 2147483648), ('f32', 1e100), ('vec3', [0, 1]), ('u32', 0.5)):
@@ -274,6 +276,38 @@ class WriteScene(unittest.TestCase):
             with open(shader) as f:
                 self.assertEqual(f.read(), 'import vork;')
         self.assertNotEqual(saved['buffers']['x']['file'], 'shot.json.buffers.bin')
+
+    def test_regeneration_cleans_owned_buffers_and_preserves_assets(self):
+        path = os.path.join(self.directory, 'shot.json')
+        unrelated = path + '.buffers.00000000-0000-0000-0000-000000000000.bin'
+        with open(unrelated, 'w') as f:
+            f.write('unrelated')
+        write_scene({'version': 2, 'nodes': [], 'programs': {'keep': {'file': unrelated}}}, path, self.directory)
+        for n in range(3):
+            write_scene({'version': 2, 'nodes': [], 'buffers': {'x': {'type': 'f32', 'data': [n] * 1024}}}, path)
+            self.assertEqual(len([f for f in os.listdir(self.directory) if f.endswith('.bin')]), 2)
+        saved = self.read(path)
+        sidecar = saved['buffers']['x']['file']
+        os.symlink(sidecar, os.path.join(self.directory, 'buffer-alias.bin'))
+        write_scene({'version': 2, 'nodes': [], 'images': {'keep': {'file': 'buffer-alias.bin'}}}, path, self.directory)
+        self.assertEqual(os.path.getsize(os.path.join(self.directory, sidecar)), 4096)
+        with open(unrelated) as f:
+            self.assertEqual(f.read(), 'unrelated')
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX permissions')
+    def test_created_files_respect_umask(self):
+        import subprocess, sys
+        script = """
+import os
+from vork import write_scene
+os.umask(0o022)
+write_scene({'version':2,'nodes':[],'buffers':{'x':{'type':'f32','data':[1]*1024}}}, 'mode.json')
+"""
+        subprocess.run([sys.executable, '-c', script], cwd=self.directory, check=True,
+                       env={**os.environ, 'PYTHONPATH': os.path.dirname(os.path.dirname(__import__('vork').__file__))})
+        saved = self.read(os.path.join(self.directory, 'mode.json'))
+        for file in ['mode.json', saved['buffers']['x']['file']]:
+            self.assertEqual(os.stat(os.path.join(self.directory, file)).st_mode & 0o777, 0o644)
 
 
 if __name__ == '__main__':

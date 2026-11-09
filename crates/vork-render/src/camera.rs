@@ -1,7 +1,7 @@
 //! OpenCV camera output; renderer matrices never enter the file format.
 use glam::{Mat4, Vec3};
 
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Orthographic {
     pub height: f32,
 }
@@ -69,30 +69,34 @@ impl CameraRecord {
 
 /// Constant fields live at clip scope; a frame contains only its overrides.
 /// `frame_start` is the absolute index of `frames[0]` for frame sequences; stills omit it.
-pub(crate) fn clip(frames: &[CameraRecord], fps: f32, frame_start: Option<usize>) -> anyhow::Result<serde_json::Value> {
-    let mut values = frames
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()?;
+pub(crate) fn clip(frames: &[CameraRecord], fps: vork_scene::Time, frame_start: Option<usize>) -> anyhow::Result<serde_json::Value> {
+    let mut values = vec![serde_json::Map::new(); frames.len()];
     let mut common = serde_json::Map::new();
-    if let Some(first) = values.first().and_then(|v| v.as_object()) {
-        for (key, value) in first {
-            if values.iter().all(|frame| frame.get(key) == Some(value)) {
-                common.insert(key.clone(), value.clone());
+    fn field<T: serde::Serialize + PartialEq>(frames: &[CameraRecord], values: &mut [serde_json::Map<String, serde_json::Value>], common: &mut serde_json::Map<String, serde_json::Value>, name: &str, get: impl for<'a> Fn(&'a CameraRecord) -> Option<&'a T>) -> anyhow::Result<()> {
+        let first = frames.first().and_then(&get);
+        if frames.iter().all(|frame| get(frame) == first) {
+            if let Some(value) = first {common.insert(name.into(), serde_json::to_value(value)?);}
+        } else {
+            for (frame, output) in frames.iter().zip(values) {
+                if let Some(value) = get(frame) {output.insert(name.into(), serde_json::to_value(value)?);}
             }
         }
+        Ok(())
     }
-    for frame in &mut values {
-        for key in common.keys() {
-            frame.as_object_mut().unwrap().remove(key);
-        }
-    }
-    common.insert("version".into(), 1.into());
-    common.insert("fps".into(), fps.into());
+    // Compare typed fields before serialization: constant camera matrices need
+    // only one JSON conversion, rather than one conversion per output frame.
+    field(frames, &mut values, &mut common, "K", |r| r.k.as_ref())?;
+    field(frames, &mut values, &mut common, "R", |r| Some(&r.r))?;
+    field(frames, &mut values, &mut common, "t", |r| Some(&r.t))?;
+    field(frames, &mut values, &mut common, "dist", |r| r.dist.as_ref())?;
+    field(frames, &mut values, &mut common, "image_size", |r| Some(&r.image_size))?;
+    field(frames, &mut values, &mut common, "orthographic", |r| r.orthographic.as_ref())?;
+    common.insert("version".into(), 2.into());
+    common.insert("fps".into(), fps.json());
     if let Some(start) = frame_start {
         common.insert("frame_start".into(), start.into());
     }
-    common.insert("frames".into(), values.into());
+    common.insert("frames".into(), values.into_iter().map(serde_json::Value::Object).collect::<Vec<_>>().into());
     Ok(common.into())
 }
 
@@ -117,8 +121,8 @@ mod tests {
     fn clip_factors_constants_and_keeps_projection_cuts() -> anyhow::Result<()> {
         let p = CameraRecord::new(Mat4::IDENTITY, Mat4::IDENTITY, [96, 64], None, 10.);
         let o = CameraRecord::new(Mat4::IDENTITY, Mat4::IDENTITY, [96, 64], Some(4.), 10.);
-        let data = clip(&[p, o], 24., None)?;
-        assert_eq!(data["version"], 1);
+        let data = clip(&[p, o], vork_scene::Time::integer(24), None)?;
+        assert_eq!(data["version"], 2);
         assert_eq!(data["fps"], 24.);
         assert_eq!(data["image_size"], serde_json::json!([96, 64]));
         assert_eq!(data["t"], serde_json::json!([0., 0., 0.]));
@@ -127,7 +131,7 @@ mod tests {
         assert!(data["frames"][1].get("K").is_none());
         assert_eq!(data["frames"][1]["orthographic"]["height"], 4.);
         assert!(data["frames"][0].get("image_size").is_none());
-        assert!(clip(&[p, p], 24., None)?["frames"][0].as_object().unwrap().is_empty());
+        assert!(clip(&[p, p], vork_scene::Time::integer(24), None)?["frames"][0].as_object().unwrap().is_empty());
         Ok(())
     }
 }

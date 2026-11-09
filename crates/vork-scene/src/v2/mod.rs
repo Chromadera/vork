@@ -1,4 +1,5 @@
 //! Version 2 authoring contract: the one scene model the renderer installs.
+pub use vork_time::Time;
 pub mod animation;
 mod constants;
 pub mod diagnostics;
@@ -30,6 +31,25 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 pub use targets::{NodeProperty, Ray, RenderProperty, TrackTarget, TrackValue, display_path};
 
+// Serde buffers untagged/flattened fields through deserialize_any. Restore
+// JSON's exact-number representation before lowering a numeric field to f32/f64.
+pub(crate) fn numeric<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> std::result::Result<T, D::Error> {
+    serde_json::from_value(serde_json::Value::deserialize(d)?).map_err(serde::de::Error::custom)
+}
+
+pub(crate) fn lower_numeric_json(value: &mut serde_json::Value) -> std::result::Result<(), &'static str> {
+    match value {
+        serde_json::Value::Number(number) if !number.is_i64() && !number.is_u64() => {
+            *number = serde_json::Number::from_f64(number.as_f64().ok_or("numeric input must be finite")?)
+                .ok_or("numeric input must be finite")?;
+        }
+        serde_json::Value::Array(values) => for value in values { lower_numeric_json(value)?; },
+        serde_json::Value::Object(values) => for value in values.values_mut() { lower_numeric_json(value)?; },
+        _ => {}
+    }
+    Ok(())
+}
+
 pub type Table<T> = BTreeMap<String, T>;
 /// A resource name or inline definition.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -46,9 +66,9 @@ pub struct Scene {
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-help-path" = "scene.$schema", "x-help" = "string; editor schema URL"))]
     pub schema: Option<String>,
-    /// Internal release normalization; never scene content.
+    /// Internal delivery admission/approximation policy; never scene content.
     #[serde(skip)]
-    pub media_disabled: bool,
+    pub delivery: bool,
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "scene.version", "x-help" = "2"))]
     pub version: u32,
     #[serde(default)]
@@ -397,6 +417,23 @@ mod tests {
         }
     }
     #[test]
+    fn removed_program_diagnostics_route_to_upgrade() {
+        for program in ["std/fog", "post/vignette", "post/lens_distortion", "post/glare"] {
+            // Public builds reject removed programs even in unused definitions.
+            if crate::libraries::module_source(program).is_some() { continue; }
+            for field in ["materials", "display"] {
+                let mut value = serde_json::json!({"version":2,"nodes":[{"type":"camera"}]});
+                if field == "materials" {
+                    value["materials"] = serde_json::json!({"unused":{"program":program}});
+                } else {
+                    value["render"] = serde_json::json!({"display":{"program":program}});
+                }
+                let error = parse(value).unwrap_err().to_string();
+                assert!(error.contains("vork help upgrade"), "{program} {field}: {error}");
+            }
+        }
+    }
+    #[test]
     fn removed_principled_surface_suggests_openpbr() {
         let error = parse(serde_json::json!({"version":2,
             "nodes":[{"type":"camera","material":{"program":"std/camera","inputs":{"projection":"persp"}}}],
@@ -511,8 +548,9 @@ mod standard_defaults_tests {
         assert_eq!(spot["spot_size"].as_f64().unwrap() as f32, b["lights"]["SPOT"]["spot_size"].as_f64().unwrap() as f32);
         assert_eq!(spot["spot_blend"].as_f64().unwrap() as f32, b["lights"]["SPOT"]["spot_blend"].as_f64().unwrap() as f32);
         let r = Render::default();
-        assert_eq!(r.fps, b["render"]["fps"].as_f64().unwrap() as f32);
-        assert_eq!(r.duration, 250. / r.fps);
+        assert_eq!(r.fps.as_f32(), b["render"]["fps"].as_f64().unwrap() as f32);
+        assert_eq!(r.duration.as_f32(), 250. / r.fps.as_f32());
+        assert_eq!((r.duration.exact()*vork_time::exact::decimal(&r.fps.to_string()).unwrap()).ceil().to_integer(),250.into());
 
         assert_eq!(
             constants::ENVIRONMENT_COLOR[0],

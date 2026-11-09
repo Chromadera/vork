@@ -108,14 +108,14 @@ impl Scene {
             }
         }
         if let Some(sim) = &self.simulation {
-            ensure!(sim.t0.is_finite() && sim.dt.is_finite() && sim.dt > 0. && (sim.dt as f32).is_finite() && sim.dt as f32 > 0. && (sim.t0 as f32).is_finite(), "simulation: finite t0 and positive finite dt required");
+            ensure!(sim.t0.as_f32().is_finite() && sim.dt.as_f64().is_finite() && sim.dt.as_f64() > 0. && sim.dt.as_f32().is_finite() && sim.dt.as_f32() > 0. && sim.t0.as_f32().is_finite(), "simulation: finite t0 and positive finite dt required");
             ensure!(!sim.state.is_empty() && !sim.init.is_empty() && !sim.steps.is_empty(), "simulation: state, init and steps must be nonempty");
             let state: std::collections::BTreeSet<_> = sim.state.iter().collect();
             ensure!(state.len() == sim.state.len(), "simulation: duplicate state buffer");
             for buffer in &sim.state { lookup(buffer)?; }
             let passes: std::collections::BTreeSet<_> = sim.init.iter().chain(&sim.steps).collect();
             for pass in &passes {
-                let p = self.programs.get(*pass).with_context(|| format!("simulation: unknown program {pass}"))?;
+                let p = self.programs.get(*pass).with_context(|| format!("simulation: {}", diagnostics::unknown("program", pass, self.programs.keys().map(String::as_str))))?;
                 ensure!(p.schedule == Some(ComputeSchedule::Simulation), "simulation pass {pass}: schedule must be simulation");
                 ensure!(p.bindings.values().all(|b| state.contains(b)), "simulation pass {pass}: every binding must be declared in state");
             }
@@ -192,11 +192,6 @@ impl Scene {
                     immutable(&skin.inverse_bind_matrices, "inverse bind matrices")?;
                 }
                 if let Some(instances) = instances {
-                    for (name, buffer) in &instances.attributes {
-                        if !matches!(name.as_str(), "TRANSLATION" | "ROTATION" | "SCALE") {
-                            immutable(buffer, "instance attributes")?;
-                        }
-                    }
                     if let Some(buffer) = instances.attributes.get("pass_index") {
                         immutable(buffer, "instance IDs")?;
                     }
@@ -796,10 +791,10 @@ impl Scene {
         ensure!(
             (1..=constants::MAX_RENDER_SAMPLES).contains(&r.settings.samples)
                 && r.resolution.iter().all(|x| *x > 0)
-                && r.fps.is_finite()
-                && r.fps > 0.
-                && r.duration.is_finite()
-                && r.duration > 0.,
+                && r.fps.as_f32().is_finite()
+                && r.fps > crate::Time::ZERO
+                && r.duration.as_f32().is_finite()
+                && r.duration.as_f32() > 0.,
             "render requires positive dimensions/time and samples in 1..=4096"
         );
         if let Some(m) = &r.motion_blur {
@@ -811,7 +806,8 @@ impl Scene {
             NameOr::Inline(display) => display,
         };
         ensure!(self.programs.contains_key(&display.program) || crate::libraries::material_programs().any(|name| name == display.program),
-            "render.display: unknown program {}", display.program);
+            "render.display: {}", diagnostics::unknown("program", &display.program,
+                self.programs.keys().map(String::as_str).chain(crate::libraries::material_programs())));
         let mut earlier = std::collections::BTreeSet::new();
         for (index, entry) in r.compositor.iter().enumerate() {
             let name = entry.material();

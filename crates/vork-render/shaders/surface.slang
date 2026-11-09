@@ -94,7 +94,11 @@ bool surface_tangent_frame(Varying v, float3 normal, Tap t, Coordinates k, out f
         else {
             tangent=(k.position_dx*t.dy.y-k.position_dy*t.dx.y)/determinant;
             let bitangent=(k.position_dy*t.dx.x-k.position_dx*t.dy.x)/determinant;
-            handedness=sign(dot(cross(normal,tangent),bitangent));
+            // UV derivatives already encode the orientation of both texture axes.
+            // Use B = cross(N, T) * w, as for authored glTF tangents.
+            // Measure against the original normal, so facing a back face (or
+            // mapping the normal before a tangent map) cannot change the sign.
+            handedness=sign(dot(cross(v.NORMAL,tangent),bitangent));
         }
     }
     let projected=tangent-normal*dot(normal,tangent);

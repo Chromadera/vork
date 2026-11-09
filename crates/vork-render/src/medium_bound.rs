@@ -16,8 +16,8 @@ pub(crate) fn certification_times(scene:&v2::Scene)->[f32;2] {
     std::iter::once(scene.render.clone())
         .chain(scene.images.values().filter_map(|image|image.render.as_ref()).map(|render|render.resolve(&scene.render)))
         .map(|render| {
-            let shutter=render.motion_blur.as_ref().map_or(0.,|m|m.shutter/render.fps);
+            let shutter=render.motion_blur.as_ref().map_or(0.,|m|m.shutter/render.fps.as_f32());
             let offset=render.motion_blur.as_ref().map_or(0.,|m|m.position.offset());
-            [(offset-0.5)*shutter,render.duration+(offset+0.5)*shutter]
+            [(offset-0.5)*shutter,render.duration.as_f32()+(offset+0.5)*shutter]
         }).fold([0.,0.],|[a,b],[c,d]|[a.min(c),b.max(d)])
 }

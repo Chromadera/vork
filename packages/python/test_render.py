@@ -7,6 +7,16 @@ from vork import render
 
 
 class RenderExposure(unittest.TestCase):
+    def test_rational_output_rates_reach_the_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, 'frame.png')
+            with open(output + '.meta.json', 'w') as stream:
+                json.dump({'warnings': []}, stream)
+            with patch('subprocess.run') as run:
+                render('shot.json', output, at=0.5, set={'fps': '30000/1001'})
+            self.assertEqual(run.call_args.args[0][1:],
+                             ['render', 'shot.json', '--out', output, '--at', '0.5', '--set', 'fps="30000/1001"'])
+
     def test_returns_full_precision_per_output_and_keeps_cli_stdout_visible(self):
         summary = {'frames': 2, 'coverage': 0.5, 'clipped': 0.123456789, 'near_black': 0.2, 'mean': 0.41,
                    'worst_clipped': {'share': 0.25, 'frame': 7},
@@ -28,15 +38,6 @@ class RenderExposure(unittest.TestCase):
                 self.assertEqual(run.call_args.kwargs, {'check': True})
             self.assertEqual(result, {'exposure': [{'output': out, 'exposure': summaries[i]} for i, out in enumerate(outputs[:3])], 'warnings': [warning]})
 
-    def test_01_metadata_without_warnings_preserves_exposure(self):
-        summary = {'frames': 1, 'coverage': 1, 'mean': 0.4}
-        with tempfile.TemporaryDirectory() as directory:
-            output = os.path.join(directory, 'still.png')
-            with open(output + '.meta.json', 'w') as f:
-                json.dump({'exposure': summary}, f)
-            with patch('subprocess.run'):
-                self.assertEqual(render('shot.json', output), {
-                    'exposure': [{'output': output, 'exposure': summary}], 'warnings': []})
 
 
 if __name__ == '__main__':

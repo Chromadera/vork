@@ -1,6 +1,8 @@
 # @voyager-so/vork
 
 Rust-generated scene types, JSON Schema and serialization. Node 22.18+; no runtime npm dependencies.
+
+Requires Node 22.18+ and npm. On older Node, upgrade (recommended), or run `node --experimental-strip-types scene.ts` instead of `node scene.ts`.
 Run `npm ci && npm run build`.
 
 Author plain objects with `satisfies Scene` (a type import). `writeScene(scene, path,
@@ -37,10 +39,12 @@ Bind them with the generated `AttributeBinding` type, for example
 `read_attribute(inputs.tint, ctx)` returns value, `dx` and `dy` in raster and ray
 shading; installation checks names and types on every bound mesh.
 
-Scene writes publish a complete immutable sidecar before atomically replacing the JSON.
-Readers therefore see a matching pair, including during concurrent saves. Older sidecars
-are retained for readers holding previous JSON snapshots; interrupted saves can also leave
-unreferenced sidecars. Fresh files are private; replacement JSON preserves existing permissions.
+Scene writes complete the sidecar before atomically replacing the JSON, then remove
+obsolete generated sidecars referenced by the replaced JSON. Referenced resources and
+unrelated files are preserved. Serialize saves to the same destination and finish reading
+its buffers before regenerating it; copy the whole scene tree for a lasting snapshot.
+Fresh files use ordinary permissions (0666 masked by umask); replacement JSON preserves
+its existing permissions. Failed publication removes the new sidecar and keeps the old scene.
 
 `render()` prints the CLI exposure lines and returns `{exposure: [{output, exposure}], warnings}`.
 `warnings` contains `{code, requested, dropped}` records for requested effects
@@ -59,6 +63,5 @@ for authored glow that should not become a sampled light.
 Scene JSON may include `"$schema": "https://voyager.so/vork/schema/scene.schema.json"` for editor
 completion and validation. This metadata does not affect rendering and is never
 fetched by vork. `vork init` includes it automatically. SDK writers preserve an explicit `$schema`
-but do not insert one, so 0.1-compatible scenes still load in 0.1. Remove an
-explicit `$schema` before using a 0.1 binary. SDK render helpers accept 0.1
-metadata without warnings and return an empty warnings list in that case.
+but do not insert one. SDK render helpers require the current completion metadata
+contract, including its `warnings` list.

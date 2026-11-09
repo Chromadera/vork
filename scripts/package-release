@@ -12,6 +12,7 @@ import tempfile
 import tomllib
 import zipfile
 from shader_bundle import package as package_shaders
+from runtime_platform import check_runtime_platform
 
 ROOT = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser(description=__doc__)
@@ -157,6 +158,10 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
         # vork loads OIDN with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, so its dependencies resolve here.
         for directory in (stage, stage / 'slang/bin', stage / 'oidn/bin'):
             ship_vc_runtime(directory)
+    try:
+        check_runtime_platform((f for f in stage.rglob('*') if f.is_file()), a.platform)
+    except ValueError as error:
+        p.error(str(error))
     for f in ['LICENSE', 'NOTICE', 'README.md']:
         shutil.copy2(ROOT / f, stage / f)
     shutil.copytree(ROOT / 'dist/licenses', stage / 'licenses')

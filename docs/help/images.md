@@ -16,3 +16,8 @@ the last frame at or before time. All footage holds end frames outside its range
 
 Surface and environment footage follows the transport sample clock. Final
 compositor images follow the nominal output-frame clock after exposure integration.
+
+image.render captures use each parent transport sample's pose and time, with a
+closed capture shutter. Captures retain scene dependencies even when the final
+compositor replaces camera beauty. File/video compositor samples are premultiplied
+before filtering; return premultiplied RGBA from custom composites.

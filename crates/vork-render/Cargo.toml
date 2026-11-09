@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
+vork-time = { path = "../vork-time" }
 vork-std = { path = "../vork-std" }
 vork-mesh = { path = "../vork-mesh" }
 vork-scene = { path = "../vork-scene" }

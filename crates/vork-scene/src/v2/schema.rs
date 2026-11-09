@@ -376,10 +376,6 @@ pub fn reference(schema: &serde_json::Value) -> String {
     visit(schema, &mut lines);
     for p in super::OpenPbrParam::supported() {
         let (ty, binding) = match p.kind {
-            // Launch ray visibility cannot consume named alpha attributes. This is
-            // documentation only; legacy decoding/normalization stays unchanged.
-            super::OpenPbrKind::Float if matches!(p.name, "geometry_opacity" | "alpha_cutoff") =>
-                ("number", "constant|texture; animatable"),
             super::OpenPbrKind::Float => ("number", "constant|texture|attribute; animatable"),
             super::OpenPbrKind::Color3 => ("color3", "constant|texture|attribute; animatable"),
             super::OpenPbrKind::Bool => ("bool", "constant only; not animatable"),

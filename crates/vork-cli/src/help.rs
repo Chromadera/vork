@@ -60,11 +60,6 @@ fn field_lines(path: &str) -> Vec<&'static str> {
 }
 /// Diagnose only failed help lookups; scene decoding keeps its own suggestions.
 fn unknown_field(path: &str) -> String {
-    let library = path.split_once('/').map(|(library, _)| library)
-        .or_else(|| vork_scene::libraries::library(path).map(|_| path));
-    if let Some(library) = library {
-        return format!("{path:?} is a library/program; use `vork help {library}`");
-    }
     // Variant annotations describe a field, but are not part of its wire path.
     fn wire_path(name: &str) -> &str { name.split_once(' ').map_or(name, |(path, _)| path) }
     fn leaf(name: &str) -> &str { wire_path(name).rsplit('.').next().unwrap_or(name) }
@@ -86,6 +81,11 @@ fn unknown_field(path: &str) -> String {
     if !matches.is_empty() {
         return format!("unknown field {path:?}; use {}", matches.join(", "));
     }
+    let library = path.split_once('/').map(|(library, _)| library)
+        .or_else(|| vork_scene::libraries::library(path).map(|_| path));
+    if let Some(library) = library {
+        return format!("{path:?} is a library/program; use `vork help {library}`");
+    }
     let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
     format!("unknown field {path:?}; did you mean {:?}? Nearest valid names ({} of {}): {shown}",
         names[0], names.len().min(5), names.len())
@@ -106,6 +106,7 @@ fn usage(message: impl std::fmt::Display) -> anyhow::Error {
 fn serve(topic: Option<&str>, field: Option<&str>, all: bool) -> Result<()> {
     if field.is_some() && topic != Some("field") { return Err(usage("extra argument requires `vork help field PATH`")); }
     let topic = match topic {
+        Some(program @ ("std/hair" | "std/sky" | "std/text")) => return serve(Some("field"), Some(program), true),
         Some("std/bloom") => return serve(Some("compositor"), None, true),
         Some("std/camera") => return serve(Some("cameras"), None, true),
         topic => topic,
@@ -136,7 +137,7 @@ fn serve(topic: Option<&str>, field: Option<&str>, all: bool) -> Result<()> {
     // A page's `<!-- all -->` line ends its default part; the rest prints with --all.
     let (summary, details) = text.split_once("<!-- all -->").unwrap_or((text, ""));
     write!(out, "{}", help_text(summary)).map_err(crate::output::error)?;
-    if topic == "cameras" {write!(out, "{PROGRAM_INPUTS}").map_err(crate::output::error)?;}
+    if topic == "cameras" { for line in field_lines("std/camera") { writeln!(out, "{line}").map_err(crate::output::error)?; } }
     if all {
         write!(out, "{}", help_text(details)).map_err(crate::output::error)?;
         for line in topic_lines(topic) { writeln!(out, "{line}").map_err(crate::output::error)?; }
@@ -155,6 +156,32 @@ mod tests {
         assert!(field_lines("camera.material")[0].contains("(camera)"));
         assert!(field_lines("camera.energy").is_empty());
         assert!(!field_lines("mesh.geometry").is_empty());
+    }
+    #[test]
+    fn program_recovery_prefers_real_fields() {
+        for leaf in ["emission_luminance", "subsurface_radius_scale"] {
+            let message = unknown_field(&format!("std/openpbr.{leaf}"));
+            assert!(message.contains(&format!("material.inputs.{leaf}")), "{message}");
+        }
+        assert!(unknown_field("std/hair.not_a_field").contains("vork help std"));
+        assert!(unknown_field("std/sky.not_a_field").contains("vork help std"));
+        assert!(unknown_field("node.targ").contains("node.target"));
+    }
+    #[test]
+    fn bundled_inputs_include_defaults_tokens_and_declared_ranges() {
+        let hair = field_lines("std/hair");
+        assert_eq!(hair.len(), 14);
+        assert!(field_lines("std/hair.parametrization")[0].contains("color|melanin|absorption"));
+        assert!(field_lines("std/hair.color")[0].contains("default [0.017513,0.005763,0.002059]"));
+        assert!(field_lines("std/hair.roughness")[0].contains("default 0.3; no declared range"));
+        assert_eq!(field_lines("std/sky").len(), 6);
+        assert!(field_lines("std/sky.altitude")[0].contains("default 100; range [0,100000]"));
+        assert!(field_lines("std/text.size")[0].contains("default 1; metres per font em"));
+        assert!(field_lines("std/text.align_y")[0].contains("default top_baseline"));
+        let upgrade = document("upgrade").unwrap();
+        assert!(!upgrade.contains("lane x"));
+        assert!(!upgrade.contains("material.priority"));
+        assert!(!upgrade.contains("Fog returns"));
     }
     #[test]
     fn target_help_explains_structural_aim_animation() {
@@ -214,7 +241,7 @@ mod tests {
         for (path, spelling) in [
             ("node.material", "omitted = std/camera; optics are program inputs"),
             ("node.geometry", "geometry: geometry-name|inline geometry"),
-            ("render.fps", "fps: number = 24"),
+            ("render.fps", "fps: number|rational string = 24"),
             ("material.texture.image", "image: image-name|inline image"),
         ] {
             assert!(root.contains(spelling), "{path}");

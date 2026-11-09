@@ -180,7 +180,12 @@ impl Instance {
         }
     }
 
-    pub(crate) fn from_hal_instance<A: hal::Api>(
+    /// Import a HAL instance, taking ownership of its backend resources.
+    ///
+    /// # Safety
+    /// The HAL instance must be valid for `A` and exclusively owned by the caller.
+    /// Its native handles must not be destroyed after ownership is transferred.
+    pub unsafe fn from_hal_instance<A: hal::Api>(
         name: String,
         hal_instance: <A as hal::Api>::Instance,
     ) -> Self {

@@ -14,15 +14,26 @@ fn offline_starter_and_authoring_variants_preserve_user_files() {
         assert_eq!(scene["version"], 2);
         assert_eq!(scene["$schema"], "https://voyager.so/vork/schema/scene.schema.json");
         assert_eq!(scene["nodes"].as_array().unwrap().len(), 6);
-        assert!(fs::read_to_string(project.join("README.md")).unwrap().contains("vork help"));
+        let readme = fs::read_to_string(project.join("README.md")).unwrap();
+        assert!(readme.contains("vork help"));
         assert!(!project.join("AGENTS.md").exists());
         if language == "typescript" {
             let package: serde_json::Value = serde_json::from_slice(&fs::read(project.join("package.json")).unwrap()).unwrap();
             assert_eq!(package["type"], "module");
-            assert!(fs::read_to_string(project.join("README.md")).unwrap().contains("npm install PREFIX/lib/vork/sdk"));
+            assert!(readme.contains("LOCALAPPDATA\\Programs\\vork\\sdk"));
+            assert!(readme.contains("$HOME/.local/lib/vork/sdk"));
+            assert!(readme.contains("Node 22.18+"));
+            assert!(readme.contains("node --experimental-strip-types scene.ts"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("Node 22.18+"));
+            assert!(stdout.contains("node --experimental-strip-types scene.ts"));
         }
         if language == "python" {
-            assert!(fs::read_to_string(project.join("README.md")).unwrap().contains("python -m pip install PREFIX/lib/vork/python"));
+            assert!(readme.contains("LOCALAPPDATA\\Programs\\vork\\python"));
+            assert!(readme.contains("$HOME/.local/lib/vork/python"));
+            assert!(readme.contains("Python 3.11+"));
+            assert!(readme.contains("python3 -m venv .venv"));
+            assert!(readme.contains(".venv\\Scripts\\python scene.py"));
         }
         fs::write(project.join("scene.json"), "user work").unwrap();
         let again = run(&project, &["init"]);
@@ -93,5 +104,23 @@ fn typescript_package_conflict_preserves_project() {
     assert_eq!(run(&root, &["init", "--language", "typescript"]).status.code(), Some(2));
     assert_eq!(fs::read_to_string(root.join("package.json")).unwrap(), "user package");
     assert!(!root.join("scene.json").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_identifies_broken_vulkan_driver_file() {
+    let root = std::env::temp_dir().join(format!("vork-broken-icd-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let manifest = root.join("nvidia_icd.json");
+    fs::write(&manifest, r#"{"file_format_version":"1.0.0","ICD":{"library_path":"./missing-driver.so","api_version":"1.3.0"}}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_vork"))
+        .arg("setup").env("VK_DRIVER_FILES", &manifest).env("VK_ICD_FILENAMES", &manifest)
+        .env("XDG_RUNTIME_DIR", &root).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "{stderr}");
+    assert!(stderr.contains(&manifest.display().to_string()), "{stderr}");
+    assert!(stderr.contains("missing-driver.so, which cannot load as a Vulkan driver"), "{stderr}");
+    assert!(!stderr.contains("--gpus all"), "{stderr}");
     fs::remove_dir_all(root).unwrap();
 }

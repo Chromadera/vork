@@ -3,6 +3,8 @@ Visibility per ray type is ANDed with ancestors. pass_index is inherited; otherw
 are assigned stably in meta.json (0 = background).
 Assets load .glb/.gltf. Imported names: asset/node-name or asset/#index.
 Imported joints are not target, focus or attachment addresses.
+glTF hierarchies must be acyclic, including nodes outside the selected scene.
+A cycle fails import with its node index; repair child references or re-export.
 
 <!-- all -->
 Painted backdrops: disable visible_shadow; disable other ray visibility when the card should appear only to the camera.

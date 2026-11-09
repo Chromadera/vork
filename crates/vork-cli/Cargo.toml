@@ -7,6 +7,7 @@ license.workspace = true
 name = "vork"
 path = "src/main.rs"
 [dependencies]
+vork-time = { path = "../vork-time" }
 vork-slang = { path = "../vork-slang" }
 vork-render = { path = "../vork-render" }
 anyhow = "1"
@@ -14,7 +15,7 @@ clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 vork-scene = { path = "../vork-scene" }
 vork-std = { path = "../vork-std" }
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
@@ -25,4 +26,5 @@ path = "../vork-scene"
 features = ["test-support"]
 
 [build-dependencies]
+vork-std = { path = "../vork-std" }
 vork-slang = { path = "../vork-slang" }

@@ -1,4 +1,4 @@
-import { engine } from './engine.js';
+import { engine, launchError } from './engine.js';
 import {callKeys} from './call-keys.js';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -14,11 +14,11 @@ export interface RenderOptions {
   frameStart?: number;
   /** Last frame index to render (inclusive, absolute; `--frame-end`). */
   frameEnd?: number;
-  /** Render settings profile: `std/final` (default), `std/draft`, `std/path` or a profile file. */
+  /** Render settings profile: `std/final` (default), `std/previs`, `std/draft`, `std/path` or a profile file. */
   profile?: string;
   /** Render-call fields; scene content and animation are authored in the scene. */
   set?: { resolution?: [number, number];
-    fps?: number; seed?: number; samples?: number; denoise?: boolean };
+    fps?: number | string; seed?: number; samples?: number; denoise?: boolean };
   /** Default color; ["all"] includes controls and declared AOVs. */
   channels?: string[];
 }
@@ -47,7 +47,11 @@ export interface RenderResult {
  * Options are render-time choices; the scene file is unchanged.
  */
 export function render(scene: string, options: RenderOptions): RenderResult {
-  execFileSync(engine(), renderArguments(scene, options), { stdio: ['ignore', 'inherit', 'inherit'] });
+  try {
+    execFileSync(engine(), renderArguments(scene, options), { stdio: ['ignore', 'inherit', 'inherit'] });
+  } catch (error) {
+    launchError(error);
+  }
   const exposure: RenderResult['exposure'] = [];
   const warnings = new Map<string, RenderWarning>();
   for (const output of typeof options.out === 'string' ? [options.out] : options.out) {
@@ -58,7 +62,7 @@ export function render(scene: string, options: RenderOptions): RenderResult {
     if (index >= 0) name = name.slice(0,index).replace(/[._-]+$/, '') + name.slice(index+4);
     const sidecar = name.startsWith('.') && !name.slice(1).includes('.') ? 'meta.json' : `${name}.meta.json`;
     const metadata = JSON.parse(readFileSync(file ? join(dirname(output),sidecar) : join(output,'meta.json'), 'utf8'));
-    for (const warning of metadata.warnings ?? []) warnings.set(JSON.stringify(warning), warning);
+    for (const warning of metadata.warnings) warnings.set(JSON.stringify(warning), warning);
     if (metadata.exposure != null) exposure.push({output, exposure: metadata.exposure});
   }
   return {exposure, warnings: [...warnings.values()]};

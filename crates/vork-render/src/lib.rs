@@ -6,6 +6,8 @@
 //! compiles the pass order; frame.rs owns FrameSlot and walks it; values.rs
 //! prepares per-frame values;
 //! passes/ encodes each GPU pass.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod vulkan_runtime;
 mod warnings;
 pub use warnings::RenderWarning;
 mod polygon;
@@ -65,6 +67,7 @@ mod passes;
 mod pipelines;
 mod plan;
 mod probes;
+mod output_run;
 mod png_output;
 mod programs;
 mod hair;
@@ -247,7 +250,8 @@ struct Uniform {
     /// y: focus distance; zw: one internal pixel in clip units for ray-hit footprints.
     lens: [f32; 4],
     aperture: [f32; 4],
-    /// xy: exposure iteration and count; zw reserved.
+    /// xy: current pass iteration and count; z: exposure count, including nominal
+    /// control passes; w: accumulated denoising-guide flags.
     temporal: [f32; 4],
     environment: [f32; 4],
     environment_rotation: Mat4,
@@ -390,13 +394,10 @@ impl Renderer {
         self.finish_shader_warmup()
     }
 
-    /// Warm table materials, including thin transmission, at the default and previs profiles. Other configurations
-    /// retain their normal on-demand compilation path.
+    /// Warm the init starter at the default render profile. Other scenes and
+    /// profiles compile on demand, or through exhaustive setup.
     pub fn warm_startup_shaders(&self) -> Result<()> {
-        // Previs can start with the existing shared camera evaluator while an
-        // opaque scene specializes; transmitting scenes retain their guarded route.
-        passes::decoupled::warm_shaders(self);
-        std_warm::warm_startup(self)?;
+        std_warm::warm_startup(self, pipelines::VariantCompile::Fallback)?;
         self.finish_shader_warmup()
     }
 
@@ -496,10 +497,24 @@ impl Renderer {
     /// no-op device retains normal scene planning and Slang/cache paths. This
     /// entry point never renders and is separate from production device admission.
     #[doc(hidden)]
-    pub fn prepare_release_shaders() -> Result<()> {
+    pub fn prepare_release_shaders(scenes: &[PathBuf]) -> Result<()> {
         let renderer = pollster::block_on(Self::create(|_| Ok(true), true))?;
         renderer.warm_shaders()?;
-        renderer.warm_startup_shaders()
+        for path in scenes {
+            // Use real installed material unions, bindings and program links,
+            // rather than a Cartesian product of independent capability bits.
+            let scene = Scene::from_json(&vork_std::load_scene(path)?)?;
+            for profile in ["std/final", "std/path"] {
+                let mut scene = scene.clone();
+                scene.render.resolution = [64, 64];
+                scene.render.settings = vork_scene::Profile::load(profile)?.resolve(&Default::default())?;
+                let installed = renderer.install_with_options(scene, path.parent().unwrap_or(Path::new(".")),
+                    InstallOptions { variants: pipelines::VariantCompile::Setup, ..Default::default() })
+                    .with_context(|| format!("prepare {} with {profile}", path.display()))?;
+                let _frame = installed.create_frame_slot(&renderer, Default::default())?;
+            }
+        }
+        renderer.finish_shader_warmup()
     }
     async fn create(ray_queries: impl FnOnce(&wgpu::Adapter) -> Result<bool>, prepare_release: bool) -> Result<Self> {
         let start = Instant::now();
@@ -507,9 +522,10 @@ impl Renderer {
         // separate instances would give every Renderer the same device id and
         // mix their timing receipts (one Renderer's drop forgot another's).
         static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+        static INSTANCE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let backends = if prepare_release { wgpu::Backends::NOOP }
             else { supported_backends(std::env::var("WGPU_BACKEND").ok().as_deref())? };
-        let make_instance = || {
+        let make_instance = || -> Result<wgpu::Instance> {
             let mut flags = wgpu::InstanceFlags::default();
             if !cfg!(debug_assertions) {
                 // Only engine-owned indexed draw commands are indirect: index ranges
@@ -518,20 +534,32 @@ impl Renderer {
                 // Avoid wgpu's eager validation pipelines and per-draw validation pass.
                 flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
             }
-            wgpu::Instance::new(wgpu::InstanceDescriptor {
+            let descriptor = wgpu::InstanceDescriptor {
                 backends,
                 flags: if prepare_release { flags } else { flags.with_env() },
                 backend_options: if prepare_release {
                     wgpu::BackendOptions { noop: wgpu::NoopBackendOptions { enable: true }, ..Default::default() }
                 } else { Default::default() },
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
-            })
+            };
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            if !prepare_release { return vulkan_runtime::instance(descriptor); }
+            Ok(wgpu::Instance::new(descriptor))
         };
         let preparation_instance;
         let instance = if prepare_release {
-            preparation_instance = make_instance();
+            preparation_instance = make_instance()?;
             &preparation_instance
-        } else { INSTANCE.get_or_init(make_instance) };
+        } else {
+            if INSTANCE.get().is_none() {
+                let _guard = INSTANCE_INIT.lock().map_err(|_| anyhow::anyhow!("GPU instance initialization lock poisoned"))?;
+                if INSTANCE.get().is_none() {
+                    // Failed initialization remains retryable in library callers.
+                    let _ = INSTANCE.set(make_instance()?);
+                }
+            }
+            INSTANCE.get().unwrap()
+        };
         let instance_ms = start.elapsed().as_secs_f64() * 1000.;
         let adapter_start = Instant::now();
         let adapter = instance
@@ -539,7 +567,15 @@ impl Renderer {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 ..Default::default()
             })
-            .await.context("No supported GPU adapter found. Install your GPU vendor Vulkan driver (Apple Silicon uses Metal); in Docker enable the NVIDIA container toolkit and --gpus all")?;
+            .await.map_err(|error| {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    let diagnostic = vulkan_runtime::adapter_failure(instance, &error);
+                    return anyhow::Error::new(error).context(diagnostic);
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                anyhow::Error::new(error).context("No usable GPU adapter exposed by the platform driver; check the graphics driver and device access (Metal requires Apple Silicon)")
+            })?;
         let adapter_ms = adapter_start.elapsed().as_secs_f64() * 1000.;
         if !prepare_release { rt::require_adapter(&adapter.get_info(), adapter.features())?; }
         let requirements_start = Instant::now();
@@ -883,28 +919,33 @@ impl Renderer {
         self.cache.is_some()
     }
     fn save_cache(&self) -> Result<()> {
+        // Serialize snapshot and publication together so an older save cannot
+        // overwrite a newer ledger or acknowledge its dirty state.
+        let mut saved = self.saved.lock().unwrap();
         // Snapshot the keys first: a variant finishing during get_data must not be
         // recorded as warm unless its binary is in the saved blob.
         if self.compiler.created() > 0 && self.pipeline_cache_status == "unsupported" {
-            disk_cache::write(&self.disk_cache.path("shader-warm", 1, blake3::hash(b"")), b"warm")?;
+            if !disk_cache::write_entry(&self.disk_cache.path("shader-warm", 1, blake3::hash(b"")), b"warm")? {
+                return Ok(());
+            }
         }
         let known = self.compiler.known_snapshot();
-        let mut saved = self.saved.lock().unwrap();
         let created = self.compiler.created();
         // Serialize only after new driver work, and rewrite only changed bytes: a
         // warm process (all cache hits) leaves the blob untouched.
         if created != saved.0 {
-            if let Some(data) = self.cache.as_ref().and_then(|x| x.get_data()) {
+            if let Some(cache) = &self.cache {
+                let Some(data) = cache.get_data() else { return Ok(()); };
                 let hash = blake3::hash(&data);
                 if saved.1 != Some(hash) {
-                    if !disk_cache::write_pipeline(&self.cache_path, &data)? { return Ok(()); }
+                    if !disk_cache::write_entry(&self.cache_path, &data)? { return Ok(()); }
                     saved.1 = Some(hash);
                 }
             }
             saved.0 = created;
         }
         if let Some(known) = known {
-            known.save()?;
+            self.compiler.save_known(known)?;
         }
         self.disk_cache.trim();
         Ok(())
@@ -935,7 +976,7 @@ impl Renderer {
         base: &Path,
         options: InstallOptions,
     ) -> Result<InstalledScene> {
-        ensure!(options.initial_time.is_finite(), "initial scene time must be finite");
+        options.initial_time.numeric().context("initial scene time must be finite")?;
         self.errors.check()?;
         let start = Instant::now();
         let mut scene = scene;
@@ -948,10 +989,11 @@ impl Renderer {
         let allow_media = options.test_participating_media;
         #[cfg(not(any(test, feature = "test-support")))]
         let allow_media = false;
+        scene.validate()?;
+        let stages=install::admit_delivery_effects(self,&scene,base,allow_media)?;
+        scene.delivery=!allow_media;
         if !allow_media {
-            scene.validate()?;
-            install::ignore_participating_media(self, &mut scene, base)?;
-            programs::normalize_launch_bindings(self,&mut scene,base)?;
+            programs::normalize_launch_bindings(self,&mut scene,base,&stages)?;
         }
         catcher::promote(&mut scene);
         let automatic_probes=rt::automatic_indirect_requested(&scene);
@@ -960,15 +1002,15 @@ impl Renderer {
         rt::resolve_reflections(&mut scene);
         rt::resolve_refraction(&mut scene, self.adapter_info.device_type, self.device.features());
         validate(&scene)?;
-        // Capability admission follows release normalization; loading must not
-        // reject requests that installation deliberately warns about and drops.
+        // Approximate providers retain their existing visibility diagnostics.
+        // Entirely unavailable effects were refused on resolved binding facts.
         lights::validate_visibility(&scene)?;
         animation::fold_material_inputs(&mut scene, base)?;
         if scene.propagation.is_some() && !scene.render.settings.integrator.is_path() {
             eprintln!("warning: authored curved propagation uses std/path transport for this scene and its render-image captures");
             rt::promote_indirect_to_path(&mut scene);
         }
-        let camera_controls=camera_program::promote(self,&mut scene,base,options.initial_time)?;
+        let camera_controls=camera_program::promote(self,&mut scene,base,&options.initial_time)?;
         if !scene.render.settings.integrator.is_path() && camera_program::scene_spectral(self,&scene,base)? {rt::promote_indirect_to_path(&mut scene);}
         if scene.render.settings.integrator.denoiser().is_some() {
             if let Err(error) = denoise::ensure_runtime(self) {
@@ -978,7 +1020,6 @@ impl Renderer {
         }
         // Before any ray-query shader compiles, including the prewarm thread below.
         rt::require(self, &scene)?;
-        rt::normalize_materials(&mut scene);
         // A scene in the working directory has an empty parent path.
         let base = if base.as_os_str().is_empty() {
             Path::new(".")
@@ -989,7 +1030,9 @@ impl Renderer {
         effects.implicit |= camera_controls;
         // Program variants own their validated compiler path; do not create an
         // unused built-in registry for those shots (including filtered roots).
-        let background = pipelines::prewarm_builtin(&scene, effects)?;
+        let background = scene.render.compositor.is_empty()
+            && (options.gpu_color || options.readback.color || options.readback.float.color)
+            && pipelines::prewarm_builtin(&scene, effects)?;
         let samples = raster_samples(&scene.render);
         // Deferred variant workers wait until every foreground pipeline below exists.
         let _foreground = self.compiler.foreground_preparation();
@@ -1230,6 +1273,102 @@ include!("lib_device_startup_tests_private.rs");
 mod tests {
     use super::*;
     #[test]
+    fn shader_cache_retries_failed_key_publication() -> Result<()> {
+        let mut renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+        let root = std::env::temp_dir().join(format!("vork-cache-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("keys.entry");
+        renderer.disk_cache = disk_cache::Store::for_test(root.clone());
+        renderer.compiler = pipelines::Compiler::new(
+            &renderer.device, None, pipelines::Known::load(path.clone(), false),
+        );
+        let key = blake3::hash(b"unsaved pipeline");
+        renderer.compiler.remember(key);
+        // A directory at the destination makes atomic rename fail on every OS.
+        std::fs::create_dir(&path)?;
+        assert!(renderer.settle_pipelines().is_err());
+        std::fs::remove_dir(&path)?;
+        renderer.settle_pipelines()?;
+        assert_eq!(disk_cache::read(&path), Some(key.as_bytes().to_vec()));
+        assert!(renderer.compiler.known_snapshot().is_none());
+        drop(renderer);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires a Vulkan device with a persistent pipeline cache"]
+    fn shader_cache_retries_failed_driver_publication() -> Result<()> {
+        let mut renderer = Renderer::new()?;
+        if renderer.adapter_info.device_type == wgpu::DeviceType::Cpu
+            || !renderer.device.features().contains(wgpu::Features::PIPELINE_CACHE)
+        {
+            eprintln!("driver publication test skipped: {:?} has no supported persistent pipeline cache", renderer.adapter_info);
+            return Ok(());
+        }
+        anyhow::ensure!(renderer.cache.is_some(), "persistent driver cache required");
+        let root = std::env::temp_dir().join(format!("vork-driver-retry-{}", std::process::id()));
+        let path = root.join("keys.entry");
+        renderer.cache_path = root.join("driver.entry");
+        renderer.disk_cache = disk_cache::Store::for_test(root.clone());
+        renderer.compiler = pipelines::Compiler::new(
+            &renderer.device, renderer.cache.as_ref(), pipelines::Known::load(path.clone(), false),
+        );
+        *renderer.saved.lock().unwrap() = (0, None);
+        let module = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cache retry"),
+            source: wgpu::ShaderSource::Wgsl("@compute @workgroup_size(1) fn main() {}".into()),
+        });
+        let _pipeline = renderer.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cache retry"), layout: None, module: &module,
+            entry_point: Some("main"), compilation_options: Default::default(),
+            cache: renderer.cache.as_ref(),
+        });
+        let key = blake3::hash(b"driver retry pipeline");
+        renderer.compiler.remember(key);
+        std::fs::create_dir_all(&renderer.cache_path)?;
+        assert!(renderer.settle_pipelines().is_err());
+        assert_eq!(renderer.saved.lock().unwrap().0, 0);
+        assert!(renderer.compiler.known_snapshot().is_some());
+        std::fs::remove_dir(&renderer.cache_path)?;
+        renderer.settle_pipelines()?;
+        assert!(disk_cache::read_pipeline(&renderer.cache_path).is_some());
+        assert_eq!(disk_cache::read(&path), Some(key.as_bytes().to_vec()));
+        assert_eq!(renderer.saved.lock().unwrap().0, renderer.compiler.created());
+        assert!(renderer.compiler.known_snapshot().is_none());
+        drop(renderer);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn shader_cache_budget_refusal_keeps_keys_dirty() -> Result<()> {
+        const CHILD: &str = "VORK_KEY_BUDGET_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let root = std::env::temp_dir().join(format!("vork-key-budget-{}", std::process::id()));
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "tests::shader_cache_budget_refusal_keeps_keys_dirty"])
+                .env(CHILD, "1").env("VORK_CACHE_BYTES", "0")
+                .env("VORK_CACHE_DIR", &root).status()?;
+            anyhow::ensure!(status.success(), "cache budget child failed");
+            return Ok(());
+        }
+        let mut renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+        let root = PathBuf::from(std::env::var_os("VORK_CACHE_DIR").unwrap());
+        let path = root.join("keys.entry");
+        renderer.disk_cache = disk_cache::Store::for_test(root.clone());
+        renderer.compiler = pipelines::Compiler::new(
+            &renderer.device, None, pipelines::Known::load(path.clone(), false),
+        );
+        renderer.compiler.remember(blake3::hash(b"unsaved pipeline"));
+        renderer.settle_pipelines()?;
+        assert!(disk_cache::read(&path).is_none());
+        assert!(renderer.compiler.known_snapshot().is_some());
+        renderer.settle_pipelines()?;
+        assert!(renderer.compiler.known_snapshot().is_some());
+        drop(renderer);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
     fn worker_types_are_shareable() {
         fn shared<T: Send + Sync>() {}
         shared::<Renderer>();
@@ -1394,11 +1533,9 @@ mod scene_error_context_tests {
             Ok(())
         }));
         std::fs::remove_file(&path)?;
-        // Launch accepts this binding, then substitutes its default at installation.
-        let mut unedited = unedited?;
+        // Installation retains authored bindings; bound effect proofs select coverage.
+        let unedited = unedited?;
         assert!(unedited.materials["paint"].inputs.contains_key("geometry_opacity"));
-        super::rt::normalize_materials(&mut unedited);
-        assert!(!unedited.materials["paint"].inputs.contains_key("geometry_opacity"));
         assert!(!edited?.materials["paint"].inputs.contains_key("geometry_opacity"));
         assert!(format!("{:#}", invalid_edit.unwrap_err()).contains("positive dimensions"));
         Ok(())
@@ -1428,7 +1565,7 @@ mod scene_error_context_tests {
         let deferred = deferred?;
         assert!(!deferred.nodes[1].visibility.transmission);
         assert!(!super::rt::ray_refraction(&deferred));
-        assert!(!deferred.media_disabled);
+        assert!(!deferred.delivery);
         // Loading leaves installation-time capability checks deferred.
         assert!(super::lights::validate_visibility(&deferred).is_err());
         let repaired = repaired?;

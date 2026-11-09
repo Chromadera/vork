@@ -2,8 +2,7 @@
 
 Rendering requires Apple Silicon or an NVIDIA GPU with Vulkan ray queries.
 Authoring scenes and `vork help` do not need a GPU. Docker requires a suitable
-GPU on its host; it does not provide one. Hosted rendering: details will be
-added here when available.
+GPU on its host; it does not provide one.
 
 The Docker runtime below targets your own Linux x86-64 NVIDIA machine. Use a
 matching Linux release archive and SHA256 from its `SHA256SUMS`. There is no
@@ -35,12 +34,21 @@ writable `/tmp` and cache directory. Mount a writable directory and set
 `VORK_CACHE_DIR` to reuse caches across containers; never share a writable cache
 between mutually untrusted users.
 
-The entrypoint creates a private temporary manifest pointing at
-`libEGL_nvidia.so.0` and sets both `VK_DRIVER_FILES` and `VK_ICD_FILENAMES`.
-A read-only NVIDIA manifest can point at `libGLX_nvidia.so.0`, which fails
-in its headless environment. Rewriting `/etc/vulkan/icd.d` can also fail because
-it is mounted read-only. This image leaves it alone. Do not bypass the entrypoint
-when rendering. NVIDIA graphics, compute, utility and video capabilities are
+## Vulkan driver discovery
+
+If `nvidia-smi` sees the GPU but Vulkan finds only llvmpipe, inspect the NVIDIA
+ICD manifest in `/etc/vulkan/icd.d` or `/usr/share/vulkan/icd.d` (or the files
+selected by `VK_DRIVER_FILES` / `VK_ICD_FILENAMES`). Its `ICD.library_path` must
+load and expose Vulkan entry points. `VK_LOADER_DEBUG=error,warn vork setup`
+prints loader diagnostics. GPU visibility alone does not validate this library.
+
+The packaged engine discovers mounted NVIDIA EGL/GLX entry points itself when
+the Vulkan loader supports direct driver loading; normal ICD discovery remains
+available. The image leaves host ICDs unchanged and preserves explicit operator
+`VK_DRIVER_FILES`/`VK_ICD_FILENAMES` selections. Slang and OIDN resolve beside the
+engine. The entrypoint supplies executable and FFmpeg library paths for SSH
+sessions, without creating manifests or supplying runtime-path overrides.
+NVIDIA graphics, compute, utility and video capabilities are
 requested; native NVENC handles MP4 encoding. FFmpeg is built with GPL/nonfree
 features disabled and shared LGPL libraries, with matching source and notices
 retained in `/opt/ffmpeg/notices`. There is no libx264 fallback in this image;

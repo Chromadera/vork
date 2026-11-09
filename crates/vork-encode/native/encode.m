@@ -17,7 +17,7 @@ typedef struct {
     CVMetalTextureCacheRef cache;
     void *writer, *input, *queue, *pipeline, *ready, *surfaces;
     uint64_t next;
-    unsigned width,height,fps;
+    unsigned width,height,fps_num,fps_den;
     atomic_int error;
     dispatch_group_t pending;
     dispatch_queue_t handoff,writer_queue;
@@ -37,6 +37,7 @@ static void append_sample(Encoder *e,CMSampleBufferRef sb,uint64_t index) {
     AVAssetWriterInput *input=(__bridge AVAssetWriterInput *)e->input;
     if (!e->started) {
         input=[AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:nil sourceFormatHint:CMSampleBufferGetFormatDescription(sb)];
+        input.mediaTimeScale=(CMTimeScale)e->fps_num;
         if (![writer canAddInput:input]) {e->error=-2;return;}
         e->input=(void *)CFBridgingRetain(input);
         [writer addInput:input];
@@ -97,9 +98,9 @@ void enc_drop(void *ctx) {
     e->pending=nil;e->handoff=nil;e->writing=nil;e->writer_queue=nil;
     free(e);
 }
-void *enc_prepare(unsigned w,unsigned h,unsigned fps,unsigned bitrate,unsigned gop_frames,bool prores) {
+void *enc_prepare(unsigned w,unsigned h,unsigned fps_num,unsigned fps_den,unsigned bitrate,unsigned gop_frames,bool prores) {
     @autoreleasepool {
-    Encoder *e=calloc(1,sizeof(*e));e->width=w;e->height=h;e->fps=fps;e->prores=prores;
+    Encoder *e=calloc(1,sizeof(*e));e->width=w;e->height=h;e->fps_num=fps_num;e->fps_den=fps_den;e->prores=prores;
     e->ready=(void *)CFBridgingRetain([NSMutableDictionary new]);
     e->surfaces=(void *)CFBridgingRetain([NSMutableDictionary new]);
     e->pending=dispatch_group_create();
@@ -115,7 +116,7 @@ void *enc_prepare(unsigned w,unsigned h,unsigned fps,unsigned bitrate,unsigned g
         : @{(id)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder:@YES};
     if(!s)s=VTCompressionSessionCreate(NULL,w,h,prores ? kCMVideoCodecType_AppleProRes4444 : kCMVideoCodecType_H264,(__bridge CFDictionaryRef)spec,(__bridge CFDictionaryRef)attrs,NULL,sample,e,&e->session);
     if(!s && !prores)s=VTSessionSetProperty(e->session,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse);
-    if(!s)s=VTSessionSetProperty(e->session,kVTCompressionPropertyKey_ExpectedFrameRate,(__bridge CFNumberRef)@(fps));
+    if(!s)s=VTSessionSetProperty(e->session,kVTCompressionPropertyKey_ExpectedFrameRate,(__bridge CFNumberRef)@((double)fps_num/fps_den));
     if(!s && prores)s=VTSessionSetProperty(e->session,kVTCompressionPropertyKey_PreserveAlphaChannel,kCFBooleanTrue);
     if(!s && !prores)s=VTSessionSetProperty(e->session,kVTCompressionPropertyKey_AverageBitRate,(__bridge CFNumberRef)@(bitrate));
     if(!s && !prores)s=VTSessionSetProperty(e->session,kVTCompressionPropertyKey_MaxKeyFrameInterval,(__bridge CFNumberRef)@(gop_frames));
@@ -135,7 +136,7 @@ int enc_attach(void *ctx,const char *path) {
     NSURL *url=[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
     [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
     AVAssetWriter *writer=[[AVAssetWriter alloc] initWithURL:url fileType:(e->prores ? AVFileTypeQuickTimeMovie : AVFileTypeMPEG4) error:&error];
-    if(!writer)return -1; e->writer=(void *)CFBridgingRetain(writer);
+    if(!writer)return -1; writer.movieTimeScale=(CMTimeScale)e->fps_num; e->writer=(void *)CFBridgingRetain(writer);
     return 0;
     }
 }
@@ -218,7 +219,7 @@ int enc_push(void *ctx,void *raw,void *destination,void *rawQueue,uint64_t index
                 ready[@(index)]=^{
                 OSStatus result=completed.status==MTLCommandBufferStatusError ? -12 : atomic_load(&e->error);
 
-                if(!result)result=VTCompressionSessionEncodeFrame(e->session,pixel,CMTimeMake(index,e->fps),CMTimeMake(1,e->fps),NULL,surface,NULL);
+                if(!result)result=VTCompressionSessionEncodeFrame(e->session,pixel,CMTimeMake(index*e->fps_den,e->fps_num),CMTimeMake(e->fps_den,e->fps_num),NULL,surface,NULL);
                 if(result){e->error=result;dispatch_group_leave(surface->consumed);}
                 };
                 dispatch_group_t pending=e->pending;

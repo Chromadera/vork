@@ -4,6 +4,7 @@ use crate::*;
 
 pub(crate) struct Resources {
     pub pixels: wgpu::Buffer,
+    pub(crate) output_layout: wgpu::BindGroupLayout,
     pub(crate) display_inputs: Option<wgpu::Buffer>,
     pub(crate) compositor_inputs: crate::compositor::FrameInputs,
     pub nonfinite: wgpu::Buffer,
@@ -39,15 +40,25 @@ impl Resources {
         compositor: &[vork_scene::v2::CompositeEntry],
         denoiser: Option<&vork_scene::v2::Denoiser>,
         reconstruct: bool,
+        graph: &crate::graph::Graph,
+        dependencies: crate::compositor::Dependencies,
     ) -> Result<(Self, wgpu::BindGroup)> {
-        let resolve_pipeline = s.pipelines.output_resolve(s.plan.effects)
+        let needs_source=dependencies.beauty;
+        let denoiser=denoiser.filter(|_|needs_source);
+        let reconstruct=reconstruct && needs_source;
+        // Delivery of a composed image has no scene/medium bindings of its own.
+        let (pipelines,effects)=if needs_source || graph.runs(crate::graph::Pass::Volume) {(s.pipelines.clone(),s.plan.effects)} else {
+            let effects=crate::plan::EffectPlan {compositor:!s.plan.effects.fuse_controls(),
+                outputs:Some(crate::compositor::Dependencies {color:dependencies.color,..Default::default()}),..Default::default()};
+            let pipelines=r.cached_pipelines(s.pipelines.raster_samples);
+            (pipelines,effects)
+        };
+        pipelines.ensure_output(r,effects)?;
+        let resolve_pipeline = pipelines.output_resolve(effects)
             .get()
             .context("base pipelines installed")?;
         let d = &r.device;
-        let (w, h) = (
-            targets.resolved.texture().width(),
-            targets.resolved.texture().height(),
-        );
+        let [w,h] = view_desc.extent;
         let crate::view::Targets {
             post_depth,
             post_ids,
@@ -62,16 +73,25 @@ impl Resources {
         // Captures share the camera output texture binding, but their planar
         // pixels and dispatches belong to their own logical output extent.
         let [output_width, output_height] = view_desc.extent;
-        let size = u64::from(output_width) * u64::from(output_height) * u64::from(planes) * 4;
-        let buffer = |label: &str, size: u64, usage| s.transients.buffer(d, label, size, usage);
+        let size = if graph.runs(crate::graph::Pass::Resolve) || graph.runs(crate::graph::Pass::AovResolve) || graph.runs(crate::graph::Pass::Path) {u64::from(output_width) * u64::from(output_height) * u64::from(planes) * 4} else {16};
+        // Captures can rerun between camera exposure samples.
+        // Keep each capture's resolve separate from the retained camera sum.
+        let buffer = |label: &str, size: u64, usage| {
+            let owned;
+            let label = if let crate::views::ViewKind::Image { name, .. } = &view_desc.kind {
+                owned = format!("image {name}: {label}");
+                owned.as_str()
+            } else { label };
+            s.transients.buffer(d, label, size, usage)
+        };
         // Resolve stages unassociated scene-linear colour for the display program.
         let pixels = buffer("packed PNG pixels", size,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
-        let catcher_base=planes - 4 - if !capture {4} else {0};
-        passes::path::record(s,r,uniform,lights,path_light_tree.unwrap_or(cluster_lights),cluster_config,cluster_lights,objects,rays,material,resolved,&targets.aov_values,targets,&targets.catcher,&pixels,catcher_base,recorder,view_desc)?;
+        let catcher_base=planes.saturating_sub(4 + if !capture {4} else {0});
+        if graph.runs(crate::graph::Pass::Path) {passes::path::record(s,r,uniform,lights,path_light_tree.unwrap_or(cluster_lights),cluster_config,cluster_lights,objects,rays,material,resolved,&targets.aov_values,targets,&targets.catcher,&pixels,catcher_base,recorder,view_desc)?;}
         let accumulation = buffer(
             "linear sample accumulation",
-            if exposure_samples > 1 || !compositor.is_empty() || s.has_catchers || denoiser.is_some() || reconstruct {
+            if needs_source && (exposure_samples > 1 || !compositor.is_empty() || s.has_catchers || denoiser.is_some() || reconstruct) {
                 u64::from(w) * u64::from(h) * constants::ACCUMULATION_PIXEL_BYTES
             } else {
                 constants::ACCUMULATION_PIXEL_BYTES
@@ -109,7 +129,7 @@ impl Resources {
             )
         });
         let reconstruction = reconstruct.then(|| crate::denoise::spatial::Stage::new(r, &accumulation, denoised.as_ref().unwrap(), guides.unwrap(), [w,h], exposure_samples)).transpose()?;
-        let denoiser = denoiser
+        let denoiser = denoiser.filter(|_|s.plan.effects.denoise)
             .map(|settings| {
                 let mut stage=crate::denoise::Stage::new(
                     r,
@@ -132,7 +152,7 @@ impl Resources {
         } else {
             buffer("unused post colour",constants::ACCUMULATION_PIXEL_BYTES,wgpu::BufferUsages::STORAGE)
         };
-        if !compositor.is_empty() || s.has_catchers {
+        if dependencies.color && (!compositor.is_empty() || s.has_catchers) {
             post_color = crate::compositor::record(
                 s,
                 r,
@@ -145,11 +165,12 @@ impl Resources {
                 crate::compositor::Normalization::Frame,
                 recorder,
                 crate::graph::Pass::Compositor,
+                dependencies.beauty,
             )?;
         }
-        let froxels=s.pipelines.resolve_native.as_ref().map(|n|medium::paged_buffers(s,d,"volume froxel transport",n.froxel_bytes([w,h]),n.froxel_pages.max(1),n.froxel_page_elements));
+        let froxels=pipelines.resolve_native.as_ref().map(|n|medium::paged_buffers(s,d,"volume froxel transport",n.froxel_bytes([w,h]),n.froxel_pages.max(1),n.froxel_page_elements));
         let stride=d.limits().min_uniform_buffer_offset_alignment.max(32);
-        let sample_parameters=s.pipelines.resolve_native.as_ref().map(|_| {
+        let sample_parameters=pipelines.resolve_native.as_ref().map(|_| {
             let mut bytes=vec![0u8;visibility_samples.max(1) as usize*stride as usize];
             for sample in 0..visibility_samples.max(1) {
                 let [x,y]=crate::sampling::clip_offset([w,h],sample as usize,visibility_samples.max(1) as usize);
@@ -198,17 +219,17 @@ impl Resources {
                     wgpu::BindingResource::TextureView(&s.environment.specular),
                 ),
             ];
-        if s.pipelines.resolve_native.as_ref().is_some_and(|n|n.program_coverage) {
+        if pipelines.resolve_native.as_ref().is_some_and(|n|n.program_coverage) {
             resolve_entries.extend([
                 entry(13,wgpu::BindingResource::TextureView(&s.environment.brdf)),
                 entry(18,wgpu::BindingResource::TextureView(&s.environment.ltc)),
             ]);
         }
-        if s.pipelines.resolve_native.is_some() {
+        if pipelines.resolve_native.is_some() {
             resolve_entries.push(entry(64,cluster_config.as_entire_binding()));
             resolve_entries.push(entry(65,cluster_lights.as_entire_binding()));
             resolve_entries.push(entry(3,parameter(0)));
-            if s.pipelines.resolve_native.as_ref().unwrap().ray_shadows {
+            if pipelines.resolve_native.as_ref().unwrap().ray_shadows {
                 resolve_entries.push(entry(59,rays.context("volume ray shadows require TLAS")?.tlas.as_binding()));
                 resolve_entries.push(entry(60,s.rays.as_ref().context("volume ray shadows require alpha table")?.alpha.as_entire_binding()));
                 resolve_entries.push(entry(71,rays.unwrap().emitter_weights.as_ref().map_or(&s.rays.as_ref().unwrap().alpha,|w|&w.buffer).as_entire_binding()));
@@ -228,14 +249,14 @@ impl Resources {
             p.get().cloned().context("incomplete installed post plan")
         };
         let full = [w.div_ceil(8), h.div_ceil(8), 1];
-        if let Some(native)=s.pipelines.resolve_native.as_ref().filter(|_|match &view_desc.kind {crate::views::ViewKind::Image {render,..}=>!render.settings.settings.integrator.is_path(),_=>!s.render.settings.integrator.is_path()}) {
+        if let Some(native)=pipelines.resolve_native.as_ref().filter(|_|match &view_desc.kind {crate::views::ViewKind::Image {render,..}=>!render.settings.settings.integrator.is_path(),_=>!s.render.settings.integrator.is_path()}) {
             // Mesh descriptors are installed after the shared pipeline registry.
             // Specialize only this scene's lighting traversal to its actual count;
             // resource layouts and the shared registry remain unchanged.
             let mut column_native=native.clone();
             column_native.boundaries=s.medium_boundaries;
             column_native.world_only=s.medium_boundaries==0;
-            let froxel_groups=vec![resolve_pipeline.get_bind_group_layout(0),s.pipelines.mat_layout.clone()];
+            let froxel_groups=vec![resolve_pipeline.get_bind_group_layout(0),pipelines.mat_layout.clone()];
             let hit_layout = native.program_coverage.then(||crate::rt::hits_layout(d));
             let shadow_layout = crate::shadows::volume_layout(d);
             let page_layout = medium::page_layout(d,native);
@@ -251,9 +272,9 @@ impl Resources {
             let froxel_layout=d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label:Some("volume froxel layout"),bind_group_layouts:&froxel_group_refs,immediate_size:0,
             });
-            let support_pipeline=self::pipeline(r,&s.pipelines.resolve_module,Some(&column_native),"volume_receiver_support",Some(&froxel_layout));
-            let lighting_pipeline=self::pipeline(r,&s.pipelines.resolve_module,Some(&column_native),"volume_lighting",Some(&froxel_layout));
-            let visibility_world=(native.visibility_lights>0).then(|| self::pipeline(r,&s.pipelines.resolve_module,Some(&column_native),"volume_visibility_world",Some(&froxel_layout)));
+            let support_pipeline=self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_receiver_support",Some(&froxel_layout));
+            let lighting_pipeline=self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_lighting",Some(&froxel_layout));
+            let visibility_world=(native.visibility_lights>0).then(|| self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_visibility_world",Some(&froxel_layout)));
             let world_side=vork_slang::registry::MEDIUM_VISIBILITY_SIDE;
             let tile=native.tile.max(1);
             let [cols,rows]=[w.div_ceil(tile),h.div_ceil(tile)];
@@ -263,7 +284,7 @@ impl Resources {
                 let dispatch=dispatch.with_material(material).with_pages(pages.clone());
                 if native.program_coverage {dispatch.with_hits(rays.unwrap().hits_bind(d))}else{dispatch}
             };
-            let apply_pipeline=self::pipeline(r,&s.pipelines.resolve_module,Some(&column_native),"volume_apply",Some(&froxel_layout));
+            let apply_pipeline=self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_apply",Some(&froxel_layout));
             let mut dispatches=Vec::new();
             // Complete the shared world visibility average before any reader.
             // Camera cells still stream through their single froxel allocation.
@@ -286,9 +307,9 @@ impl Resources {
             recorder.compute(crate::graph::Pass::Volume,"stream volume samples","volume",false,dispatches);
         }
         let mut dispatches = Vec::new();
-        if !compositor.is_empty() || s.has_catchers || denoiser.is_some() || reconstruct {
+        if needs_source && (!compositor.is_empty() || s.has_catchers || denoiser.is_some() || reconstruct) {
             dispatches.push(crate::graph::Dispatch::new(
-                &pipeline(&s.pipelines.post_source_pipeline)?,
+                &pipeline(&pipelines.post_source_pipeline)?,
                 resolve_bind.clone(),
                 full,
             ));
@@ -316,7 +337,7 @@ impl Resources {
             true,
             dispatches,
         );
-        Ok((Self { pixels, display_inputs, compositor_inputs, denoiser, reconstruction, nonfinite:targets.nonfinite.clone(), display_base }, output_bind))
+        Ok((Self { pixels, output_layout:resolve_pipeline.get_bind_group_layout(1), display_inputs, compositor_inputs, denoiser, reconstruction, nonfinite:targets.nonfinite.clone(), display_base }, output_bind))
     }
 }
 

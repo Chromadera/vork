@@ -171,7 +171,7 @@ fn implicit_liquid_state_and_seek() -> Result<()> {
     let decoded=buffers::SceneBuffers::decode(&scene,&base)?;
     let attrs=if production {buffers::ProgramBuffers::install(&renderer,&scene,&decoded)?}
         else {buffers::ProgramBuffers::install_with_page_limit(&renderer,&scene,&decoded,1024*1024)?};
-    let compute=compute::Compute::install(&renderer,&scene,&base,Some(&attrs),&[],&[],&[],24.,1.5)?.unwrap();
+    let compute=compute::Compute::install(&renderer,&scene,&base,Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.5)?.unwrap();
     assert!(attrs.bindings["surface"].spans.len()>1,"fine field must exercise retained storage across pages");
     let dims=scene.buffers["surface"].dims.unwrap();
     assert!(dims[0]>scene.buffers["phi"].dims.unwrap()[0], "surface resolution must be independent of the pressure grid");
@@ -629,7 +629,9 @@ fn implicit_caster_shadows_medium_illumination() -> Result<()> {
 }
 
 fn fluid_fixture(kind:&str,n:u32) -> Result<serde_json::Value> {
-    let output=std::process::Command::new("python3").args(["-m","libraries.fluid.gpu_fixture",kind,&n.to_string()]).output()?;
+    let output=std::process::Command::new("python3")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["-m","libraries.fluid.gpu_fixture",kind,&n.to_string()]).output()?;
     ensure!(output.status.success(),"fluid fixture: {}",String::from_utf8_lossy(&output.stderr));
     Ok(serde_json::from_slice(&output.stdout)?)
 }
@@ -671,7 +673,7 @@ fn fluid_edge_publication_and_physical_volume() -> Result<()> {
             let scene=crate::test_scene(document,Path::new("."))?;
             let decoded=buffers::SceneBuffers::decode(&scene,Path::new("."))?;
             let attrs=buffers::ProgramBuffers::install(&renderer,&scene,&decoded)?;
-            let compute=compute::Compute::install(&renderer,&scene,Path::new("."),Some(&attrs),&[],&[],&[],24.,1.)?.unwrap();
+            let compute=compute::Compute::install(&renderer,&scene,Path::new("."),Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.)?.unwrap();
             let mut cursor=compute.cursor.lock().unwrap();
             let mut encoder=renderer.device.create_command_encoder(&Default::default());
             compute.advance_with(&mut encoder,&mut cursor,0.,|encoder| {

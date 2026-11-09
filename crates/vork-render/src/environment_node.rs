@@ -31,9 +31,9 @@ impl Settings {
                     ..
                 } = &node.kind
                 {
-                    if let Some(first) = first.as_ref() {
-                        crate::warnings::additional_environment(node, first, index);
-                    } else {
+                    // Provider preparation may inspect this provisional first
+                    // binding. Delivery admission owns the complete node set.
+                    if first.is_none() {
                         *first = Some(format!("node {index} ({:?})", node.name));
                         *found = Some(Settings {
                             source: Some(index),
@@ -144,16 +144,12 @@ mod tests {
         let input = vork_scene::v2::from_test_value(
             json!({"version":2,"nodes":[{"type":"light","shape":"environment","name":"world_a"},{"type":"node","children":[{"type":"light","shape":"environment","name":"world_b","energy":0}]}]}),
         )?;
-        // Launch keeps the first environment and reports each dropped request.
+        // Selection is provisional; only installation decides admission.
         let collector = crate::warnings::Collector::default();
         let _scope = collector.enter();
         assert_eq!(Settings::from_scene(&input)?.source, Some(0));
         let warnings = collector.snapshot();
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, "additional_environment");
-        assert_eq!(warnings[0].requested["node_index"], 2);
-        assert_eq!(warnings[0].requested["node"]["name"], "world_b");
-        assert!(warnings[0].requested["retained_environment"].as_str().unwrap().contains("world_a"));
+        assert!(warnings.is_empty());
         Ok(())
     }
 }

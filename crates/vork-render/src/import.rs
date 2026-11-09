@@ -141,6 +141,24 @@ fn from_slice(bytes: &[u8]) -> Result<gltf::Gltf> {
 /// against the bytes they address (refused rather than let gltf's readers drop
 /// truncated data).
 fn check_document(gltf: gltf::Gltf) -> Result<gltf::Gltf> {
+    // Validate every component, including nodes outside the selected scene.
+    // An explicit DFS stack also keeps validation safe for deep hierarchies.
+    let mut state = vec![0u8; gltf.nodes().len()];
+    for root in gltf.nodes() {
+        let mut stack = vec![(root, false)];
+        while let Some((node, leaving)) = stack.pop() {
+            let index = node.index();
+            if leaving {
+                state[index] = 2;
+                continue;
+            }
+            ensure!(state[index] != 1, "glTF node hierarchy contains a cycle at node {index}");
+            if state[index] == 2 { continue; }
+            state[index] = 1;
+            stack.push((node.clone(), true));
+            stack.extend(node.children().map(|child| (child, false)));
+        }
+    }
     check_accessor_types(&gltf.document)?;
     for (index, image) in gltf.document.as_json().images.iter().enumerate() {
         match (&image.buffer_view, &image.uri) {
@@ -728,6 +746,20 @@ impl GeometryUpload<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cyclic_node_hierarchies_are_errors() {
+        for nodes in [
+            serde_json::json!([{"children":[0]}]),
+            serde_json::json!([{"children":[1]},{"children":[2]},{"children":[0]}]),
+            serde_json::json!([{}, {"children":[1]}]),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({"asset":{"version":"2.0"},"nodes":nodes})).unwrap();
+            let error = super::from_slice(&bytes).unwrap_err().to_string();
+            assert!(error.contains("node hierarchy contains a cycle"), "{error}");
+        }
+        super::from_slice(br#"{"asset":{"version":"2.0"},"nodes":[{"children":[1,2]},{"children":[3]},{"children":[3]},{}]}"#).unwrap();
+    }
+
     #[test]
     fn geometry_admission_respects_storage_before_allocation_limits() {
         let limits = wgpu::Limits {max_buffer_size: 256 << 20,

@@ -220,7 +220,7 @@ Response surface_terms_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers l,
 }
 Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers l, SpecularResponse specular, float material_visibility, AnalyticRadiance policy, float3 position_error, out float3 scattering,uint quadrature_sample=0xffffffffu,bool secondary=false) {
     let exposure=select(policy.exposed,frame.radiance.w,1.);
-    let c=s.closure;let base=substrate_color(c);let transmission=c.transmission_weight;let metallic=c.base_metalness;
+    let c=s.closure;
     let geometric=s.geometric;let n=c.geometry_normal;let view=s.view;
     // The base lobes under any coat use the layered closure (roughened, IOR ratio).
     let layered_material=V.layered && (c.coat_weight>0. || c.fuzz_weight>0.);
@@ -233,19 +233,25 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
     let nv=max(dot(n,view),.0001);
     let moments=brdf_moments(float2(nv,roughness));
     var reflected=specular_reflectance(specular,moments,internal_reflection_quadrature<V>(c));
-    let substrate_reflectance=all(specular.directional_albedo>=float3(0.)) ? specular.directional_albedo : reflected;
-    var diffuse=base*(1.-metallic)*(1.-transmission)*(float3(1.)-substrate_reflectance);
+    // A cosine hemisphere integrates the same diffuse response used by direct
+    // and path lighting. Reserve dielectric directional albedo only: the metal
+    // mixture (and its compensation) belongs to glossy reflection, not to the
+    // remaining dielectric substrate.
+    var diffuse=direct_diffuse(l.base,view)*REG_PI;
     let linked=light_receives(frame.environment_links.x,frame.environment_links.y,objects[v.object].metadata.x);
     let world_diffuse=linked && (frame.environment_links.x&policy.lobes&REG_RAY_DIFFUSE)!=0u;
     let glossy_enabled=policy.glossy_ambient && (policy.lobes&REG_RAY_SPECULAR)!=0u && (secondary || frame.projection.z!=REG_REFLECTIONS_OFF);
     let world_specular=linked && (frame.environment_links.x&REG_RAY_SPECULAR)!=0u && glossy_enabled;
     let world_response=select(world_diffuse,diffuse,float3(0.));
-    let back_diffuse=thin_diffuse(l.base,view,substrate_reflectance)*REG_PI;
+    let back_diffuse=thin_diffuse(l.base,view)*REG_PI;
     let back_response=select(world_diffuse,back_diffuse,float3(0.));
     let world_reflected=select(world_specular && !policy.indirect_only,reflected,float3(0.));
     let indirect_reflected=select(glossy_enabled && !policy.indirect_only,reflected,float3(0.));
     var missing_diffuse=false;
-    let scattering_consumer=c.base_weight*(1.-metallic)*(1.-transmission)*(float3(1.)-substrate_reflectance)*l.throughput*l.scale*material_visibility;
+    // Diffusion consumes irradiance before substrate colour, just as the
+    // direct-light scattering closure does; do not divide by possibly black RGB.
+    var scattering_closure=l.base;scattering_closure.base_color=float3(1.);scattering_closure.subsurface_weight=0.;
+    let scattering_consumer=direct_diffuse(scattering_closure,view)*REG_PI*l.throughput*l.scale*material_visibility;
     var irradiance=policy.indirect_only ? float3(0.) : frame.radiance.xyz;
     var ambient=(world_response+back_response+world_reflected)*irradiance;
     var back_ambient=back_response*irradiance;
@@ -429,7 +435,7 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
 #ifdef VORK_PROBES
     diffuse_received=true;
 #endif
-    scattering=select(diffuse_received,c.base_weight*(1.-metallic)*(1.-transmission)*(float3(1.)-substrate_reflectance)*irradiance*l.throughput*l.scale*material_visibility*exposure,float3(0.));
+    scattering=select(diffuse_received,scattering_consumer*irradiance*exposure,float3(0.));
     var emissive=policy.indirect_only ? float3(0.) : surface_emission(c,l);
     Response r;r.reflection=reflection_bsdf(l.base,c,l.scale,l.throughput,material_visibility,specular.metal_compensation);reflection_bsdf_set_environment(r.reflection,reflection_environment*material_visibility*exposure);r.radiance=RadianceTerms(float3(0.),emissive*exposure,(ambient-reflection_environment*material_visibility)*exposure,reflection_environment*material_visibility*exposure);
     // Front-hemisphere GI can replace only its own ambient estimate. The

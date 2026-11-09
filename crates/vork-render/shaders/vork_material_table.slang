@@ -133,6 +133,18 @@ float material_alpha<V:IVariant>(uint r, MaterialUv m, float color_alpha) {
     let opacity=material_float<V>(r,MATERIAL_OPACITY,MATERIAL_OPACITY_WORD,m);
     return std_opacity(select((material_records[r].tag.z&REG_FLAG_VERTEX_ALPHA)!=0u,opacity*color_alpha,opacity), material_float<V>(r,MATERIAL_CUTOFF,MATERIAL_CUTOFF_WORD,m));
 }
+// The compact candidate table contains UV/alpha corners, not named data.
+// Only bound opacity attributes require the consumer's full hit reconstruction.
+bool material_alpha_attribute(uint r) {
+#if VORK_ATTRIBUTES > 0
+    let opacity=material_byte<Unspecialized>(r,MATERIAL_OPACITY)&REG_MATERIAL_TAP_INDEX_MASK;
+    let cutoff=material_byte<Unspecialized>(r,MATERIAL_CUTOFF)&REG_MATERIAL_TAP_INDEX_MASK;
+    return (opacity!=0u && (material_words[material_records[r].tag.y+(opacity-1u)*REG_MATERIAL_TAP_WORDS+1u]&REG_MATERIAL_ATTRIBUTE_FLAG)!=0u)
+        || (cutoff!=0u && (material_words[material_records[r].tag.y+(cutoff-1u)*REG_MATERIAL_TAP_WORDS+1u]&REG_MATERIAL_ATTRIBUTE_FLAG)!=0u);
+#else
+    return false;
+#endif
+}
 float material_constant_alpha(uint r) {
     return std_opacity(material_value(r,MATERIAL_OPACITY_WORD),material_value(r,MATERIAL_CUTOFF_WORD));
 }
@@ -146,7 +158,7 @@ float material_float(uint r,uint input,uint word,MaterialUv m) {return material_
 float3 material_color(uint r,uint input,uint word,MaterialUv m) {return material_color<Unspecialized>(r,input,word,m);}
 float material_alpha(uint r,MaterialUv m,float color_alpha) {return material_alpha<Unspecialized>(r,m,color_alpha);}
 
-// Object header word 13 points to an immutable instance-attribute row, or zero.
+// Object header word 13 points to its material-attribute row, or zero.
 void material_instance_attributes(uint object_header) {
 #if VORK_ATTRIBUTES > 0
     let row=material_words[object_header+13u];

@@ -6,7 +6,7 @@ use vork_scene::v2;
 pub(super) struct Images {
     sources: Vec<Source>,
     animation: crate::animation::Plan,
-    fps: f32,
+    fps: vork_time::Time,
     max_side: u32,
 }
 struct Source {
@@ -65,28 +65,34 @@ impl Images {
         writeln!(shader,"fn environment_image_extent(slot:u32)->vec2<i32> {{switch slot {{{sizes} default: {{return vec2(1);}}}}}}\nfn environment_image_modes(slot:u32)->vec3<u32> {{switch slot {{{modes} default: {{return vec3(0u);}}}}}}\nfn environment_image_texel(slot:u32,p:vec2<i32>)->vec4<f32> {{switch slot {{{loads} default: {{return vec4(1.);}}}}}}").unwrap();
         shader.push_str(&sampling_shader());shader
     }
-    pub(super) fn identity(&self)->blake3::Hash {let mut hash=blake3::Hasher::new();for source in &self.sources {hash.update(source.identity.as_bytes());hash.update(&source.definition.time.map(f32::to_bits).unwrap_or(u32::MAX).to_le_bytes());}hash.update(self.animation.input_identity().as_bytes());hash.finalize()}
+    pub(super) fn identity(&self)->blake3::Hash {let mut hash=blake3::Hasher::new();for source in &self.sources {hash.update(source.identity.as_bytes());hash.update(&serde_json::to_vec(&source.definition.time).expect("serializable image clock"));}hash.update(self.animation.input_identity().as_bytes());hash.finalize()}
     pub(super) fn size(&self,words:&[u32])->Option<[u32;2]> {
         (!self.sources.is_empty()).then(||self.sources.iter().enumerate().fold([1,1],|size,(k,_)| {let at=words[k] as usize;[size[0].max(words[at]),size[1].max(words[at+1])]}))
     }
     pub(super) fn animated(&self)->bool {self.sources.iter().any(|s|s.media.is_some())}
-    pub(super) fn sample_key(&self,time:f32)->Vec<u8> {
+    pub(super) fn sample_key(&self,request:&vork_time::Request)->Result<Vec<u8>> {
+        let time=request.numeric()?;
         let mut result=Vec::new();
         let mut samples=self.animation.samples();self.animation.sample_into(time,&mut samples);
         for s in &self.sources {if let Some(media)=&s.media {
-            let clock=self.animation.image_time(&samples,&s.name,s.definition.time.unwrap_or(time));
-            result.extend_from_slice(&(media.lock().unwrap().frame_index(clock,self.fps) as u64).to_le_bytes());
+            let time=request.exact()?;
+            let base=s.definition.time.as_ref().map(|t|vork_time::exact::Germ::point(t.exact())).unwrap_or_else(||time.clone());
+            let clock=self.animation.image_time_exact(&samples,&time,&s.name,base)?;
+            result.extend_from_slice(&(media.lock().unwrap().frame_index_exact(&clock,self.fps)? as u64).to_le_bytes());
         }}
-        result
+        Ok(result)
     }
-    pub(super) fn words(&self,time:f32)->Result<Vec<u32>> {
+    pub(super) fn words(&self,request:&vork_time::Request)->Result<Vec<u32>> {
+        let time=request.numeric()?;
         let mut words=vec![0;self.sources.len().max(1)];
         let mut samples=self.animation.samples();self.animation.sample_into(time,&mut samples);
         for (k,s) in self.sources.iter().enumerate() {
             words[k]=words.len() as u32;
             if let Some(media)=&s.media {
-                let clock=self.animation.image_time(&samples,&s.name,s.definition.time.unwrap_or(time));
-                words.extend(encode(&s.definition,media.lock().unwrap().frame(clock,self.fps,self.max_side)?));
+                let time=request.exact()?;
+            let base=s.definition.time.as_ref().map(|t|vork_time::exact::Germ::point(t.exact())).unwrap_or_else(||time.clone());
+            let clock=self.animation.image_time_exact(&samples,&time,&s.name,base)?;
+                words.extend(encode(&s.definition,media.lock().unwrap().frame_exact(&clock,self.fps,self.max_side)?));
             } else {words.extend_from_slice(&s.pixels);}
         }
         Ok(words)

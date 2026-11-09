@@ -147,7 +147,12 @@ run the examples with a supported GPU and inspect the resulting frames.
 
 Hosted distribution jobs run `scripts/prepare-shaders` with the final binary
 (after macOS signing). It invokes the hidden `prepare-release-shaders` command:
-the ordinary setup catalogue and Slang compiler run against a no-op wgpu device,
+the ordinary setup catalogue and a bounded set of starter/example scenes run
+against a no-op wgpu device with Slang. The scene set in `scripts/prepare-shaders`
+uses normal installation at `std/final` and `std/path`, capturing installed material
+unions and linked cameras that isolated library-program jobs cannot cover.
+Shared portable artifacts deduplicate by their existing content keys; arbitrary
+authored programs and uncommon configurations still compile on demand. Preparation runs
 without opening a GPU driver, OIDN device or executing shaders. Denoiser
 preparation constructs only the renderer's pack/unpack pipelines. macOS emits Metal source;
 Linux and Windows emit SPIR-V. The bundle excludes all driver cache entries

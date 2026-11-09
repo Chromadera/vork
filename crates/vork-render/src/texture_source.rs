@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub(crate) enum TextureSource {
     File(PathBuf),
     Render(String),
-    Media { name: String, file: PathBuf, time: Option<f32> },
+    Media { name: String, file: PathBuf, time: Option<vork_time::Clock> },
 }
 impl TextureSource {
     /// Render images are rendered again every frame; file images never change.
@@ -15,7 +15,7 @@ impl TextureSource {
             Some(_) => Self::Render(name.into()),
             None => {
                 let file = PathBuf::from(image.file.as_ref().expect("validated file image"));
-                if crate::footage::is_media(&file) {Self::Media {name:name.into(),file,time:image.time}}
+                if crate::footage::is_media(&file) {Self::Media {name:name.into(),file,time:image.time.clone()}}
                 else {Self::File(file)}
             },
         }

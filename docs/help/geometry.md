@@ -22,6 +22,12 @@ Duplicate UV seams, cap partial arcs, and reverse winding for a negative sweep.
 Procedural materials: write a Slang surface program (vork help programs --all);
 use world/object position and std/procedurals rather than loading a sample scene.
 
+Normal maps use glTF/MikkTSpace: B = cross(N,T.xyz)*T.w. Derivative frames
+recover handedness from UVs and the original normal, with no image-V sign flip.
+Positive UV repeats/offsets preserve authored tangents; rotated, nonpositive-scale
+or alternate-UV maps use derivatives. Missing tangents also use derivatives.
+Use Non-Color normal textures; do not flip green to compensate for image V.
+
 <!-- all -->
 IMPLICIT SURFACE REFERENCE
 Implicit geometry uses `topology: "implicit"` and exactly one attribute naming

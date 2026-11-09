@@ -19,7 +19,7 @@ fn instance_attribute_validation() -> Result<()> {
     parse(scene())?;
     let mut v=scene(); v["nodes"][0]["instances"]["attributes"]["_paint"]=json!("missing");
     let error = format!("{:#}", parse(v).unwrap_err());
-    assert!(error.contains("unknown buffer \"missing\""), "{error}");
+    assert!(error.contains("unknown attribute buffer \"missing\""), "{error}");
     let mut v=scene(); v["geometry"]["g"]["attributes"]["_paint"]=json!("p");
     assert!(format!("{:#}",parse(v).unwrap_err()).contains("both geometry and instances"));
     let mut v=scene(); v["nodes"][0]["instances"]["attributes"].as_object_mut().unwrap().remove("_paint");
@@ -27,7 +27,7 @@ fn instance_attribute_validation() -> Result<()> {
     let mut v=scene(); v["buffers"]["paint"]=json!({"type":"u32","data":[1,2]});
     assert!(parse(v).is_err());
     let mut v=scene(); v["programs"]=json!({"update":{"source":"struct Inputs {}; void compute(ComputeContext ctx, Inputs i) {}","bindings":{"paint":"paint"},"dispatch":1,"schedule":"frame"}});
-    assert!(format!("{:#}",parse(v).unwrap_err()).contains("install-time instance attributes"));
+    parse(v)?;
     Ok(())
 }
 

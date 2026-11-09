@@ -103,6 +103,7 @@ struct CameraPolicy : IVariant {
     static const bool has_lobes = true;
     static const bool has_lit = true;
     static const uint light_types = 15u;
+    static const bool has_implicit_geometry = true;
 };
 
 #define VORK_CAMERA_SINGLE (camera_config.samples==1u)

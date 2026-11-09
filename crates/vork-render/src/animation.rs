@@ -523,6 +523,7 @@ fn actor(
         .collect();
     let mut asset = Asset::cached(doc, buffers, &clips, Path::new("."), "fixture", cache)?
         .register_native(&mut plan, doc, "actor", 0, &Default::default())?;
+    plan.finish_asset_bindings()?;
     let plan = Arc::new(plan);
     asset.attach_plan(Arc::clone(&plan));
     Ok((asset, plan))
@@ -593,7 +594,7 @@ mod sharing_tests {
         let vork_scene::NodeKind::Asset {nodes:overrides,..} = &scene.nodes[0].kind else {unreachable!()};
         let mut asset = Asset::cached(&doc.document,&[],&[],Path::new("."),"visible",&mut SourceCache::default())?
             .register_native(&mut plan,&doc.document,"actor",0,overrides)?;
-        plan.validate_asset_bindings()?;
+        plan.finish_asset_bindings()?;
         // Installation samples imported poses before final program-word binding
         // freezes and attaches the plan.
         let mut samples = plan.samples();

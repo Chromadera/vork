@@ -47,6 +47,11 @@ impl std::fmt::Display for FrameRedo {
 impl std::error::Error for FrameRedo {}
 
 pub struct FrameSlot {
+    pub(crate) nominal_frame: u32,
+    pub(crate) nominal_request: vork_time::Request,
+    pub(crate) sample_request: vork_time::Request,
+    pub(crate) previous_request: vork_time::Request,
+    pub(crate) exposure_cut: bool,
     propagation_motion: bool,
     warned_propagation_motion: bool,
     _retained_transients: std::sync::Arc<std::sync::Mutex<crate::graph::State>>,
@@ -61,6 +66,9 @@ pub struct FrameSlot {
     /// Native-resolution view for control outputs under temporal upsampling,
     /// created on first use; it shares the main view's packed planes (same transient).
     controls: Option<ViewState>,
+    /// The other spatial/temporal recording for an animated shutter. Both share
+    /// the output texture; only the selected recording supplies this exposure.
+    shutter_view: Option<ViewState>,
     capture_images: bool,
     seed_views: Vec<crate::render_images::CaptureView>,
     seed_queries: Option<wgpu::QuerySet>,
@@ -142,6 +150,8 @@ pub struct FrameSlot {
 /// An accepted queued exposure, held in its existing output entry while another
 /// slot grows. It owns the mapped-pixel lease and the original completion fence.
 pub(crate) struct CompletedFrame {
+    nominal_frame: u32,
+    nominal_request: vork_time::Request,
     time: f32,
     outputs: ReadbackOutputs,
     profile: bool,
@@ -481,7 +491,7 @@ impl FrameSlot {
         let shadow_bind = s.shadows().bind(s, d, rays.as_ref());
         r.errors.check()?;
         let image_targets: Vec<_> = s.graph.views.image_renders().map(|image| image.output.clone()).collect();
-        let frame_materials = (s.dense.is_some() || s.draws.iter().any(|d|d.computed) || s.displacement.is_some() || s.animation.has_material_bindings()
+        let frame_materials = (s.compute.as_ref().is_some_and(|c|c.has_material_attributes()) || s.dense.is_some() || s.draws.iter().any(|d|d.computed) || s.displacement.is_some() || s.animation.has_material_bindings()
             || s.material_table.has_render_images() || s.checked_shader_capacity
             || (s.rays.is_some() && s.draws.iter().any(|draw|draw.evaluated())))
         .then(|| s.material_table.frame_with_images(r, &image_targets));
@@ -526,6 +536,7 @@ impl FrameSlot {
         };
         // Shadow bundles see the complete scene, independent of the visible subtree.
         let recorder = crate::bundles::Recorder {
+            graph: &s.graph,
             transparent_instances: None,
             camera_instances: None,
             compute: compute_commands.as_ref(),
@@ -601,6 +612,7 @@ impl FrameSlot {
             )),
             view,
             controls: None,
+            shutter_view: None,
             capture_images: false,
             seed_views: Vec::new(),
             seed_queries: s.plan.effects.image_feedback.then(|| d.create_query_set(&wgpu::QuerySetDescriptor {label: Some("seed capture timestamps"), ty: wgpu::QueryType::Timestamp, count: timing::count()})),
@@ -611,6 +623,11 @@ impl FrameSlot {
             compute_commands,
             changes: Default::default(),
             reuse_values: false,
+            nominal_frame: 0,
+            nominal_request: vork_time::Request::Numeric(0.),
+            sample_request: vork_time::Request::Numeric(0.),
+            previous_request: vork_time::Request::Numeric(0.),
+            exposure_cut: false,
             exposure_shutter: s.render.motion_blur.clone(),
             receiver_masks: 0,
             sample_upload,
@@ -696,7 +713,7 @@ impl FrameSlot {
     /// Set an acquired output surface before submitting this slot.
     pub fn set_output(
         &mut self,
-        s: &InstalledScene,
+        _s: &InstalledScene,
         r: &Renderer,
         output: wgpu::Texture,
     ) -> Result<()> {
@@ -718,12 +735,7 @@ impl FrameSlot {
         );
         self.view.output_bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("encoder surface"),
-            layout: &s
-                .pipelines
-                .output_resolve(s.plan.effects)
-                .get()
-                .context("base pipelines installed")?
-                .get_bind_group_layout(1),
+            layout: &self.view.post.output_layout,
             entries: &[entry(
                 0,
                 wgpu::BindingResource::TextureView(&output.create_view(&Default::default())),
@@ -747,13 +759,27 @@ impl FrameSlot {
         self.submit_outputs(s, r, time, ReadbackOutputs::default())
     }
     /// Transfer only the packed planes required by the selected CPU outputs.
+    /// An error after exposure recording starts invalidates the installation.
+    /// Reinstall the scene before submitting through any of its frame slots;
+    /// already submitted frames may still be collected.
     pub fn submit_outputs(
         &mut self,
         s: &InstalledScene,
         r: &Renderer,
-        time: f32,
+        time: impl Into<vork_time::Request>,
         outputs: ReadbackOutputs,
     ) -> Result<()> {
+        let request=time.into();
+        let identity=request.exact()?.scale(&vork_time::exact::decimal(&s.render.fps.to_string())?)
+            .add(&vork_time::exact::Germ::point(vork_time::exact::decimal("1/2")?)).floor();
+        let index=u32::try_from(identity).context("frame index exceeds u32 identity capacity")?;
+        self.submit_indexed_outputs(s,r,index,request,outputs)
+    }
+    pub(crate) fn submit_indexed_outputs(&mut self, s: &InstalledScene, r: &Renderer, index: u32, request: vork_time::Request, outputs: ReadbackOutputs) -> Result<()> {
+        s.transients.check_recording()?;
+        let time=request.numeric()?;
+        self.nominal_request=request;
+        self.nominal_frame = index;
         if self.propagation_motion && (outputs.motion || outputs.float.motion) && !self.warned_propagation_motion {
             crate::warnings::dropped("propagation_motion", serde_json::json!({"channel":"motion","propagation":"curved"}), format!("warning: ignored image motion under authored curved propagation; motion output is zero, sampled shutter blur is retained"));
             self.warned_propagation_motion=true;
@@ -761,7 +787,7 @@ impl FrameSlot {
         self.gpu_check(r)?;
         ensure!(!self.pending, "collect this frame slot before resubmitting");
         if let Some(done) = &self.completed {
-            if done.time == time && done.outputs.contains(outputs) && outputs.contains(done.outputs)
+            if done.nominal_frame == index && done.nominal_request == self.nominal_request && done.time == time && done.outputs.contains(outputs) && outputs.contains(done.outputs)
                 && done.profile == self.profile && done.write_color == self.write_color
             {
                 // This ring entry already contains validated output. No scene work,
@@ -777,10 +803,13 @@ impl FrameSlot {
         self.submit_exposure(s, r, time, outputs)
     }
     fn controls_view(&self, s: &InstalledScene, r: &Renderer) -> Result<ViewState> {
+        self.camera_view(s, r, &s.render)
+    }
+    fn camera_view(&self, s: &InstalledScene, r: &Renderer, render: &vork_scene::Render) -> Result<ViewState> {
         ViewState::new(
             s,
             r,
-            &s.render,
+            render,
             if self.view.float_output {
                 ReadbackPrecision::Float
             } else {
@@ -824,6 +853,39 @@ impl FrameSlot {
     ) -> Result<()> {
         self.gpu_check(r)?;
         ensure!(!self.pending, "collect this frame slot before resubmitting");
+        ensure!(time.is_finite() && time >= 0., "time must be nonnegative and finite");
+        // Resolve once at the nominal exposure time, before selecting recorded
+        // spatial work. Sample-time render evaluation must not change this plan.
+        s.animation.sample_into(time, &mut self.animation_values);
+        s.animation.apply_render(&mut self.animation_values, &s.render);
+        let exposure_render = self.animation_values.render.as_ref().unwrap().clone();
+        ensure!(exposure_render.motion_blur.as_ref().is_none_or(|m| m.shutter.is_finite() && m.shutter >= 0.),
+            "animated shutter must be nonnegative and finite");
+        self.exposure_shutter = exposure_render.motion_blur.clone();
+        let (exposure_samples, visibility_samples) = crate::plan::sampling_counts(&exposure_render, true);
+        if self.view.visibility_samples != visibility_samples {
+            if self.shutter_view.is_none() {
+                self.shutter_view = Some(self.camera_view(s, r, &exposure_render)?);
+            }
+            let other = self.shutter_view.as_mut().unwrap();
+            std::mem::swap(&mut other.write_color, &mut self.view.write_color);
+            std::mem::swap(&mut self.view, other);
+            ensure!(self.view.visibility_samples == visibility_samples, "shutter recording has wrong visibility budget");
+            // These secondary producers bind the selected view's lighting globals.
+            if let (Some(volume), Some(rays)) = (&s.probes, self.rays.as_ref()) {
+                self.probes = Some(volume.slot(s, &r.device, &self.view, &self.objects, rays,
+                    self.materials.as_ref().map_or_else(||s.material_table.bind(), |m| &m.bind))?);
+            }
+            if let (Some(installed), Some(rays)) = (&s.rays, self.rays.as_mut()) {
+                if let Some(plan) = &installed.emitter_weights {
+                    let hits = rays.hits_bind(&r.device);
+                    if let Some(slot) = &mut rays.emitter_weights {
+                        slot.prepare(plan, s, &r.device, &self.view.lighting, &self.objects,
+                            self.materials.as_ref().map_or_else(||s.material_table.records(), |m| &m.records), hits);
+                    }
+                }
+            }
+        }
         self.simulation_checkpoint = None;
         ensure!(self.probe_generation==s.reservations.probe_pages,"frame slot has stale probe support; include every slot in redo_frame");
         self.submitted_time = time;
@@ -850,6 +912,7 @@ impl FrameSlot {
         if let Some(fibre) = &s.fibre {drop(fibre.storage());}
         // One submitter keeps shared frame/sample resources in queue order.
         let mut image_changes = s.transients.submit.lock().unwrap();
+        s.transients.record(|| {
         // Missing pages make this layout provisional. Keep its bitmap until
         // a drained retry invalidates captures: later slots can reuse captures made
         // before collection discovers the miss, without issuing new shadow reads.
@@ -865,10 +928,6 @@ impl FrameSlot {
         self.view.color_enabled = self.view.write_color || outputs.color || outputs.float.color || (outputs.aovs && !self.view.aovs.is_empty());
         self.capture_images = self.view.color_enabled || s.capture_controls;
         let read_pixels = outputs.any();
-        ensure!(
-            time.is_finite() && time >= 0.,
-            "time must be nonnegative and finite"
-        );
         // Keep tile history and all shutter samples in queue submission order.
         // Upload buffers and caster bundles remain private to this slot.
         let retained_shadows = s.shadows();
@@ -876,31 +935,29 @@ impl FrameSlot {
             .changes
             .lock()
             .expect("shadow submission poisoned");
-        let camera = s.animation.camera_at(time, s.camera);
-        let previous_camera = s
-            .animation
-            .camera_at((time - 1. / s.render.fps).max(0.), s.camera);
-        s.animation.sample_into(time, &mut self.animation_values);
-        s.animation.apply_render(&mut self.animation_values, &s.render);
-        let frame_motion_blur = self.animation_values.render.as_ref().unwrap().motion_blur.clone();
-        self.exposure_shutter = frame_motion_blur.clone();
+        self.exposure_cut=if s.animation.has_camera_tracks() {
+            let nominal=self.nominal_request.exact()?;
+            let previous=self.nominal_request.previous(s.render.fps)?.exact()?;
+            s.animation.clamp_camera_request(&nominal,&previous,s.camera)?!=previous
+        }else{false};
+        let frame_motion_blur = self.exposure_shutter.clone();
         let shutter = frame_motion_blur.as_ref();
         // Geometric controls describe the nominal frame, not an exposure integral.
         // Static decoupled colour collects spatial visibility samples in one dispatch;
         // shutter steps retain scene-time strata in the exposure loop.
         let count = if self.view.color_enabled {
-            s.plan.exposure_samples as usize
+            exposure_samples as usize
         } else {
             1
         };
-        let span = if camera != previous_camera {
+        let span = if self.exposure_cut {
             0.
         } else {
-            shutter.map_or(0., |v| v.shutter / s.render.fps)
+            shutter.map_or(0., |v| v.shutter / s.render.fps.as_f32())
         };
         // Temporal colour is jittered (and may be upsampled): controls come
         // from one unjittered native-resolution pass.
-        let nominal_controls = crate::plan::nominal_control_pass(count as u32, false, s.render.motion_blur.is_some())
+        let nominal_controls = crate::plan::nominal_control_pass(count as u32, false, shutter.is_some_and(|m| m.shutter > 0.))
             && (outputs.depth_ids
                 || outputs.normals
                 || outputs.motion
@@ -934,7 +991,7 @@ impl FrameSlot {
         let batch = count > 1 && self.can_batch_samples(s)
             && (r.adapter_info.backend != wgpu::Backend::Metal
                 || (count <= constants::METAL_BATCH_SAMPLES
-                    && s.plan.visibility_samples <= vork_slang::registry::MERGE_BATCH
+                    && self.view.visibility_samples <= vork_slang::registry::MERGE_BATCH
                     && group_ends[..samples - 1].iter().all(|end| !end)
                     && !self.view.recording().steps.iter().any(crate::graph::Step::separates)));
         let mut finish_workers = batch.then(|| r.command_finish
@@ -953,45 +1010,51 @@ impl FrameSlot {
             }
         }
         let offset = shutter.map_or(0., |s| s.position.offset());
-        let (lower, upper) = s.animation.camera_bounds(time);
-        let clamp = |t: f32| t.max(0.).clamp(lower, upper);
-        let sample_times: Vec<_> = (0..count).map(|i|
-            clamp(time + (crate::sampling::shutter_time(i,count)-0.5+offset)*span))
-            .chain(nominal_controls.then_some(time)).collect();
+        let exact = !s.footage.is_empty() || s.compute.is_some() || s.animation.has_camera_tracks() || s.environment.has_media() || s.animation.has_discrete_tracks();
+        let nominal=exact.then(||self.nominal_request.exact()).transpose()?;
+        let exact_span=exact.then(|| -> Result<_> {Ok(vork_time::exact::ieee(if self.exposure_cut {0.}else{shutter.map_or(0.,|s|s.shutter)})?
+            / vork_time::exact::decimal(&s.render.fps.to_string())?)}).transpose()?;
+        let request_at=|n:u64,d:u64| -> Result<vork_time::Request> {
+            let Some(nominal)=&nominal else {
+                return Ok(vork_time::Request::Numeric((time+(n as f32/d as f32-0.5+offset)*span).max(0.)));
+            };
+            let position=vork_time::exact::Rational::new(n.into(),d.into())-vork_time::exact::decimal("1/2")?+vork_time::exact::ieee(offset)?;
+            let requested=nominal.add(&vork_time::exact::Germ::point(position*exact_span.as_ref().unwrap()));
+            let zero=vork_time::exact::decimal("0")?;
+            let requested=if requested.compare_point(&zero).is_lt() {vork_time::exact::Germ::point(zero)}else{requested};
+            Ok(vork_time::Request::Exact(s.animation.clamp_camera_request(nominal,&requested,s.camera)?))
+        };
+        let sample_requests:Vec<_>=(0..count).map(|i|request_at(2*crate::sampling::shutter_index(i,count) as u64+1,2*count as u64))
+            .chain(nominal_controls.then(||Ok(self.nominal_request.clone()))).collect::<Result<_>>()?;
+        let sample_times:Vec<_>=sample_requests.iter().map(|request|request.numeric()).collect::<Result<_>>()?;
         if self.computed_geometry.iter().any(Option::is_some) {
-            let historical_times: Vec<_> = sample_times.iter().map(|&sample_time| {
-                let mut sampled = s.animation.samples();
-                let mut nodes = values::sample_storage(&s.nodes);
-                let mut worlds: Vec<_> = s.nodes.iter().map(|n| n.world).collect();
-                values::sample_frame(s,sample_time,&mut sampled,&mut nodes,&mut worlds)?;
-                s.animation.apply_render(&mut sampled,&s.render);
-                let fps = sampled.render.as_ref().unwrap().fps;
-                let cut = s.animation.camera_at(time,s.camera) != s.animation.camera_at((time-1./fps).max(0.),s.camera);
-                Ok(if cut {sample_time} else {(sample_time-1./fps).max(0.)})
+            let historical_times:Vec<_>=sample_requests.iter().map(|t| {
+                let request=t.clone();
+                if self.exposure_cut {Ok(request)}else{request.previous(s.render.fps)}
             }).collect::<Result<_>>()?;
             crate::computed_geometry::prepare_history(r,s,&self.computed_geometry,&historical_times,&mut self.simulation_checkpoint)?;
         }
         if let Some(compute)=&s.compute {
-            compute.plan_requests(&mut compute.cursor.lock().expect("compute cursor poisoned"), sample_times.iter().copied())?;
+            compute.plan_requests(&mut compute.cursor.lock().expect("compute cursor poisoned"), sample_requests.iter().cloned())?;
         }
         for i in 0..count {
             if let Some(compute)=&s.compute {
-                compute.consume_request(&mut compute.cursor.lock().expect("compute cursor poisoned"), sample_times[i])?;
+                compute.consume_request(&mut compute.cursor.lock().expect("compute cursor poisoned"), sample_requests[i].clone())?;
             }
             self.view.sample_index = i;
             if batch && deferred_queries {
                 self.queries = self.sample_queries[i].clone();
             }
-            let midpoint = time + (crate::sampling::shutter_time(i, count) - 0.5 + offset) * span;
             let sample_time = sample_times[i];
-            let half = span / count.max(1) as f32 * 0.5;
+            self.sample_request=sample_requests[i].clone();
+            let stratum=crate::sampling::shutter_index(i,count) as u64;
             // Record the scheduler's actual domain, including animated shutter
             // values and independently clamped endpoints at scene zero/cuts.
             self.view.composite_shutter = [
-                clamp(time + (offset - 0.5) * span),
-                clamp(time + (offset + 0.5) * span),
-                clamp(midpoint - half),
-                clamp(midpoint + half),
+                request_at(0,1)?.numeric()?,
+                request_at(1,1)?.numeric()?,
+                request_at(stratum,count as u64)?.numeric()?,
+                request_at(stratum+1,count as u64)?.numeric()?,
             ];
             self.view.composite_steps = if span > 0. { count as u32 } else { 1 };
             let encoder = self.encode_sample(
@@ -1037,6 +1100,7 @@ impl FrameSlot {
                 self.queries = self.sample_queries[count].clone();
             }
             self.view.color_enabled = false;
+            self.sample_request=self.nominal_request.clone();
             let encoder = self.encode_sample(s, r, time, time, read_pixels, &mut shadow_changes, &mut image_changes, batch, true, recording.take())?;
             recording = self.finish_sample(r, encoder, finish_workers.as_mut(), group_ends[self.view.sample_index], validation_group_size);
             cpu += self.cpu_ms;
@@ -1070,6 +1134,7 @@ impl FrameSlot {
         self.finish_ms = finish;
         self.gpu_check(r)?;
         Ok(())
+        })
     }
     fn encode_sample(
         &mut self,
@@ -1099,8 +1164,8 @@ impl FrameSlot {
         self.read_pixels = read_pixels;
         let start = Instant::now();
         self.view.queries = self.queries.clone();
-        if s.environment.animated() && shadow_changes.changed(values::LightingKey::EnvironmentInputs, &s.environment.sample_key(time)?) {
-            if let Err(error) = s.environment.update(r,time,shadow_changes) {
+        if s.environment.animated() && shadow_changes.changed(values::LightingKey::EnvironmentInputs, &s.environment.sample_key(&self.sample_request)?) {
+            if let Err(error) = s.environment.update(r,&self.sample_request,shadow_changes) {
                 shadow_changes.changed(values::LightingKey::EnvironmentInputs, &[]);
                 shadow_changes.changed(values::LightingKey::EnvironmentRadiance, &[]);
                 return Err(error);
@@ -1116,21 +1181,13 @@ impl FrameSlot {
 
         }
         let (mut upload_bytes, mut uploads, _view, uniform) =
-            match self.prepare_values(s, r, time, frame_time, shadow_changes) {
-                Ok(values) => values,
-                Err(error) => {
-                    // Preparation can reject computed data before its queued CPU
-                    // uploads reach the GPU. Retrying must republish those values
-                    // and rebuild spatial history, not retain speculative keys.
-                    self.changes = Default::default();
-                    *shadow_changes = Default::default();
-                    return Err(error);
-                }
-            };
+            self.prepare_values(s, r, self.sample_request.clone(), frame_time, shadow_changes)?;
         let mut media_updates=Vec::new();
         for image in s.footage.values().filter(|image|image.per_sample) {
-            let clock=s.animation.image_time(&self.animation_values,&image.name,image.time.unwrap_or(time));
-            let frame=image.frame_index(clock,s.render.fps)? as u64;
+            let request=self.sample_request.exact()?;
+            let base=image.time.as_ref().map(|t|vork_time::exact::Germ::point(t.exact())).unwrap_or_else(||request.clone());
+            let clock=s.animation.image_time_exact(&self.animation_values,&request,&image.name,base)?;
+            let frame=image.frame_index(&clock,s.render.fps)? as u64;
             if image_changes.changed(values::ChangeKey::ImageClock(image.name.clone()),&frame.to_le_bytes()) {
                 image_changes.image_revision+=1;
                 media_updates.push((image,clock));
@@ -1139,6 +1196,9 @@ impl FrameSlot {
         // The installed volume follows shared submission-ordered lighting history.
         let probe_geometry=s.probes.as_ref().is_some_and(|volume| {
             let mut key=crate::probes::geometry_key(&self.object_values,volume.geometry_timed.then_some(time));
+            if volume.grid.visibility_policy[0] == 0 {
+                key.extend_from_slice(bytemuck::cast_slice(&[uniform.temporal[2].to_bits(),uniform.temporal[0].to_bits()]));
+            }
             // Angular subsets differ even when replay clamps adjacent shutter
             // times to the same pose. Moments and lighting share this phase.
             if volume.grid.visibility_policy[0]>1 {key.extend_from_slice(&uniform.temporal[0].to_bits().to_le_bytes());}
@@ -1147,6 +1207,9 @@ impl FrameSlot {
         });
         let mut probes = s.probes.as_ref().is_some_and(|volume| {
             let mut key = crate::probes::key(&self.object_values, &self.evaluated_lights, &uniform, volume.timed.then_some(time));
+            if volume.grid.visibility_policy[0] == 0 {
+                key.extend_from_slice(bytemuck::cast_slice(&[uniform.temporal[2].to_bits(),uniform.temporal[0].to_bits()]));
+            }
             if volume.grid.visibility_policy[0]>1 {key.extend_from_slice(&uniform.temporal[0].to_bits().to_le_bytes());}
             // Angular radiance can change without changing the mean. Consume
             // the retained producer revision, rather than its animation clock.
@@ -1154,8 +1217,9 @@ impl FrameSlot {
             crate::probes::program_key(&mut key, &uniform, volume.dependencies, image_changes.image_revision + u64::from(s.plan.effects.image_feedback && self.view.sample_index == 0));
             shadow_changes.changed(values::LightingKey::Probes, &key)
         });
-        let mut capture =
-            self.capture_images && self.view.sample_index == 0 && !self.image_views.is_empty();
+        // CaptureView owns the complete dependency comparison. Equal numeric
+        // poses can still select different exact footage/environment frames.
+        let mut capture = self.capture_images && !self.image_views.is_empty();
         let seed = capture && s.plan.effects.image_feedback;
         if seed { probes = s.probes.is_some(); }
         let mut seed_views = std::mem::take(&mut self.seed_views);
@@ -1211,7 +1275,7 @@ impl FrameSlot {
             timing::boundary(r, &mut encoder, &self.queries, timing::sample_query());
         }
         for (image,clock) in media_updates {
-            if let Err(error)=image.encode(r,&mut encoder,clock,s.render.fps) {
+            if let Err(error)=image.encode(r,&mut encoder,&clock,s.render.fps) {
                 image_changes.changed(values::ChangeKey::ImageClock(image.name.clone()),&[]);
                 return Err(error);
             }
@@ -1228,7 +1292,7 @@ impl FrameSlot {
         if sample==0 { if let Some(compute)=&self.compute {encoder.clear_buffer(&compute.errors,0,None);} }
         if !self.reuse_values {
         if let (Some(compute), Some(cursor)) = (&s.compute, compute_cursor.as_mut()) {
-            if let Some(checkpoint) = compute.advance_with(&mut encoder, cursor, if compute.has_simulation() || s.draws.iter().any(|d|d.computed) {time} else {frame_time}, |encoder| {
+            if let Some(checkpoint) = compute.advance_with(&mut encoder, cursor, &self.sample_request, |encoder| {
                 self.sample_segments.cut(r, encoder);
             })? {
                 // At most one bounded host snapshot per exposure, including shutter strata.
@@ -1237,6 +1301,10 @@ impl FrameSlot {
         }
         if let Some(cursor) = compute_cursor.as_ref() {
             self.changes.placement_revision = cursor.placement_revision;
+            if let Some(compute) = s.compute.as_ref().filter(|c|c.has_material_attributes()) {
+                compute.publish_material_attributes(&mut encoder, cursor, &mut self.changes,
+                    &self.materials.as_ref().expect("computed material rows").records);
+            }
         }
         if let Some(compute) = &self.compute {
             compute.encode(&mut encoder);
@@ -1256,11 +1324,16 @@ impl FrameSlot {
         self.changes.bytes = upload_bytes;
         self.changes.uploads = uploads;
 
+        // GPU material rows can publish a different generation at the same
+        // clock. Shared lighting captures consume that publication too.
+        let material_attributes_changed = self.changes.dirty(values::ChangeKey::MaterialAttributes);
+        let probe_geometry = probe_geometry || material_attributes_changed;
         let bits = crate::graph::RunBits {
             color: self.view.color_enabled,
             final_sample: self.view.sample_index + 1 == self.view.sample_count,
-            probes,
-            fibre:seed || shadow_changes.dirty(values::LightingKey::Fibre),
+            probes: probes || (material_attributes_changed && s.probes.is_some()),
+            fibre:seed || shadow_changes.dirty(values::LightingKey::Fibre)
+                || (material_attributes_changed && s.fibre.is_some()),
             images: capture,
             pixels: read_pixels,
         };
@@ -1283,11 +1356,13 @@ impl FrameSlot {
             if step.pass==Pass::Compositor && s.footage.values().any(|i|i.final_compositor) {
                 let mut nominal=s.animation.samples();s.animation.sample_into(frame_time,&mut nominal);
                 for image in s.footage.values().filter(|i|i.final_compositor) {
-                    let clock=s.animation.image_time(&nominal,&image.name,image.time.unwrap_or(frame_time));
-                    let frame=image.frame_index(clock,s.render.fps)? as u64;
+                    let request=self.nominal_request.exact()?;
+                    let base=image.time.as_ref().map(|t|vork_time::exact::Germ::point(t.exact())).unwrap_or_else(||request.clone());
+                    let clock=s.animation.image_time_exact(&nominal,&request,&image.name,base)?;
+                    let frame=image.frame_index(&clock,s.render.fps)? as u64;
                     if image_changes.changed(values::ChangeKey::ImageClock(image.name.clone()),&frame.to_le_bytes()) {
                         image_changes.image_revision+=1;
-                        if let Err(error)=image.encode(r,&mut encoder,clock,s.render.fps) {
+                        if let Err(error)=image.encode(r,&mut encoder,&clock,s.render.fps) {
                             image_changes.changed(values::ChangeKey::ImageClock(image.name.clone()),&[]);return Err(error);
                         }
                     }
@@ -1302,7 +1377,7 @@ impl FrameSlot {
                     if let Some(volume) = &s.probes { volume.clear(&mut encoder); }
                     if let Some(fibre) = &s.fibre { fibre.clear(&mut encoder); }
                     for (i, (view, image)) in seed_views.iter_mut().zip(s.graph.views.image_renders()).enumerate() {
-                        view.encode(&mut encoder, r, &s.environment, self.seed_queries.as_ref().expect("seed capture timestamps installed"), image, i + 1 == seed_views_len, &mut self.denoise_ms, &mut self.sample_segments)?;
+                        view.encode(&mut encoder, r, &s.environment, self.seed_queries.as_ref().expect("seed capture timestamps installed"), image, i + 1 == seed_views_len, &mut self.denoise_ms, &mut self.sample_segments, &mut self.changes)?;
                     }
                     if self.profile {
                         r.timestamp_marker.get().expect("seed timing marker initialized")
@@ -1314,7 +1389,7 @@ impl FrameSlot {
                 Pass::Fibre => {if let (Some(p),Some(slot))=(&s.fibre,&self.fibre) {slot.encode(&p.storage(),&mut encoder,&self.queries);}},
                 Pass::Probes => {
                     if let (Some(volume), Some(slot)) = (&s.probes, &self.probes) {
-                        volume.encode(&mut encoder, slot, &self.queries, probe_geometry);
+                        volume.encode(&mut encoder, slot, &self.queries, probe_geometry, self.view.sample_count as u32);
                     }
                 }
                 Pass::Images => {
@@ -1326,7 +1401,7 @@ impl FrameSlot {
                         .enumerate()
                     {
                         if image_dirty[i] {
-                            view.encode(&mut encoder, r, &s.environment, &self.queries, image, i == last, &mut self.denoise_ms, &mut self.sample_segments)?;
+                            view.encode(&mut encoder, r, &s.environment, &self.queries, image, i == last, &mut self.denoise_ms, &mut self.sample_segments, &mut self.changes)?;
                         }
                     }
                 }
@@ -1338,7 +1413,7 @@ impl FrameSlot {
                         }
                     }
                     if let Some(stage) = &self.view.post.denoiser {
-                        stage.run(r, &mut encoder, self.view.sample_count, s.display_program.denoise_scale(frame_time), &mut self.denoise_ms, &mut self.sample_segments)?;
+                        stage.run(r, &mut encoder, self.view.sample_count, 1., &mut self.denoise_ms, &mut self.sample_segments)?;
                     }
                 }
                 Pass::Readback => self.ring.encode(&mut encoder, self.view.readback_outputs),
@@ -1471,6 +1546,8 @@ impl FrameSlot {
         let readback = self.collect_readback(r)?;
         if independent {
             self.completed = Some(CompletedFrame {
+                nominal_frame: self.nominal_frame,
+                nominal_request: self.nominal_request.clone(),
                 time: self.submitted_time,
                 outputs: self.view.readback_outputs,
                 profile: self.profile,
@@ -1893,6 +1970,45 @@ mod profiling_tests {
         streamed.submit(&installed, &renderer, 0.75)?;
         assert_eq!(expected, streamed.collect(&renderer)?.rgba);
         renderer.errors.check()?;
+        Ok(())
+    }
+
+    // This contract uses private corpus assets; private CI opts in explicitly.
+    #[cfg(vork_private_tests)]
+    #[test]
+    fn shutter_zero_crossings_match_fixed_exposures_with_captures() -> Result<()> {
+        let Some(r) = crate::test_renderer()? else { return Ok(()) };
+        let mut input: serde_json::Value = vork_scene::v2::from_test_str(include_str!(
+            "../../../scenes/render-image-monitor.json"))?;
+        input["render"]["resolution"] = serde_json::json!([32,32]);
+        input["render"]["settings"] = serde_json::json!({"integrator":"raster","samples":4,
+            "seed":11,"denoiser":null,"fast_gi":null,"reflections":"environment"});
+        input["render"]["motion_blur"] = serde_json::json!({"shutter":0});
+        input["render"]["fps"] = 1.into();
+        input["render"]["duration"] = 3.into();
+        for image in input["images"].as_object_mut().unwrap().values_mut() {
+            image["render"]["resolution"] = serde_json::json!([16,16]);
+        }
+        let track = serde_json::json!({"tracks":[{"path":["render","motion_blur","shutter"],
+            "keys":[[0,0],[1,1],[2,0]]}]});
+        input["animation"].as_array_mut().unwrap().push(track);
+        let installed = r.install(crate::test_scene(input.clone(), Path::new("."))?, Path::new("."))?;
+        assert_eq!((installed.plan.exposure_samples,installed.plan.visibility_samples),(4,4));
+        let mut slot = installed.create_frame_slot(&r, Default::default())?;
+        for (time,width) in [(0.,0.),(0.5,0.5),(1.,1.),(2.,0.),(1.,1.),(0.,0.)] {
+            slot.submit(&installed,&r,time)?;
+            let actual = slot.collect(&r)?;
+            assert_eq!(slot.view.sample_count,if width>0. {4} else {1});
+            assert_eq!(slot.view.visibility_samples,if width>0. {1} else {4});
+            let mut fixed = input.clone();
+            fixed["animation"].as_array_mut().unwrap().pop();
+            fixed["render"]["motion_blur"] = if width>0. {serde_json::json!({"shutter":width})} else {serde_json::Value::Null};
+            let reference = r.install(crate::test_scene(fixed, Path::new("."))?, Path::new("."))?;
+            let mut reference_slot = reference.create_frame_slot(&r,Default::default())?;
+            reference_slot.submit(&reference,&r,time)?;
+            assert_eq!(actual.rgba,reference_slot.collect(&r)?.rgba,"shutter {width} at {time}");
+        }
+        r.errors.check()?;
         Ok(())
     }
 

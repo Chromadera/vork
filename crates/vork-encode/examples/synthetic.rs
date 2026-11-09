@@ -52,7 +52,7 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
         },
         1920,
         1080,
-        24,
+        vork_encode::Time::integer(24),
         EncodeSettings::default(),
         path,
         3,

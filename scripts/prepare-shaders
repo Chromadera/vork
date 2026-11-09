@@ -14,11 +14,27 @@ p.add_argument('--output', type=Path, required=True)
 p.add_argument('--cache', type=Path, help='Reuse an existing setup cache; defaults to an empty temporary store')
 a = p.parse_args()
 binary = a.binary.resolve()
+root = Path(__file__).resolve().parents[1]
+# Bound coverage by reachable scene configurations, not a material-feature
+# Cartesian product. These exercise the starter, imported textured/skinned
+# materials, mixed metal/transmission and explicit physical-camera links.
+scenes = [root / 'crates/vork-scene/src/starter.json']
+# Small feature fixtures live in the private release checkout, not the public
+# source export. Its presence opts into the complete, checked fixture set.
+if (root / 'scenes').is_dir():
+    scenes += [root / name for name in (
+        'examples/first-scene.json',
+        'examples/orbit.json',
+        'examples/jitter-aa.json',
+        'examples/sampled-shadows.json',
+        'scenes/path-cornell.json',
+        'scenes/hair/chiang-color.json',
+    )]
 if a.output.exists():
     p.error('output already exists')
 with tempfile.TemporaryDirectory(prefix='vork-release-shaders-') as temporary:
     cache = a.cache.resolve() if a.cache else Path(temporary)
-    subprocess.run([str(binary), 'prepare-release-shaders'], env=dict(os.environ, VORK_CACHE_DIR=str(cache)), check=True)
+    subprocess.run([str(binary), 'prepare-release-shaders', *map(str, scenes)], env=dict(os.environ, VORK_CACHE_DIR=str(cache)), check=True)
     # A previously packaged binary can read its immutable assets instead of
     # writing duplicates into the mutable store. Retain those entries too.
     export(binary, [binary.parent / 'shaders', cache], a.output)

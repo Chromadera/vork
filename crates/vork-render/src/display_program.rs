@@ -10,7 +10,6 @@ pub(crate) struct Prepared {
     words: Vec<u32>,
     animation: Option<programs::InputAnimation>,
     sources: Vec<ImageSource>,
-    denoise_exposure: Option<usize>,
 }
 /// One `Image` input as linear RGBA32F texels.
 struct ImageData {
@@ -119,12 +118,7 @@ pub(crate) fn prepare(
         Some(name) => programs::InputAnimation::with_discrete(scene, base, name, &program.inputs, &mut words, true)?,
         None => None,
     };
-    // These bundled displays define exposure in stops before their view transform.
-    // A custom display has no implied radiometric contract.
-    let denoise_exposure = matches!(name.as_str(), "std/agx" | "std/standard" | "blender/filmic")
-        .then(|| program.inputs.fields.iter().find(|f| f.name == "exposure").map(|f| f.offset)).flatten();
     Ok(Prepared {
-        denoise_exposure,
         animation,
         program,
         words,
@@ -149,34 +143,6 @@ fn library_image(image: vork_scene::libraries::ProgramImage, executable: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[ignore = "requires real GPU and pinned Slang"]
-    fn denoiser_preexposure_uses_only_declared_display_units() -> Result<()> {
-        let r = Renderer::new()?;
-        for program in ["std/agx", "std/standard", "blender/filmic", "custom"] {
-            for exposure in [-5., 0., 17.] {
-                let scene: v2::Scene = serde_json::from_value(serde_json::json!({
-                    "version":2, "nodes":[{"type":"camera"}],
-                    "render":{"display":{"program":program,"inputs":{"exposure":exposure}}},
-                    "programs":{"custom":{"source":"struct Inputs {float exposure=0.;}; float3 display(DisplayContext ctx, Inputs i) {return ctx.color;}"}}
-                }))?;
-                let stage = prepare(&r, &scene, Path::new("."))?.install(&r)?;
-                assert_eq!(stage.denoise_scale(0.), if program == "custom" {1.} else {2_f32.powf(exposure)});
-            }
-        }
-        let scene: v2::Scene = serde_json::from_value(serde_json::json!({
-            "version":2, "nodes":[{"type":"camera"}],
-            "render":{"display":"view", "duration":1},
-            "materials":{"view":{"program":"std/standard","inputs":{"exposure":0}}},
-            "animation":[{"tracks":[{"path":["materials","view","inputs","exposure"],"keys":[[0,0],[1,4]]}]}]
-        }))?;
-        let stage = prepare(&r, &scene, Path::new("."))?.install(&r)?;
-        assert_eq!(stage.denoise_scale(0.), 1.);
-        assert_eq!(stage.denoise_scale(0.5), 4.);
-        assert_eq!(stage.denoise_scale(1.), 16.);
-        Ok(())
-    }
 
     #[test]
     fn filmic_uses_companion_file_and_reports_expected_path() -> Result<()> {
@@ -240,7 +206,6 @@ pub(crate) struct Stage {
     words: wgpu::Buffer,
     images: Vec<wgpu::TextureView>,
     input_words: Vec<u32>,
-    denoise_exposure: Option<usize>,
     animation: Option<programs::InputAnimation>,
 }
 impl Prepared {
@@ -437,22 +402,11 @@ fn {sample}(slot:u32,uv:vec2<f32>,dx:vec2<f32>,dy:vec2<f32>)->vec4<f32> {{
             words,
             images,
             input_words: self.words,
-            denoise_exposure: self.denoise_exposure,
             animation: self.animation,
         })
     }
 }
 impl Stage {
-    /// Fixed authored pre-exposure, independent of image statistics. Return to
-    /// scene-linear units after filtering, before compositing or float output.
-    pub(crate) fn denoise_scale(&self, time: f32) -> f32 {
-        let Some(offset) = self.denoise_exposure else { return 1.; };
-        let mut words = self.input_words.clone();
-        if let Some(animation) = &self.animation { animation.words(time, &mut words); }
-        // Keep both the scale and its reciprocal normal in FP32.
-        let limit = (1 - f32::MIN_EXP) as f32;
-        2_f32.powf(f32::from_bits(words[offset]).clamp(-limit, limit))
-    }
     pub(crate) fn frame_inputs(&self, r: &Renderer) -> Option<wgpu::Buffer> {
         self.animation.as_ref()?;
         Some(init(&r.device, "animated display inputs", bytemuck::cast_slice(&self.input_words),

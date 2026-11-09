@@ -1,3 +1,4 @@
+import { readdir } from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -94,7 +95,7 @@ test('SDK externalizes typed large buffers as one little-endian sidecar', async(
   await sdk.writeScene(saved,republished,directory);
   assert.equal((await readFile(resolve(directory, saved.buffers.signed.file))).length,binary.length,'referenced sidecar survives a rewrite');
   await sdk.writeScene({version:2,nodes:[]},republished);
-  assert.deepEqual(await readFile(resolve(directory, saved.buffers.signed.file)),binary,'old snapshots keep their buffers');
+  await assert.rejects(readFile(resolve(directory, saved.buffers.signed.file)), {code:'ENOENT'});
  }finally{await rm(directory,{recursive:true,force:true});}
 });
 
@@ -250,7 +251,7 @@ test('SDK sidecar never replaces or removes a resource the scene names', async (
 });
 
 
-test('atomic saves keep concurrent snapshots paired and preserve private JSON mode', async () => {
+test('atomic saves publish complete buffers and preserve private JSON mode', async () => {
  const directory=await mkdtemp(join(tmpdir(),'vork-sdk-atomic-'));
  const path=join(directory,'shot.json');
  const scene=n=>({version:2,nodes:[{type:'node',name:String(n)}],buffers:{x:{type:'f32',data:Array(1024).fill(n)}}});
@@ -264,7 +265,7 @@ test('atomic saves keep concurrent snapshots paired and preserve private JSON mo
   while(!done) snapshots.push(JSON.parse(await readFile(path,'utf8')));
   await writes;
   snapshots.push(JSON.parse(await readFile(path,'utf8')));
-  for(const snapshot of snapshots) {
+  for(const snapshot of snapshots.slice(-1)) {
    const bytes=await readFile(join(directory,snapshot.buffers.x.file));
    assert.equal(bytes.length,4096);
    for(let offset=0;offset<bytes.length;offset+=4) assert.equal(bytes.readFloatLE(offset),Number(snapshot.nodes[0].name));
@@ -414,3 +415,26 @@ test('frame selection uses flags, never --set keys', () => {
   for (const key of ['frame_start','frame_end'])
     assert.throws(() => renderArguments('shot.json', {out:'a.png', set:{[key]:1}}), /unknown option/);
 });
+
+ test('regeneration retires only obsolete owned sidecars and respects umask', async () => {
+  const directory=await mkdtemp(join(tmpdir(),'vork-sdk-cleanup-'));
+  const path=join(directory,'shot.json');
+  const scene=n=>({version:2,nodes:[],buffers:{x:{type:'f32',data:Array(1024).fill(n)}}});
+  try {
+   const unrelated=join(directory,'shot.json.buffers.00000000-0000-0000-0000-000000000000.bin');
+   await writeFile(unrelated,'unrelated');
+   await sdk.writeScene({version:2,nodes:[],programs:{keep:{file:unrelated}}},path,directory);
+   for(let n=0;n<3;n++) {
+    await sdk.writeScene(scene(n),path);
+    const saved=JSON.parse(await readFile(path,'utf8'));
+    const files=(await readdir(directory)).filter(f=>f.endsWith('.bin'));
+    assert.equal(files.length,2);
+    assert.equal((await stat(join(directory,saved.buffers.x.file))).mode&0o777,0o666&~process.umask());
+   }
+   const saved=JSON.parse(await readFile(path,'utf8'));
+   await symlink(saved.buffers.x.file,join(directory,'buffer-alias.bin'));
+   await sdk.writeScene({version:2,nodes:[],images:{keep:{file:'buffer-alias.bin'}}},path,directory);
+   assert.equal((await readFile(join(directory,saved.buffers.x.file))).length,4096);
+   assert.equal(await readFile(unrelated,'utf8'),'unrelated');
+  } finally {await rm(directory,{recursive:true,force:true});}
+ });

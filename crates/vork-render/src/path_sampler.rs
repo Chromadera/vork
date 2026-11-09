@@ -271,7 +271,7 @@ import path_sampler;
     var s=path_sampler(pixel,index,300u,0x5eedu);s.vertex=id.x%5u;
     output[id.x*4u]=path_camera_sample(s);
     output[id.x*4u+1u]=path_scatter(s);
-    output[id.x*4u+2u]=float4(path_light(s),path_environment(s).x);
+    output[id.x*4u+2u]=float4(path_light(s).xyz,path_environment(s).x);
     output[id.x*4u+3u]=float4(path_triangle(s).x,path_opacity(s),path_subsurface_entry(s),path_roulette(s));
 }"#;
     let entries = [pipelines::buffer_entry(0, wgpu::ShaderStages::COMPUTE, wgpu::BufferBindingType::Storage { read_only: false })];

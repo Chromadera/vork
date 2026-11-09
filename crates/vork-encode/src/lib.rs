@@ -9,6 +9,7 @@
 )]
 mod constants;
 mod pipe;
+pub use vork_time::Time;
 use anyhow::{Context, Result, ensure};
 use constants::*;
 use std::{
@@ -140,7 +141,7 @@ pub struct PreparedEncoder {
     backend: Backend,
     width: u32,
     height: u32,
-    fps: u32,
+    fps: Time,
     settings: EncodeSettings,
     path: PathBuf,
     gop_frames: u32,
@@ -326,6 +327,8 @@ impl PreparedEncoder {
                 "0",
                 "-g",
                 &gop_frames.to_string(),
+                "-video_track_timescale",
+                &fps.numerator().to_string(),
                 "-map_metadata",
                 "-1",
                 "-f",
@@ -466,7 +469,7 @@ impl Encoder {
         gpu: DeviceInfo,
         width: u32,
         height: u32,
-        fps: u32,
+        fps: Time,
         settings: EncodeSettings,
         path: impl AsRef<Path>,
         ring_depth: usize,
@@ -480,7 +483,7 @@ impl Encoder {
         backend: Backend,
         width: u32,
         height: u32,
-        fps: u32,
+        fps: Time,
         settings: EncodeSettings,
         path: impl AsRef<Path>,
     ) -> Result<PreparedEncoder> {
@@ -489,14 +492,13 @@ impl Encoder {
                 && height > 0
                 && width % 2 == 0
                 && height % 2 == 0
-                && fps > 0
-                && fps <= i32::MAX as u32,
+                && fps > Time::ZERO
+                && fps.numerator() <= i64::from(i32::MAX)
+                && fps.denominator() <= i64::from(i32::MAX),
             "dimensions must be positive/even; fps must be positive"
         );
-        let gop_frames = fps
-            .checked_mul(settings.gop_seconds)
-            .filter(|frames| *frames > 0 && *frames <= i32::MAX as u32)
-            .context("keyframe interval must fit a positive signed 32-bit frame count")?;
+        let gop_frames = u32::try_from((vork_time::exact::decimal(&fps.to_string())? * vork_time::exact::Rational::from_integer(settings.gop_seconds.into())).ceil().to_integer())?;
+        ensure!(gop_frames > 0 && gop_frames <= i32::MAX as u32, "keyframe interval must fit a positive signed 32-bit frame count");
         ensure!(
             settings.hardware_bitrate > 0 && settings.software_crf <= MAX_SOFTWARE_CRF,
             "bitrate must be positive; software CRF must be 0..51"
@@ -896,7 +898,8 @@ mod native {
         fn enc_prepare(
             w: u32,
             h: u32,
-            fps: u32,
+            fps_num: u32,
+            fps_den: u32,
             bitrate: u32,
             gop_frames: u32,
             prores: bool,
@@ -923,12 +926,12 @@ mod native {
         pub fn prepare(
             w: u32,
             h: u32,
-            fps: u32,
+            fps: Time,
             bitrate: u32,
             gop_frames: u32,
             prores: bool,
         ) -> Result<Self> {
-            let ptr = unsafe { enc_prepare(w, h, fps, bitrate, gop_frames, prores) };
+            let ptr = unsafe { enc_prepare(w, h, fps.numerator() as u32, fps.denominator() as u32, bitrate, gop_frames, prores) };
             ensure!(!ptr.is_null(), "native VideoToolbox initialization failed");
             Ok(Self(ptr))
         }

@@ -510,39 +510,14 @@ pub(crate) fn ray_shadows(scene: &Scene) -> bool {
         || scene.render.settings.integrator.subsurface_method().is_some()
 }
 
-/// Validate opacity inputs against the transport actually installed, including
-/// capability-selected shadows on imported lights.
-pub(crate) fn normalize_materials(scene: &mut Scene) {
-    if !uses_rays(scene) { return; }
-    let mut discarded=std::collections::BTreeSet::new();
-    for (name, material) in &mut scene.materials {
-        for input in ["geometry_opacity", "alpha_cutoff"] {
-            if (input!="alpha_cutoff" || material.program=="std/openpbr") && matches!(material.inputs.get(input), Some(vork_scene::v2::Input::Attribute(_))) {
-                if material.program=="std/openpbr" {
-                    crate::warnings::dropped("ray_opacity_attribute", serde_json::json!({"material":name,"input":input,"binding":material.inputs.get(input)}), format!("warning: material {name}: ignored named {input} attribute for ray visibility; using the program default"));
-                    material.inputs.remove(input);
-                } else {
-                    crate::warnings::dropped("ray_surface_attribute", serde_json::json!({"material":name,"surface":material,"input":input,"tracks":scene.animation.iter().flat_map(|layer|layer.tracks.iter().flatten()).filter(|track|matches!(track.path.as_slice(),[root,target,..] if root=="materials" && target==name)).collect::<Vec<_>>()}), format!("warning: material {name}: ignored custom surface and its material animation with named {input} attribute for ray visibility; using default OpenPBR surface"));
-                    *material=serde_json::from_value(serde_json::json!({})).expect("default material");
-                    discarded.insert(name.clone());
-                    break;
-                }
-            }
-        }
-    }
-    for layer in &mut scene.animation {
-        if let Some(tracks)=&mut layer.tracks {tracks.retain(|t|!matches!(t.path.as_slice(),[root,name,..] if root=="materials" && discarded.contains(name)));}
-    }
-}
-
 /// Production requires a ray-capable GPU. Test builds may exercise the same
 /// complete ray pipeline on software Vulkan; they never substitute screen transport.
 pub(crate) fn require_adapter(info: &wgpu::AdapterInfo, features: wgpu::Features) -> Result<()> {
     let software_test = cfg!(any(test, feature = "test-support"));
     ensure!(features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES)
         && (software_test || info.device_type != wgpu::DeviceType::Cpu),
-        "unsupported GPU: {} ({:?}); vork requires a modern GPU with hardware ray tracing and storage buffer arrays (Apple Silicon Metal or recent NVIDIA Vulkan); software adapters are supported only by test builds with complete ray-query support",
-        info.name, info.backend);
+        "unsupported GPU: {} ({:?}, {:?}); missing capabilities: {:?}. vork requires hardware ray queries and storage buffer arrays; CPU adapters are permitted only in test builds. A compute-only GPU cannot gain missing graphics/ray capabilities from container flags; use supported graphics hardware such as an NVIDIA L4 or Apple Silicon",
+        info.name, info.backend, info.device_type, (wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES) - features);
     Ok(())
 }
 
@@ -663,7 +638,7 @@ pub(crate) struct Rays {
     #[cfg(test)]
     grouped_instances: Vec<bool>,
     /// Ray topology; opacity headers use this same CandidateInstanceIndex order.
-    instances: Vec<(usize,u32)>,
+    pub(crate) instances: Vec<(usize,u32)>,
     /// Every frame slot uses the installed topology and descriptor ABI.
     placement_pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
     /// Per draw: candidates are alpha-tested (non-opaque BLAS geometry).
@@ -1164,7 +1139,7 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
     // Emission tracks update proposal mass without rebuilding acceleration
     // structures. Use the existing per-slot upload tracker for both inputs.
     let materials=f.materials.as_ref().map_or_else(||s.material_table.records(),|m|&m.records);
-    if deform_changed || objects_changed || uploaded(materials) {
+    if deform_changed || objects_changed || uploaded(materials) || f.changes.dirty(values::ChangeKey::MaterialAttributes) {
         if let (Some(slot),Some(plan))=(&rays.emitter_weights,&installed.emitter_weights) {slot.encode(plan,encoder);}
     }
     if !deform_changed && !objects_changed {

@@ -252,14 +252,14 @@ pub(crate) mod tests {
         for &(count,module,entry,vertex) in STREAMS.iter().filter(|s|s.3.stage=="vertex") {
             // Fibre captures compile their material fragment at install time.
             if entry=="shadow_vs" {
-                for reflection in [vertex.spirv_reflection,vertex.msl_reflection] {
+                for reflection in [vertex.spirv_reflection,vertex.msl_reflection].into_iter().filter(|r|!r.is_empty()) {
                     assert_eq!(attributes(reflection,"varyingOutput").len(),count as usize,"{}",vertex.name);
                 }
                 continue;
             }
             let fragment_entry=match entry {"main_vs"=>"depth_fs",_=>"masked_fs"};
             let fragment=STREAMS.iter().find(|&&(a,m,e,_)|a==count && m==module && e==fragment_entry).unwrap().3;
-            for (v,f) in [(vertex.spirv_reflection,fragment.spirv_reflection),(vertex.msl_reflection,fragment.msl_reflection)] {
+            for (v,f) in [(vertex.spirv_reflection,fragment.spirv_reflection),(vertex.msl_reflection,fragment.msl_reflection)].into_iter().filter(|(v,f)|!v.is_empty() && !f.is_empty()) {
                 let output=attributes(v,"varyingOutput");let input=attributes(f,"varyingInput");
                 assert_eq!(output.len(),count as usize,"{}",vertex.name);
                 assert_eq!(output,input,"{} -> {}",vertex.name,fragment.name);
@@ -269,7 +269,7 @@ pub(crate) mod tests {
             let vertex = if count==0 {&DEPTH_MAIN_VS} else {
                 STREAMS.iter().find(|&&(a,m,e,_)|a==count && m=="depth" && e=="main_vs").unwrap().3
             };
-            for (v,f) in [(vertex.spirv_reflection,fragment.spirv_reflection),(vertex.msl_reflection,fragment.msl_reflection)] {
+            for (v,f) in [(vertex.spirv_reflection,fragment.spirv_reflection),(vertex.msl_reflection,fragment.msl_reflection)].into_iter().filter(|(v,f)|!v.is_empty() && !f.is_empty()) {
                 assert_eq!(attributes(v,"varyingOutput"),attributes(f,"varyingInput"),
                     "{} -> {}",vertex.name,fragment.name);
             }

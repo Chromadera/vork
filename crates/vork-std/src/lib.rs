@@ -8,6 +8,7 @@ pub mod environment;
 mod sky;
 mod extrude;
 mod text;
+pub use text::input_help as text_input_help;
 
 use anyhow::{Context, Result};
 #[cfg(test)]

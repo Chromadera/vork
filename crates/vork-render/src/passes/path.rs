@@ -389,6 +389,7 @@ pub(crate) fn record(
     recorder: &mut crate::graph::Recorder,
     view: &crate::views::ViewDesc,
 ) -> Result<()> {
+    if !s.graph.runs(crate::graph::Pass::Path) {return Ok(());}
     let guides=controls.denoising_guides.as_ref();
     let render=match &view.kind {crate::views::ViewKind::Image {render,..}=>&render.settings,_=>&s.render};
     let Some(_) = render.settings.integrator.path() else { return Ok(()); };
@@ -413,7 +414,7 @@ pub(crate) fn record(
         clamp: [crate::constants::PATH_SAMPLE_CLAMP_DIRECT.to_bits(), crate::constants::PATH_SAMPLE_CLAMP_INDIRECT.to_bits(), 0, 0],
         sampling: [s.render.settings.samples, s.render.settings.seed, flags, crate::constants::PATH_ADAPTIVE_MIN_SAMPLES],
         adaptive: [crate::constants::PATH_ADAPTIVE_THRESHOLD.to_bits(), s.rays.as_ref().context("path emitter topology")?.emitters,
-            crate::constants::PATH_LIGHT_SAMPLING_THRESHOLD.to_bits(), s.light_plan.nodes.len().max(1).next_power_of_two() as u32],
+            crate::constants::PATH_LIGHT_SAMPLING_THRESHOLD.to_bits(), 0],
         boundaries: [rays_table.boundaries, rays_table.subsurface, 0, rays_table.occupancy_solids],
         environment: [s.environment.distribution_size[0], s.environment.distribution_size[1], s.render.aovs.len() as u32,
             u32::from(guides.is_some())],
@@ -443,12 +444,13 @@ pub(crate) fn record(
                 && bytes <= u64::from(d.limits().max_storage_buffer_binding_size),
             "path adaptive moments exceed device storage limit"
         );
-        Some(s.transients.buffer(
-            d,
-            "path adaptive moments",
-            bytes,
-            wgpu::BufferUsages::STORAGE,
-        ))
+        // Interleaved captures retain their own convergence
+        // history, just as their resolve keeps a separate exposure sum.
+        let owned;
+        let label = if let crate::views::ViewKind::Image {name,..} = &view.kind {
+            owned = format!("image {name}: path adaptive moments"); owned.as_str()
+        } else { "path adaptive moments" };
+        Some(s.transients.buffer(d,label,bytes,wgpu::BufferUsages::STORAGE))
     } else {
         None
     };
@@ -672,6 +674,7 @@ mod tests {
             // Exercise both internal specializations without restoring an authored knob.
             let crate::pipelines::ProgramKernel::Path { random_walk, features, boundaries, emitter_profiles, media, .. } =
                 s.path.as_ref().unwrap().kernel else { unreachable!() };
+            assert_eq!(features & crate::forward_variant::FEATURE_IMPLICIT_GEOMETRY, 0, "triangle-only scene retains implicit graphs");
             s.path = Some(Pipeline::new(&r, adaptive, false, random_walk, features, boundaries,
                 emitter_profiles, media, &crate::InstallOptions::default(), &s.pipelines)?);
             assert!(matches!(s.path.as_ref().unwrap().kernel, crate::pipelines::ProgramKernel::Path { media: None, .. }), "no-medium paths installed medium state/code");

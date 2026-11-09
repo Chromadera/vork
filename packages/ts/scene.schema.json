@@ -478,6 +478,18 @@
       ],
       "type": "object"
     },
+    "Clock": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "pattern": "^-?[0-9]+/[1-9][0-9]*$",
+          "type": "string"
+        }
+      ],
+      "x-clock": true
+    },
     "ColorSpace": {
       "description": "Blender colour space names, verbatim.",
       "enum": [
@@ -850,19 +862,22 @@
           ],
           "default": null,
           "x-help": "ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA",
-          "x-help-extra": "image.render restrictions: first shared pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported",
+          "x-help-extra": "image.render restrictions: shared parent pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported",
           "x-help-path": "image.render",
           "x-source": "vork (nested scene-linear render)"
         },
         "time": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Clock"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": null,
           "description": "Seconds into media; omitted follows scene time. EXR sequences honor\nframesPerSecond metadata; other sequences use render.fps.",
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ],
-          "x-help": "number|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends",
+          "x-help": "number|rational string|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends",
           "x-help-path": "image.time",
           "x-source": "vork (footage clock)"
         },
@@ -2242,7 +2257,7 @@
         {
           "properties": {
             "angle": {
-              "default": 0.009180432185530663,
+              "default": 0.009180432,
               "format": "float",
               "type": "number",
               "x-help": "number; sun",
@@ -2443,7 +2458,7 @@
               "x-source": "Blender 5.2.1 AreaLight square/disk sizing"
             },
             "spot_blend": {
-              "default": 0.15000000596046448,
+              "default": 0.15,
               "format": "float",
               "type": "number",
               "x-help": "number; 0..1",
@@ -2451,7 +2466,7 @@
               "x-source": "Blender 5.2.1 SpotLight.spot_blend"
             },
             "spot_size": {
-              "default": 0.7853981852531433,
+              "default": 0.7853982,
               "format": "float",
               "type": "number",
               "x-help": "number; full cone angle",
@@ -2842,18 +2857,16 @@
           "x-source": "Blender 5.2.1 AgX; display program: vork"
         },
         "duration": {
-          "default": 10.416666984558105,
-          "format": "float",
-          "type": "number",
-          "x-help": "number",
+          "$ref": "#/$defs/Clock",
+          "default": "125/12",
+          "x-help": "number|rational string; seconds",
           "x-help-path": "render.duration",
           "x-source": "Blender 5.2.1 (frame range expressed in seconds)"
         },
         "fps": {
-          "default": 24.0,
-          "format": "float",
-          "type": "number",
-          "x-help": "number",
+          "$ref": "#/$defs/Time",
+          "default": 24,
+          "x-help": "number|rational string; positive output frames/second",
           "x-help-path": "render.fps",
           "x-source": "Blender 5.2.1 RenderSettings.fps"
         },
@@ -2974,10 +2987,9 @@
       "description": "A deterministic fixed-clock schedule over ordinary typed named buffers.",
       "properties": {
         "dt": {
+          "$ref": "#/$defs/Clock",
           "description": "Positive fixed tick duration, in seconds; independent of render FPS.",
-          "format": "double",
-          "type": "number",
-          "x-help": "positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints",
+          "x-help": "number|rational string; positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints",
           "x-help-path": "simulation.dt",
           "x-source": "vork simulation contract"
         },
@@ -3021,10 +3033,9 @@
           "x-source": "vork simulation contract"
         },
         "t0": {
+          "$ref": "#/$defs/Clock",
           "description": "Time of the initialized state S0, in seconds.",
-          "format": "double",
-          "type": "number",
-          "x-help": "seconds; initialized state S0; requests before t0 hold S0",
+          "x-help": "number|rational string; seconds; initialized state S0; requests before t0 hold S0",
           "x-help-path": "simulation.t0",
           "x-source": "vork simulation contract"
         }
@@ -3115,6 +3126,19 @@
         "image"
       ],
       "type": "object"
+    },
+    "Time": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "pattern": "^-?[0-9]+/[1-9][0-9]*$",
+          "type": "string"
+        }
+      ],
+      "description": "Output rate: decimal number or reduced rational string (frames per second).",
+      "x-clock": true
     },
     "Topology": {
       "oneOf": [
@@ -3294,8 +3318,8 @@
           "opacity": null,
           "program": "std/agx"
         },
-        "duration": 10.416666984558105,
-        "fps": 24.0,
+        "duration": "125/12",
+        "fps": 24,
         "motion_blur": null,
         "resolution": [
           1920,
@@ -3408,7 +3432,7 @@
     "image.render.compositor: same image graph as render.compositor; names local to this capture; default []",
     "image.render.resolution: uvec2; default [1920,1080]",
     "image.render.root: node-name|null; only this subtree draws and is lit; objects outside still cast shadows; null = whole scene; default null",
-    "image.time: number|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends; default null",
+    "image.time: number|rational string|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends; default null",
     "image.wrap_s: repeat|clamp_to_edge|mirrored_repeat; default repeat",
     "image.wrap_t: repeat|clamp_to_edge|mirrored_repeat; default repeat",
     "node.angle (light): number; sun; default 0.009180432",
@@ -3434,7 +3458,7 @@
     "material.grid.grid: buffer-name|inline buffer; buffer with a grid",
     "material.inputs: {name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}}; default {}",
     "material.inputs (std/openpbr): OpenPBR Surface; shaded inputs: base_weight base_color base_metalness specular_weight specular_color specular_roughness specular_roughness_anisotropy specular_ior transmission_weight transmission_color transmission_depth subsurface_weight subsurface_color subsurface_radius subsurface_radius_scale subsurface_scatter_anisotropy coat_weight coat_color coat_roughness coat_ior coat_darkening fuzz_weight fuzz_color fuzz_roughness emission_luminance emission_color thin_film_weight thin_film_thickness thin_film_ior geometry_opacity geometry_thin_walled geometry_normal geometry_tangent geometry_coat_normal transmission_dispersion_scale transmission_dispersion_abbe_number alpha_cutoff",
-    "material.inputs.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1] per channel; units dimensionless; constant|texture; animatable; default -1",
+    "material.inputs.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1] per channel; units dimensionless; constant|texture|attribute; animatable; default -1",
     "material.inputs.base_color: color3; Base reflection albedo (dielectric); F0 colour at normal incidence (metal); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
     "material.inputs.base_metalness: number; Fraction of the microsurface that is metallic; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.inputs.base_weight: number; Scalar multiplier to `base_color`; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
@@ -3450,7 +3474,7 @@
     "material.inputs.fuzz_weight: number; Coverage weight of the fuzz slab; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.inputs.geometry_coat_normal: vector3; Shading normal of the coat; linear tangent-space RGB; factor scales XY; independent of base normal; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
     "material.inputs.geometry_normal: vector3; Shading normal of the base; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
-    "material.inputs.geometry_opacity: number; Opacity (presence) of the surface; range [0,1] per channel; units dimensionless; constant|texture; animatable; default 1",
+    "material.inputs.geometry_opacity: number; Opacity (presence) of the surface; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
     "material.inputs.geometry_tangent: vector3; Reference tangent for specular anisotropy; range N/A; units dimensionless; constant or texture; animatable; default unperturbed tangent",
     "material.inputs.geometry_thin_walled: bool; Surface is a thin shell with no interior volume; range {false,true}; units dimensionless; constant only; not animatable; default false",
     "material.inputs.specular_color: color3; Tints the dielectric Fresnel factor; metal colour at near-grazing incidence; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
@@ -3522,8 +3546,8 @@
     "render.camera: camera-node-name|null; null = the only authored camera, else first imported; a camera cut track may select; default null",
     "render.compositor: (material-name|{material,name?,resolution?})[]; ordered image graph, last output; material may be inline; default []",
     "render.display: material-name|inline material; display program; EXR stays scene-linear; default {\"program\":\"std/agx\"}",
-    "render.duration: number; default 10.416667",
-    "render.fps: number; default 24",
+    "render.duration: number|rational string; seconds; default 125/12",
+    "render.fps: number|rational string; positive output frames/second; default 24",
     "render.motion_blur: MotionBlur|null; non-null enables; shutter in frames; default null",
     "render.motion_blur.position: start|center|end; default center",
     "render.motion_blur.shutter: number; frames; default 0.5",
@@ -3544,16 +3568,16 @@
     "settings.denoise: bool; optional OIDN on/off; off retains profile reconstruction; default false",
     "settings.samples: u32; 1..4096; more samples means cleaner and slower",
     "settings.seed: u32; deterministic sampling seed; default 0",
-    "simulation.dt: positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints",
+    "simulation.dt: number|rational string; positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints",
     "simulation.init: program-name[]; ordered initialization passes; schedule simulation",
     "simulation.seed: u32; independent of image sampling seed",
     "simulation.state: buffer-name[]; complete typed persistent and scratch state; exclusive schedule ownership",
     "simulation.steps: program-name[]; ordered tick passes with storage barriers; schedule simulation",
-    "simulation.t0: seconds; initialized state S0; requests before t0 hold S0",
+    "simulation.t0: number|rational string; seconds; initialized state S0; requests before t0 hold S0",
     "animation.track.path properties: node translation|rotation|scale|visible|visible_camera|visible_shadow|visible_diffuse|visible_glossy|visible_transmission|morph_weights,<morph>, camera/light numeric fields (camera optics are material inputs); imported nodes: translation|rotation|scale|morph_weights|visible",
     "animation.track.path render properties: camera|background (RGB)|motion_blur,shutter",
     "coordinates: glTF right-handed Y-up; cameras look along local -Z",
-    "image.render restrictions: first shared pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported",
+    "image.render restrictions: shared parent pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported",
     "lights: with no environment light the world is RGB [0.05,0.05,0.05]",
     "material (glTF import): mapped to OpenPBR; coat_ior 1.5; occlusion affects indirect only",
     "material.attribute: binds geometry or instance columns to numeric inputs; custom programs read_attribute(handle,ctx) gives value, dx, dy",

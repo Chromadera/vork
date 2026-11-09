@@ -282,14 +282,25 @@ impl Compiler {
         let mut known = self.known.lock().unwrap();
         known.added |= known.keys.insert(*key.as_bytes());
     }
-    /// The key set to persist with the blob, when it gained keys since the last save.
+    /// Snapshot without consuming dirty state: every unsuccessful save can retry.
+    /// The renderer serializes saves before taking this snapshot.
     pub(crate) fn known_snapshot(&self) -> Option<Known> {
-        let mut known = self.known.lock().unwrap();
-        std::mem::take(&mut known.added).then(|| Known {
+        let known = self.known.lock().unwrap();
+        known.added.then(|| Known {
             path: known.path.clone(),
             keys: known.keys.clone(),
             added: true,
         })
+    }
+    /// Acknowledge only a published ledger, after its blob or system-cache marker.
+    pub(crate) fn save_known(&self, snapshot: Known) -> Result<()> {
+        if snapshot.save()? {
+            let mut known = self.known.lock().unwrap();
+            // Keys only accumulate. A later insertion still needs another save;
+            // remembering an existing key does not dirty a committed snapshot.
+            known.added = known.keys.len() != snapshot.keys.len();
+        }
+        Ok(())
     }
 }
 /// Content keys of geometry pipelines the persistent pipeline cache holds: a known
@@ -318,16 +329,58 @@ impl Known {
             added: false,
         }
     }
-    pub(crate) fn save(&self) -> Result<()> {
+    fn save(&self) -> Result<bool> {
         let mut keys: Vec<_> = self.keys.iter().collect();
         keys.sort_unstable();
-        crate::disk_cache::write(
+        Ok(crate::disk_cache::write_entry(
             &self.path,
             &keys.into_iter().flatten().copied().collect::<Vec<u8>>(),
-        )?;
-        Ok(())
+        )?)
     }
 }
+#[cfg(test)]
+mod known_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn committed_snapshot_preserves_later_keys() -> Result<()> {
+        let (device, _) = wgpu::Device::noop(&Default::default());
+        let root = std::env::temp_dir().join(format!("vork-key-snapshot-{}", std::process::id()));
+        let path = root.join("keys.entry");
+        let compiler = Compiler::new(&device, None, Known::load(path.clone(), false));
+        let first = blake3::hash(b"first pipeline");
+        let later = blake3::hash(b"later pipeline");
+        compiler.remember(first);
+        let snapshot = compiler.known_snapshot().unwrap();
+        compiler.remember(later);
+        compiler.save_known(snapshot)?;
+        let loaded = Known::load(path.clone(), true);
+        assert!(loaded.keys.contains(first.as_bytes()));
+        assert!(!loaded.keys.contains(later.as_bytes()));
+        let snapshot = compiler.known_snapshot().expect("later key must remain dirty");
+        compiler.remember(first); // Duplicate insertion needs no further save.
+        compiler.save_known(snapshot)?;
+        assert!(compiler.known_snapshot().is_none());
+        let loaded = Known::load(path.clone(), true);
+        assert_eq!(loaded.keys.len(), 2);
+        assert!(loaded.keys.contains(later.as_bytes()));
+        assert!(!loaded.added);
+        assert!(Known::load(path, false).keys.is_empty());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_snapshot_keeps_keys_dirty() {
+        let (device, _) = wgpu::Device::noop(&Default::default());
+        let compiler = Compiler::new(&device, None, Known::default());
+        let key = blake3::hash(b"pipeline");
+        compiler.remember(key);
+        drop(compiler.known_snapshot().unwrap());
+        assert!(compiler.known_snapshot().unwrap().keys.contains(key.as_bytes()));
+    }
+}
+
 /// How install obtains feature variants that are not yet in the persistent cache.
 #[derive(Clone, Default)]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -340,7 +393,7 @@ pub(crate) enum VariantCompile {
     /// `vork setup`: Fallback's choices, and the hit kernels compile the superset
     /// key a later Fallback install draws with (CachedPipelines::drawn_kernel).
     Setup,
-    /// Startup's ordinary table configuration: retain material proofs while
+    /// Exhaustive setup's ordinary tables: retain material proofs while
     /// sharing hit evaluators across light mixes. Other kernels use Setup.
     SetupPlain,
     /// Compile every variant before install returns.
@@ -386,6 +439,7 @@ impl crate::InstalledScene {
     /// Whether every drawn pipeline is its final variant (no superset fallback in use).
     pub(crate) fn variants_ready(&self) -> bool {
         self.geometry_pipelines.values().all(Drawn::ready) && self.decoupled.as_ref().is_none_or(|d|d.variants_ready())
+            && self.gi.as_ref().is_none_or(Drawn::ready) && self.reflections.as_ref().is_none_or(Drawn::ready)
     }
     /// Drawn pipelines installed behind a superset fallback (cold variants).
     pub(crate) fn deferred_variants(&self) -> usize {
@@ -393,6 +447,8 @@ impl crate::InstalledScene {
             .values()
             .filter(|d| d.deferred())
             .count() + self.decoupled.as_ref().map_or(0,|d|d.deferred_variants())
+            + usize::from(self.gi.as_ref().is_some_and(Drawn::deferred))
+            + usize::from(self.reflections.as_ref().is_some_and(Drawn::deferred))
     }
 }
 
@@ -681,6 +737,7 @@ impl CachedPipelines {
         identity.update(&[u8::from(slang.volume_visibility)]);
         // Coverage changes fallback admission. Preserve opaque setup identities.
         if slang.surface_coverage {identity.update(b"surface coverage");}
+        if slang.attribute_coverage {identity.update(b"attribute coverage");}
         if let Some(native)=&slang.medium {
             identity.update(&native.steps.to_le_bytes());
             identity.update(native.point.as_bytes());identity.update(&native.identity);
@@ -981,8 +1038,10 @@ impl CachedPipelines {
     /// (other programs or inputs) is simply absent.
     /// Shipped late-specialization artifacts exist for every capability key;
     /// prefer a remembered device superset before consulting artifact presence.
+    /// Hit consumers retain a Drawn slot so multi-frame installs can promote
+    /// this fallback after their exact pipeline compiles in the background.
     pub(crate) fn drawn_kernel(&self, kernel: ProgramKernel, mode: &VariantCompile, compiler: &Compiler) -> ProgramKernel {
-        if matches!(mode, VariantCompile::Background | VariantCompile::Fallback)
+        if matches!(mode, VariantCompile::Background | VariantCompile::Fallback | VariantCompile::Gated(_))
             && !compiler.is_known(&self.kernel_content_key(kernel))
         {
             if let Some(plain) = kernel.plain_hit().filter(|plain| compiler.is_known(&self.kernel_content_key(*plain))) {
@@ -1000,6 +1059,38 @@ impl CachedPipelines {
             _ => kernel,
         }
     }
+    /// Hit keys use the existing deferred compiler and retained compute slots.
+    /// A warm setup fallback must not permanently select the movie's evaluator.
+    pub(crate) fn install_hit(
+        self: &std::sync::Arc<Self>, r: &Renderer, requested: ProgramKernel,
+        mode: &VariantCompile, layout: wgpu::PipelineLayout, label: &'static str,
+    ) -> Result<Drawn<wgpu::ComputePipeline>> {
+        let selected = self.drawn_kernel(requested, mode, &r.compiler);
+        #[cfg(test)]
+        r.compiler.hit_selections.lock().unwrap().push((requested, selected));
+        let build = |compiler: &Compiler, kernel| -> Result<wgpu::ComputePipeline> {
+            let (module, entry) = self.program_kernel(kernel)?;
+            let pipeline = compiler.compute(&wgpu::ComputePipelineDescriptor {
+                label: Some(label), layout: Some(&layout), module: &module,
+                entry_point: Some(entry), compilation_options: Default::default(),
+                cache: compiler.cache.as_ref(),
+            });
+            compiler.remember(self.kernel_content_key(kernel));
+            Ok(pipeline)
+        };
+        let fallback = (selected != requested).then(|| build(&r.compiler, selected)).transpose()?;
+        let pipelines = self.clone();
+        r.compiler.install_variant(mode, self.camera_slot(requested), fallback, move |compiler| {
+            let (module, entry) = pipelines.program_kernel(requested)?;
+            let pipeline = compiler.compute(&wgpu::ComputePipelineDescriptor {
+                label: Some(label), layout: Some(&layout), module: &module,
+                entry_point: Some(entry), compilation_options: Default::default(),
+                cache: compiler.cache.as_ref(),
+            });
+            compiler.remember(pipelines.kernel_content_key(requested));
+            Ok(pipeline)
+        })
+    }
     /// The output layout and dispatch must use the same planned resolve, including
     /// encoder surfaces attached after frame-slot creation.
     pub(crate) fn output_resolve(&self, effects: EffectPlan) -> &OnceLock<wgpu::ComputePipeline> {
@@ -1008,6 +1099,16 @@ impl CachedPipelines {
         } else {
             &self.resolve_pipeline
         }
+    }
+
+    pub(crate) fn ensure_output(&self, r: &Renderer, effects: EffectPlan) -> Result<()> {
+        let entry = if effects.fuse_controls() {
+            if self.raster_samples > 1 { "resolve_fused" } else { "resolve_fused_single" }
+        } else { "main" };
+        try_init(self.output_resolve(effects), || Ok(passes::resolve::pipeline(
+            r, &self.resolve_module, self.resolve_native.as_ref(), entry, Some(&self.resolve_layout),
+        )))?;
+        Ok(())
     }
 
     pub(crate) fn ensure_effects(&self, r: &Renderer, features: EffectPlan) -> Result<()> {
@@ -1019,7 +1120,7 @@ impl CachedPipelines {
         let jobs = [
             (
                 &self.fused_resolve_pipeline,
-                features.fuse_controls(),
+                features.fuse_controls() && features.outputs.is_none_or(|o|o.beauty),
                 Module::Resolve,
                 Some(&self.resolve_layout),
                 "main",
@@ -1027,7 +1128,7 @@ impl CachedPipelines {
             ),
             (
                 &self.resolve_pipeline,
-                !features.fuse_controls(),
+                !features.fuse_controls() && features.outputs.is_none_or(|o|o.beauty),
                 Module::Resolve,
                 Some(&self.resolve_layout),
                 "main",
@@ -1035,7 +1136,7 @@ impl CachedPipelines {
             ),
             (
                 &self.post_source_pipeline,
-                features.compositor || features.denoise,
+                (features.compositor || features.denoise) && features.outputs.is_none_or(|o|o.beauty),
                 Module::Resolve,
                 Some(&self.resolve_layout),
                 "post_source",
@@ -1060,10 +1161,14 @@ impl CachedPipelines {
         ];
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                environment::Environment::pipeline(r);
+                if features.outputs.is_none_or(|o|o.beauty || o.controls() || o.aovs || o.catcher) {
+                    environment::Environment::pipeline(r);
+                }
             });
             let fixed = [
-                compile(scope, &self.control_resolve_pipeline, !features.fuse_controls(), || {
+                // Implicit path writes controls itself; implicit raster still
+                // schedules Controls, just like graph::Graph's output pruning.
+                compile(scope, &self.control_resolve_pipeline, !features.fuse_controls() && !(features.implicit && features.path) && features.outputs.is_none_or(|o|o.controls() || (!features.path && o.beauty && (features.indirect || features.reflections || features.denoise))), || {
                 let shader = control_resolve_shader(self.raster_samples, self.denoise);
                 let module = self
                     .control_module

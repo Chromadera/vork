@@ -6,6 +6,7 @@ license.workspace = true
 # Exposes the generated OpenPBR Closure to the renderer build (no native library).
 links = "vork_openpbr"
 [dependencies]
+vork-time = { path = "../vork-time" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

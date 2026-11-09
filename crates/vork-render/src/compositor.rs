@@ -20,6 +20,103 @@ pub(crate) struct Program {
     channels: Vec<String>,
     slots: std::collections::BTreeMap<String, u32>,
 }
+/// Scene producers reached by a requested final image or control plane.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Dependencies {
+    pub color: bool,
+    pub beauty: bool,
+    pub depth: bool,
+    pub ids: bool,
+    pub normals: bool,
+    pub motion: bool,
+    pub aovs: bool,
+    pub aov_output: bool,
+    pub catcher: bool,
+    pub images: bool,
+}
+impl Dependencies {
+    pub fn controls(self) -> bool {self.depth || self.ids || self.normals || self.motion}
+    pub fn resources(self) -> Vec<&'static str> {
+        let mut reads=Vec::new();
+        for (enabled,name) in [(self.beauty,"linear sample accumulation"),(self.depth,"resolved depth"),(self.ids,"resolved IDs"),(self.normals,"resolved normals"),(self.motion,"resolved motion"),(self.aovs,"AOV resolved"),(self.catcher,"catcher radiance sums"),(self.images,"render images")] {
+            if enabled {reads.push(name);}
+        }
+        reads
+    }
+}
+impl Program {
+    pub(crate) fn reads_input(&self,name:&str)->bool {self.slots.get(name).is_some_and(|&slot|self.reads(slot))}
+    fn reads(&self, slot:u32) -> bool {self.compiled.image_reads.as_ref().is_none_or(|reads|reads.contains(&slot))}
+}
+/// Walk the ordered image DAG backwards, following previous and named edges.
+/// A replacement root kills its previous image, including unread earlier entries.
+pub(crate) fn dependencies(programs:&std::collections::HashMap<String,Program>, names:&[vork_scene::v2::CompositeEntry]) -> (Dependencies,Vec<bool>) {
+    let mut result=Dependencies {color:true,..Default::default()};
+    let mut live=vec![false;names.len()];
+    let mut previous=true;
+    let mut nodes=std::collections::HashSet::new();
+    for (i,entry) in names.iter().enumerate().rev() {
+        if !previous && !entry.name().is_some_and(|n|nodes.contains(n)) {continue;}
+        live[i]=true;
+        let program=&programs[entry.material()];
+        previous=program.reads(0);
+        for (i,channel) in program.channels.iter().enumerate() {
+            if !program.reads(i as u32+1) {continue;}
+            match channel.as_str() {
+                "color"=>result.beauty=true,
+                "depth"=>result.depth=true,
+                "object_index"=>result.ids=true,
+                "view_normal"=>result.normals=true,
+                "motion"=>result.motion=true,
+                "shadow_catcher"=>result.catcher=true,
+                c if c.starts_with("aov:")=>result.aovs=true,
+                c if c.starts_with("node:")=>{nodes.insert(c[5..].to_owned());},
+                c if c.starts_with("image:")=>result.images=true,
+                _=>(),
+            }
+        }
+    }
+    result.beauty |= previous;
+    (result,live)
+}
+
+pub(crate) fn image_reads(programs:&std::collections::HashMap<String,Program>, names:&[vork_scene::v2::CompositeEntry]) -> std::collections::BTreeSet<String> {
+    let (_,live)=dependencies(programs,names);
+    names.iter().zip(live).filter(|(_,live)|*live).flat_map(|(entry,_)| {
+        let program=&programs[entry.material()];
+        program.channels.iter().enumerate().filter(|(i,_)|program.reads(*i as u32+1))
+            .filter_map(|(_,name)|name.strip_prefix("image:").map(str::to_owned))
+    }).collect()
+}
+/// Close the cross-view DAG as well as each view's compositor DAG. Unread
+/// render-image bindings never install captures or reserve their scene work.
+pub(crate) fn image_plan(scene:&Scene,programs:&std::collections::HashMap<String,Program>,mut main:Dependencies) -> Result<(Dependencies,Vec<String>)> {
+    fn reads(scene:&Scene,programs:&std::collections::HashMap<String,Program>,names:&[vork_scene::v2::CompositeEntry],root:Option<&str>,d:Dependencies)->std::collections::BTreeSet<String> {
+        let mut reads=if d.color {image_reads(programs,names)} else {Default::default()};
+        // Transport can read off-subtree surfaces through seed publications.
+        // Keep their bound captures whenever a view consumes scene radiance.
+        if d.beauty || d.controls() || d.aovs || d.catcher {
+            reads.extend(scene.image_reads(if d.beauty || d.aovs || d.catcher {None} else {root}));
+        }
+        reads
+    }
+    let mut needed=reads(scene,programs,&scene.render.compositor,scene.render.root.as_deref(),main);
+    let mut visited=std::collections::BTreeSet::new();
+    while let Some(name)=needed.iter().find(|name|!visited.contains(*name)).cloned() {
+        visited.insert(name.clone());
+        let Some(render)=scene.images.get(&name).and_then(|i|i.render.as_ref()) else {continue;};
+        let (mut d,_)=dependencies(programs,&render.compositor);
+        let input_reads=reads(scene,programs,&render.compositor,render.root.as_deref(),d);
+        d.images=input_reads.iter().any(|name|scene.images.get(name).is_some_and(|i|i.render.is_some()));
+        needed.extend(input_reads);
+        main.color |= d.color;main.beauty |= d.beauty;main.depth |= d.depth;main.ids |= d.ids;
+        main.normals |= d.normals;main.motion |= d.motion;main.aovs |= d.aovs;main.catcher |= d.catcher;
+    }
+    let order:Vec<_>=scene.image_order(None)?.into_iter().filter(|name|needed.contains(name)).collect();
+    main.images=!order.is_empty();
+    Ok((main,order))
+}
+
 /// Animated words belong to a recorded view/ring slot; the common change tracker
 /// copies each sample immediately before the work that consumes it.
 pub(crate) struct FrameInputs {
@@ -48,9 +145,12 @@ impl FrameInputs {
 /// Enable producers independently of the user's file/readback channels.
 pub(crate) fn channel_flags(s: &InstalledScene, names: &[vork_scene::v2::CompositeEntry]) -> u32 {
     use vork_slang::registry::{COMPOSITOR_IDS, COMPOSITOR_MOTION};
-    names
-        .iter()
-        .flat_map(|name| &s.compositor[name.material()].channels)
+    let (_,live)=dependencies(&s.compositor,names);
+    names.iter().zip(live).filter(|(_,live)|*live)
+        .flat_map(|(name,_)| {
+            let program=&s.compositor[name.material()];
+            program.channels.iter().enumerate().filter(|(i,_)|program.reads(*i as u32+1)).map(|(_,channel)|channel)
+        })
         .fold(0, |flags, channel| {
             flags
                 | match channel.as_str() {
@@ -114,7 +214,7 @@ pub(crate) fn install(
         let abi = programs::abi();
         let mut hash = blake3::Hasher::new();
         // Explicit beauty bindings have their own slot; zero is implicit previous.
-        hash.update(b"composite-graph-3");
+        hash.update(b"composite-graph-4");
         // Compilation needs slot aliases, not the names bound to those slots.
         // Rebinding the same program to another graph image reuses its code.
         let mut resources = std::collections::BTreeMap::new();
@@ -209,11 +309,12 @@ pub(crate) fn record(
     accumulated: Normalization,
     recorder: &mut graph::Recorder,
     stage: graph::Pass,
+    beauty: bool,
 ) -> Result<wgpu::Buffer> {
     let mut source = source.clone();
     let mut dispatches = Vec::new();
     let mut accumulated=accumulated;
-    if stage==graph::Pass::Compositor && s.has_catchers {
+    if stage==graph::Pass::Compositor && s.has_catchers && beauty {
         let (finished,dispatch)=crate::catcher::finish(s,r,uniform,targets,&source,size,accumulated)?;
         source=finished;dispatches.push(dispatch);accumulated=Normalization::None;
     }
@@ -221,7 +322,9 @@ pub(crate) fn record(
     let original_normalization = accumulated;
     let mut previous_size = size;
     let mut nodes = std::collections::BTreeMap::new();
+    let (_, live) = dependencies(&s.compositor, names);
     for (index, entry) in names.iter().enumerate() {
+        if !live[index] {continue;}
         let name = entry.material();
         let program = &s.compositor[name];
         let words = inputs.buffers.get(name).unwrap_or(&program.words);
@@ -235,6 +338,8 @@ pub(crate) fn record(
         let output = s.transients.buffer(&r.device, &format!("{stage:?} image {index}"),
             bytes,
             wgpu::BufferUsages::STORAGE);
+        // Size queries use authored metadata even when the previous producer is dead.
+        previous_size=if index==0 {size} else {names[index-1].extent(size)?};
         dispatches.push(images::pass(s, r, uniform, targets, program, words, &source,
             size, extent, previous_size, accumulated.first(index == 0), &program.compiled.entry, &output, &nodes, &original, original_normalization)?);
         source = output;

@@ -14,6 +14,7 @@ pub(crate) fn shadow_visibility_animated(nodes:&[EvalNode],node:usize,animation:
 /// Renderer preparation inputs; inferred from the scene, not an authored concept.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EffectPlan {
+    pub(crate) outputs: Option<crate::compositor::Dependencies>,
     #[cfg(test)]
     pub(crate) force_standalone_controls: bool,
     pub(crate) path: bool,
@@ -51,7 +52,6 @@ impl EffectPlan {
         let integrator = &scene.render.settings.integrator;
         let indirect = integrator.indirect().is_some();
         let ray_indirect = crate::rt::ray_indirect(scene);
-        // Keep zero-width camera shutters admitted: animation can open them later.
         let features = Self {
             path: integrator.is_path(),
             implicit: scene.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit)),
@@ -118,9 +118,9 @@ pub(crate) struct ScenePlan {
     /// pass when [`nominal_control_pass`] can record one. Per-sample upload and
     /// timestamp storage is sized from this.
     pub samples: u64,
-    /// Scene-time strata in the exposure loop.
+    /// Maximum scene-time strata reserved at install; selected per exposure.
     pub exposure_samples: u32,
-    /// Spatial visibility passes per stratum.
+    /// Maximum spatial visibility passes per stratum; selected per exposure.
     pub visibility_samples: u32,
     pub aovs: bool,
     /// Raster colour is decoupled: each scene-time stratum collects spatial visibility and
@@ -138,7 +138,7 @@ pub(crate) fn nominal_control_pass(colour_samples: u32, temporal: bool, motion_b
 }
 /// Exposure strata and the visibility budget each stratum integrates.
 pub(crate) fn sampling_counts(render: &vork_scene::Render, allow_shutter: bool) -> (u32, u32) {
-    let per_stratum = render.settings.integrator.is_path() || (allow_shutter && render.motion_blur.is_some());
+    let per_stratum = render.settings.integrator.is_path() || (allow_shutter && render.motion_blur.as_ref().is_some_and(|m| m.shutter > 0.));
     (if per_stratum { render.settings.samples } else { 1 }, if per_stratum { 1 } else { render.settings.samples })
 }
 
@@ -199,13 +199,19 @@ impl ScenePlan {
         }
         let deform = draws.iter().any(|d| d.evaluated());
         let transparent = flags.iter().any(|f| f.transparent);
-        let (exposure_samples, visibility_samples) = sampling_counts(render, true);
+        let (mut exposure_samples, mut visibility_samples) = sampling_counts(render, true);
+        // These are install-time reservations, not the current exposure choice.
+        // A shutter track can require either recorded visibility layout later.
+        if animation.has_shutter_animation() {
+            exposure_samples = render.settings.samples;
+            if !effects.path { visibility_samples = render.settings.samples; }
+        }
         Self {
             exposure_samples,
             visibility_samples,
             aovs: !render.aovs.is_empty(),
             samples: u64::from(exposure_samples)
-                + u64::from(nominal_control_pass(exposure_samples, false, render.motion_blur.is_some())),
+                + u64::from(nominal_control_pass(exposure_samples, false, render.motion_blur.as_ref().is_some_and(|m| m.shutter > 0.) || animation.has_shutter_animation())),
             decoupled: !effects.path,
             screen_refraction: !effects.path && render.settings.integrator.raster().is_some_and(|r| match r.refraction {
                 vork_scene::Refraction::Screen => draws.iter().any(|draw| materials[draw.material].transmissive),
@@ -228,14 +234,21 @@ mod caster_plan_tests {
     use super::*;
 
     #[test]
-    fn animated_shutter_starting_at_zero_retains_its_sampling_plan() -> Result<()> {
+    fn closed_shutter_uses_spatial_samples() -> Result<()> {
         let scene: Scene = vork_scene::v2::from_test_value(serde_json::json!({"version":2,
             "render":{"motion_blur":{"shutter":0},
                 "settings":{"integrator":"raster","samples":64}},
             "nodes":[],
             "animation":[{"tracks":[{"path":["render","motion_blur","shutter"],
                 "keys":[[0,0],[1,1]]}]}]}))?;
-        assert_eq!(sampling_counts(&scene.render,true),(64,1));
+        assert_eq!(sampling_counts(&scene.render,true),(1,64));
+        let mut render = scene.render.clone();
+        render.motion_blur.as_mut().unwrap().shutter = 1.;
+        assert_eq!(sampling_counts(&render,true),(64,1));
+        assert_eq!(sampling_counts(&render,false),(1,64));
+        render.settings.integrator = vork_scene::v2::Integrator::Path(Default::default());
+        render.motion_blur.as_mut().unwrap().shutter = 0.;
+        assert_eq!(sampling_counts(&render,true),(64,1));
         Ok(())
     }
 

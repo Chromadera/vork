@@ -1,5 +1,6 @@
 // Candidate coverage shares the hit-to-surface evaluator with committed hits.
-// P.coverage erases geometry reads and program dispatch in builtin-only scenes.
+// Builtin UV-only opacity retains its compact corner reader; named opacity
+// and authored coverage use the consumer's existing full hit reconstruction.
 import vork_constants;
 import frame;
 import vork_material_table;
@@ -15,7 +16,12 @@ import vork_ray_sampling;
 public float candidate_coverage<P:IProgram,G:IHitGeometry>(StructuredBuffer<uint> words, RayIntersection hit, float3x4 world_to_object, float3 direction, float2 pixel) {
     let r=objects[hit.instance_custom_data].material_index;
     let record=material_records[r];
+    // The installed bound capability erases this reader in ordinary attribute scenes.
+#ifdef VORK_ATTRIBUTE_COVERAGE
+    if (record.extra.y>0. && ((P.coverage && record.tag.x!=0u) || material_alpha_attribute(r))) {
+#else
     if (P.coverage && record.tag.x!=0u && record.extra.y>0.) {
+#endif
         // Candidate masks sample a point, like the table path below. Keep
         // geometric derivatives for normal frames; only image LOD is zero.
         let texture_scale=material_texture_scale;material_texture_scale=0.;

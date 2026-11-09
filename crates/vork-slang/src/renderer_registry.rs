@@ -103,6 +103,10 @@ constants! {
     // Visible detector interval; hero wavelength sampling and its reciprocal PDF agree.
     REG_SPECTRAL_MIN_NM: f32 = 380. => "f32";
     REG_SPECTRAL_SPAN_NM: f32 = 400. => "f32";
+    // Spatial-source proposal: global uniform support, not a radiance clamp.
+    REG_LIGHT_TREE_UNIFORM_MIX: f32 = 0.25 => "f32";
+    // Squared-distance guide regularization inside a punctual source.
+    REG_LIGHT_TREE_MIN_DISTANCE_SQUARED: f32 = 1e-12 => "f32";
     // IEEE-754 binary32 spacing at one.
     REG_FP32_EPSILON: f32 = f32::EPSILON => "f32";
     // Largest finite IEEE-754 binary32 parameter, not an authored world-space cap.

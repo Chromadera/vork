@@ -175,7 +175,11 @@ fn float_channels<'a, const N: usize>(
 }
 
 /// OpenEXR stores linear HDR and unquantized control signals; RGBA is premultiplied.
+#[cfg(test)]
 fn encode_exr(w: u32, h: u32, p: &FrameOutput, outputs: &Outputs, codec: crate::ExrCodec) -> Result<Files> {
+    encode_exr_clock(w,h,p,outputs,codec,None)
+}
+fn encode_exr_clock(w: u32, h: u32, p: &FrameOutput, outputs: &Outputs, codec: crate::ExrCodec, fps: Option<(i32,u32)>) -> Result<Files> {
     use exr::prelude::*;
     let mut all_channels = Vec::new();
     let count = (w * h) as usize;
@@ -222,7 +226,7 @@ fn encode_exr(w: u32, h: u32, p: &FrameOutput, outputs: &Outputs, codec: crate::
     if !all_channels.is_empty() {
         let image = Image::from_layer(Layer::new(
             (w as usize, h as usize),
-            LayerAttributes::default(),
+            LayerAttributes {frames_per_second:fps,..Default::default()},
             codec.encoding(),
             AnyChannels::sort(all_channels.into()),
         ));
@@ -253,6 +257,7 @@ impl FrameOutputWriter {
         pending_frames: usize,
         // Absolute index of the first pushed frame; output order counts from it.
         first_frame: usize,
+        fps: (i32,u32),
     ) -> Self {
         let plane_count = if exr { 1 } else { outputs.0.len() };
         let worker_count = thread::available_parallelism()
@@ -304,7 +309,7 @@ impl FrameOutputWriter {
                                 let files =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         if exr {
-                                            encode_exr(w, h, &pixels, &outputs, exr_codec)
+                                            encode_exr_clock(w, h, &pixels, &outputs, exr_codec,Some(fps))
                                         } else {
                                             encode(w, h, &pixels, &outputs)
                                         }

@@ -8,6 +8,7 @@ import variant;
 import openpbr_core;
 import bsdf;
 import vork_ray_alpha;
+import vork_ray_visibility;
 import vork_ray_sampling;
 import surface;
 import surface_lighting;
@@ -37,13 +38,27 @@ float3 hit_shadow_direction<P:IProgram,G:IHitGeometry>(RaytracingAccelerationStr
     let all_casters=(ray_flags&REG_LIGHT_RAY_SHADOWED_BY_ALL)!=0u;
     let groups=lights[i].shadow_offsets[REG_LIGHT_RAY_LINK_WORD];
     RayDesc ray;ray.Origin=origin;ray.Direction=direction;ray.TMin=0.;ray.TMax=max(distance-length(origin-world),0.);
+    let fields=field_shadow_transmittance<P,G>(words,ray,groups,all_casters,index);
+    // Use the same installed opacity/link proof as primary connections. No
+    // candidate closure or containment evaluation is needed for opaque casters.
+    if((ray_flags&REG_LIGHT_RAY_OPAQUE)!=0u) {
+        return fields*select(opaque_shadow_hit(scene,origin,direction,ray.TMax,REG_RAY_SHADOW),0.,1.);
+    }
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
     query.TraceRayInline(scene,RAY_FLAG_FORCE_NON_OPAQUE,REG_RAY_SHADOW,ray);
-    var result=ConnectionVisibility(field_shadow_transmittance<P,G>(words,ray,groups,all_casters,index),0u);
+    var result=ConnectionVisibility(fields,0u);
     while (query.Proceed()) {
         let candidate=RayIntersection(query.CandidateInstanceIndex(),query.CandidateInstanceID(),query.CandidatePrimitiveIndex(),query.CandidateTriangleBarycentrics());
         if (!all_casters && !links_intersect(objects[candidate.instance_custom_data].metadata.x,groups)) {continue;}
+#ifdef VORK_NO_CONNECTION_TRANSMISSION
+        // Scalar coverage is sufficient once installed closure proofs exclude
+        // transmission. Keep half-open ownership for fractional shared edges.
+        let inverse=query.CandidateWorldToObject3x4();
+        if(!connection_owns_hit<G>(candidate,inverse,ray.Direction)) {continue;}
+        result.transmittance*=1.-candidate_coverage<P,G>(words,candidate,inverse,ray.Direction,select(retained,float2(0.),frame.lens.zw));
+#else
         result.transmittance*=shadow_candidate_transmittance<P,G>(scene,words,candidate,query.CandidateWorldToObject3x4(),ray,query.CandidateTriangleRayT(),select(retained,float2(0.),frame.lens.zw),index);
+#endif
         if (!any(result.transmittance>float3(0.))) {return float3(0.);}
     }
     return result.transmittance*shadow_contained_transmittance<P,G>(scene,words,ray,all_casters,groups,select(retained,float2(0.),frame.lens.zw),index);

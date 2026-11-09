@@ -55,6 +55,7 @@ impl Slot {
     }
     pub(crate) fn prepare(&mut self,plan:&Plan,s:&InstalledScene,d:&wgpu::Device,lighting:&crate::view::ViewLighting,
         objects:&wgpu::Buffer,materials:&wgpu::Buffer,hits:wgpu::BindGroup) {
+        self.steps.clear();
         let max=d.limits().max_compute_workgroups_per_dimension;
         let mut first=plan.leaves;
         loop {

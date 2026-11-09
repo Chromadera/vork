@@ -47,6 +47,26 @@ impl Default for Options {
         }
     }
 }
+const ALIGN_X: &[&str] = &["left", "center", "right", "justify", "flush"];
+const ALIGN_Y: &[&str] = &["top_baseline", "top", "center", "bottom_baseline", "bottom"];
+
+/// Builder facts generated from the same defaults used by serde.
+pub fn input_help() -> String {
+    let d = Options::default();
+    format!("std/text.name: string; default {name}; standalone prefix only.\n\
+std/text.body: string; required; text to lay out.\n\
+std/text.font: string; required; TrueType/OpenType file.\n\
+std/text.size: number; default {size}; metres per font em; > 0.\n\
+std/text.extrude: number; default {extrude}; metres; half-depth; >= 0.\n\
+std/text.bevel_depth: number; default {bevel}; metres; >= 0.\n\
+std/text.bevel_resolution: uint; default {resolution}; range [0,32]; subdivisions.\n\
+std/text.align_x: enum {x_tokens}; default {x}.\n\
+std/text.align_y: enum {y_tokens}; default {y}.\n",
+        name=d.name, size=d.size, extrude=d.extrude, bevel=d.bevel_depth,
+        resolution=d.bevel_resolution, x=d.align_x, y=d.align_y,
+        x_tokens=ALIGN_X.join("|"), y_tokens=ALIGN_Y.join("|"))
+}
+
 fn default_size() -> f32 {
     Options::default().size
 }
@@ -257,12 +277,11 @@ fn validate_options(o: &Options) -> Result<()> {
         "invalid text size/extrude/bevel"
     );
     ensure!(
-        ["left", "center", "right", "justify", "flush"].contains(&o.align_x.as_str()),
+        ALIGN_X.contains(&o.align_x.as_str()),
         "invalid align_x"
     );
     ensure!(
-        ["top_baseline", "top", "center", "bottom_baseline", "bottom"]
-            .contains(&o.align_y.as_str()),
+        ALIGN_Y.contains(&o.align_y.as_str()),
         "invalid align_y"
     );
     Ok(())

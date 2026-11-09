@@ -10,7 +10,17 @@ pub(crate) struct Resources {
 struct Selection {
     commands: wgpu::Buffer,
     cpu: Vec<Receiver>,
+    objects: wgpu::Buffer,
+    evaluated_bounds: Vec<usize>,
+    scratch: std::sync::Mutex<CpuScratch>,
+    #[cfg(test)]
+    visits: std::sync::atomic::AtomicUsize,
     gpu: Option<Compaction>,
+}
+#[derive(Default)]
+struct CpuScratch {
+    instances: Vec<u32>,
+    commands: Vec<wgpu::util::DrawIndexedIndirectArgs>,
 }
 struct Receiver {
     draw: usize,
@@ -81,6 +91,10 @@ pub(crate) fn entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     .collect()
 }
 impl Resources {
+    pub(crate) fn unused(d:&wgpu::Device)->Self {
+        Self {plan:None,instances:init(d,"unread camera instances",&[0;4],wgpu::BufferUsages::VERTEX|wgpu::BufferUsages::STORAGE),run:std::sync::atomic::AtomicBool::new(false)}
+    }
+
     pub(crate) fn new(
         s: &InstalledScene,
         r: &Renderer,
@@ -118,7 +132,7 @@ impl Resources {
         // Path frames draw transparent draws' controls through their own instance
         // map; decoupled visibility passes draw them with the opaque ones.
         let culled = |i: usize| !s.plan.draws[i].transparent || s.plan.decoupled;
-        let enabled = d
+        let enabled = s.graph.runs(crate::graph::Pass::Depth) && d
             .features()
             .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && s.draws.iter().enumerate().any(|(i, draw)| {
@@ -138,7 +152,7 @@ impl Resources {
         // Ownership decides where selection runs, independently for each range.
         // Both producers write the same stable object-ID map and indirect count.
         let selected = |i: usize| culled(i) && subset.is_none_or(|subset| subset.draws[i]);
-        let cpu = s
+        let cpu: Vec<_> = s
             .draws
             .iter()
             .enumerate()
@@ -158,6 +172,7 @@ impl Resources {
                     .collect(),
             })
             .collect();
+        let evaluated_bounds = cpu.iter().filter_map(|range| s.draws[range.draw].evaluated().then_some(range.draw)).collect();
         let args: Vec<_> = s
             .draws
             .iter()
@@ -190,6 +205,10 @@ impl Resources {
                 plan: Some(Selection {
                     commands,
                     cpu,
+                    objects: objects.clone(),
+                    evaluated_bounds,
+                    scratch: Default::default(),
+                    #[cfg(test)] visits: Default::default(),
                     gpu: None,
                 }),
             };
@@ -293,6 +312,10 @@ impl Resources {
             plan: Some(Selection {
                 commands,
                 cpu,
+                objects: objects.clone(),
+                evaluated_bounds,
+                scratch: Default::default(),
+                #[cfg(test)] visits: Default::default(),
                 gpu: Some(Compaction {
                     pipelines,
                     bind,
@@ -302,6 +325,10 @@ impl Resources {
                 }),
             }),
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_visits(&self) -> usize {
+        self.plan.as_ref().map_or(0, |plan| plan.visits.load(std::sync::atomic::Ordering::Relaxed))
     }
     pub(crate) fn commands(&self) -> Option<&wgpu::Buffer> {
         self.plan.as_ref().map(|plan| &plan.commands)
@@ -319,25 +346,27 @@ impl Resources {
             changes.upload(&gpu.config, 28, bytemuck::bytes_of(&1u32));
             changes.upload(&gpu.config, 32, bytemuck::bytes_of(&vp));
         }
-        self.prepare(vp, objects, geometry_bounds, changes);
-    }
-    pub(crate) fn prepare(
-        &self,
-        vp: Mat4,
-        objects: &[Object],
-        geometry_bounds: &[Option<(Vec3,Vec3)>],
-        changes: &mut crate::values::ChangeTracker,
-    ) {
-        let Some(plan) = &self.plan else {
-            return;
-        };
-        self.prepare_into(
-            vp,
-            objects,
-            geometry_bounds,
-            changes,
-            [(&plan.commands, 0), (&self.instances, 0)],
-        );
+        let Some(plan) = &self.plan else { return; };
+        if plan.cpu.is_empty() { return; }
+        // Static local bounds and membership belong to the installed ranges.
+        // Only evaluated bounds can change. Never scan the object population to
+        // discover that its published buffer and camera stayed unchanged.
+        let mut inputs = Vec::with_capacity(72 + 28 * plan.evaluated_bounds.len());
+        inputs.extend_from_slice(bytemuck::bytes_of(&vp));
+        inputs.extend_from_slice(&changes.buffer_revision(&plan.objects).to_le_bytes());
+        for &draw in &plan.evaluated_bounds {
+            if let Some((lo, hi)) = geometry_bounds.get(draw).copied().flatten() {
+                inputs.extend_from_slice(bytemuck::cast_slice(&[1.,lo.x,lo.y,lo.z,hi.x,hi.y,hi.z]));
+            } else {
+                inputs.extend_from_slice(&[0;28]);
+            }
+        }
+        let changed = changes.changed(crate::values::ChangeKey::CameraSelection(plan.commands.clone()), &inputs);
+        // Two publications can share a sample stamp. Reprepare on that sample
+        // even if an earlier call already consumed its first publication.
+        if !changed && !changes.buffer_dirty(&plan.objects) { return; }
+        self.prepare_into(vp, objects, geometry_bounds, changes,
+            [(&plan.commands, 0), (&self.instances, 0)]);
     }
     fn prepare_into(
         &self,
@@ -352,15 +381,20 @@ impl Resources {
         };
         // Adjacent CPU ranges share uploads. GPU-owned ranges split the spans,
         // so dirty CPU values can never overwrite GPU-produced counts or IDs.
+        let mut scratch = plan.scratch.lock().unwrap();
+        let CpuScratch { instances, commands } = &mut *scratch;
         for ranges in plan.cpu.chunk_by(|a, b| a.draw + 1 == b.draw) {
             let first = ranges[0].objects.start;
             let end = ranges.last().unwrap().objects.end;
-            let mut instances = vec![0u32; (end - first) as usize];
-            let mut commands = Vec::with_capacity(ranges.len());
+            instances.resize((end - first) as usize, 0);
+            commands.clear();
+            #[cfg(test)]
+            plan.visits.fetch_add(ranges.iter().map(|range| range.objects.len()).sum::<usize>(), std::sync::atomic::Ordering::Relaxed);
             for range in ranges {
+                let bounds = geometry_bounds.get(range.draw).copied().flatten().or(range.bounds);
                 let mut count = 0;
                 for (object, included) in range.objects.clone().zip(&range.included) {
-                    if *included && !outside(vp, &objects[object as usize], geometry_bounds.get(range.draw).copied().flatten().or(range.bounds)) {
+                    if *included && !outside(vp, &objects[object as usize], bounds) {
                         instances[(range.objects.start - first + count) as usize] = object + 1;
                         count += 1;
                     }
@@ -378,13 +412,20 @@ impl Resources {
                 targets[0].1
                     + ranges[0].draw as u64
                         * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64,
-                bytemuck::cast_slice(&commands),
+                bytemuck::cast_slice(commands),
             );
             changes.upload(
                 targets[1].0,
                 targets[1].1 + u64::from(first) * 4,
-                bytemuck::cast_slice(&instances),
+                bytemuck::cast_slice(instances),
             );
+            // Keep scratch zeroed between uses. Only selected prefixes were
+            // written; clearing the whole population penalizes camera misses
+            // even when almost every object remains outside the view.
+            for (range, command) in ranges.iter().zip(commands.iter()) {
+                let start = (range.objects.start - first) as usize;
+                instances[start..start + command.instance_count as usize].fill(0);
+            }
         }
     }
 
@@ -429,10 +470,13 @@ impl Resources {
     pub(crate) fn copy_sample(
         &self,
         encoder: &mut wgpu::CommandEncoder,
+        changes: &mut crate::values::ChangeTracker,
         values: &wgpu::Buffer,
         sample: u32,
     ) {
         let plan = self.plan.as_ref().unwrap();
+        changes.replace_gpu(&[&plan.commands, &self.instances],
+            crate::values::ChangeKey::CameraSelection(plan.commands.clone()));
         let base = u64::from(sample) * (plan.commands.size() + self.instances.size());
         let command_size = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
         for ranges in plan.cpu.chunk_by(|a, b| a.draw + 1 == b.draw) {
@@ -594,7 +638,8 @@ fn compaction_preserves_order_across_blocks_views_and_subsets() -> Result<()> {
                 1,
             );
         } else {
-            cull.prepare(vp, &s.objects, &[], &mut changes);
+            cull.prepare_into(vp, &s.objects, &[], &mut changes,
+                [(cull.commands().unwrap(), 0), (&cull.instances, 0)]);
         }
         for (buffer, offset, source, size) in &changes.uploads {
             r.queue.write_buffer(
@@ -618,7 +663,7 @@ fn compaction_preserves_order_across_blocks_views_and_subsets() -> Result<()> {
         if let Some(samples) = &samples {
             // Both selections were uploaded before encoding: restoring sample 0
             // must not use the last sample's camera, including in a mixed view.
-            cull.copy_sample(&mut encoder, samples, 0);
+            cull.copy_sample(&mut encoder, &mut changes, samples, 0);
         }
         cull.encode(&mut encoder, Some(&queries));
         encoder.copy_buffer_to_buffer(

@@ -278,7 +278,7 @@ impl Engine {
         for (name, buffer) in &guides {filter.image(name, buffer, size);}
         unsafe {
             (self.device.api.boolean)(filter.handle, c"hdr".as_ptr(), true);
-            // Beauty is already in authored pre-exposure units. Per-image HDR
+            // Beauty uses the renderer’s scene-linear working units. Per-image HDR
             // autoexposure would couple pixels to unrelated sampling roundoff.
             (self.device.api.float)(filter.handle, c"inputScale".as_ptr(), 1.);
             (self.device.api.boolean)(filter.handle, c"cleanAux".as_ptr(), true);

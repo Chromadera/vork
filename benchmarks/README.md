@@ -32,11 +32,11 @@ and record that choice. `--resolution 320x180 --repetitions 1` is a smoke run on
 separately from final/path. No timings are projections. Inspect every image and
 report failures, hardware, driver, build, cache state and quality differences.
 
-**Known failure:** the helper fails during camera preparation on Blender 5.2.1:
-its Track To axis enum is invalid, and Python exceptions do not stop preparation
-reliably. The historical comparisons cannot currently be reproduced with it.
-Repair and validation across scenes are pending. The commands below describe
-the intended workflow.
+The helper targets Blender 5.2.1: preparation uses its Track To enums and
+video settings, resolves fixed and named camera/light targets, and stops on
+Python errors before attempting a render. All ten scenes have been prepared on
+5.2.1; this is workflow validation, not a fresh reproduction of the historical
+GPU timings. Fetch the pinned assets first as above.
 
 To create and time Blender inputs, use the separately licensed
 [Blender benchmark helper](../integrations/blender/benchmark.py). It imports the

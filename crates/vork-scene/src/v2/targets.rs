@@ -504,12 +504,19 @@ impl Scene {
         };
         let keys = match &track.times {
             Times::Inline(t) => {
+                if matches!(target,TrackTarget::ImageTime {..}|TrackTarget::Render(RenderProperty::Camera)) {
+                    let Keys::Inline(keys)=&track.keys else {unreachable!()};
+                    let times=keys.iter().map(|key|serde_json::from_value::<vork_time::Clock>(key[0].clone()).map(|t|t.exact())).collect::<std::result::Result<Vec<_>,_>>()?;
+                    ensure!(!times.is_empty() && times.iter().all(|t|*t>=vork_time::exact::Rational::from_integer(0.into())) && times.windows(2).all(|p|p[0]<p[1]),
+                        "track {path}: times must be non-empty, finite, >= 0 and strictly increasing");
+                } else {
                 ensure!(
                     !t.is_empty()
                         && t.iter().all(|x| x.is_finite() && *x >= 0.)
                         && t.windows(2).all(|w| w[0] < w[1]),
                     "track {path}: times must be non-empty, finite, >= 0 and strictly increasing"
                 );
+                }
                 Some(t.len())
             }
             Times::Buffer(name) => {
@@ -563,6 +570,10 @@ impl Scene {
                     let ok = match value {
                         TrackValue::Numeric(_) if euler => v.as_object().is_some_and(|o| o.len() == 1)
                             && v.get("euler").is_some_and(|angles| numeric(angles, 3)),
+                        TrackValue::Numeric(1) if matches!(target,TrackTarget::ImageTime {..}) => {
+                            let scalar=v.as_array().filter(|v|v.len()==1).map_or(v,|v|&v[0]);
+                            serde_json::from_value::<vork_time::Clock>(scalar.clone()).is_ok()
+                        }
                         TrackValue::Numeric(w) => numeric(v, w),
                         TrackValue::Bool => v.is_boolean(),
                         TrackValue::Camera | TrackValue::Token => v.is_string(),

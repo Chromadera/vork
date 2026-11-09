@@ -15,6 +15,7 @@ def prepare(scene_path, out, engine, width, height, video=False):
     source = json.loads(scene_path.read_text())
     scene = bpy.context.scene
     objects = {}
+    aims = []
     def point(v):
         return Vector((v[0], -v[2], v[1]))
     for n in source['nodes']:
@@ -43,15 +44,9 @@ def prepare(scene_path, out, engine, width, height, video=False):
             obj = bpy.data.objects.new(n['name'], data)
             scene.collection.objects.link(obj)
             obj.location = point(n['translation'])
-            obj.rotation_euler = (point(n['target'])-obj.location).to_track_quat('-Z','Y').to_euler()
+            aims.append((obj, n['target']))
             scene.camera = obj
             objects[n['name']] = obj
-            target = bpy.data.objects.new(n['name'] + '-target', None)
-            scene.collection.objects.link(target)
-            target.location = point(n['target'])
-            constraint = obj.constraints.new('TRACK_TO')
-            constraint.target = target
-            constraint.track_axis, constraint.up_axis = '-Z', 'UP_Y'
         elif n['type'] == 'light' and n['shape'] == 'environment':
             world = bpy.data.worlds.new('world')
             world.use_nodes = True
@@ -71,8 +66,20 @@ def prepare(scene_path, out, engine, width, height, video=False):
             obj = bpy.data.objects.new(n['name'], data)
             scene.collection.objects.link(obj)
             obj.location = point(n['translation'])
-            obj.rotation_euler = (point(n['target'])-obj.location).to_track_quat('-Z','Y').to_euler()
+            aims.append((obj, n['target']))
             objects[n['name']] = obj
+    # Resolve node targets after imports and authored nodes exist, including
+    # forward references. Track To follows animated origins throughout the movie.
+    for obj, aim in aims:
+        if isinstance(aim, str):
+            target = objects[aim]
+        else:
+            target = bpy.data.objects.new(obj.name + '-target', None)
+            scene.collection.objects.link(target)
+            target.location = point(aim)
+        constraint = obj.constraints.new('TRACK_TO')
+        constraint.target = target
+        constraint.track_axis, constraint.up_axis = 'TRACK_NEGATIVE_Z', 'UP_Y'
     scene.render.engine = engine
     scene.render.resolution_x, scene.render.resolution_y = width, height
     scene.render.resolution_percentage = 100
@@ -157,7 +164,7 @@ def prepare(scene_path, out, engine, width, height, video=False):
         scene.eevee.taa_render_samples = 64
         scene.eevee.use_raytracing = True
     if video:
-        scene.render.image_settings.file_format = 'FFMPEG'
+        scene.render.image_settings.media_type = 'VIDEO'
         scene.render.ffmpeg.format = 'MPEG4'
         scene.render.ffmpeg.codec = 'H264'
         scene.render.ffmpeg.constant_rate_factor = 'HIGH'
@@ -192,7 +199,7 @@ def main():
         for engine in a.engines.split(','):
             stem=name+'-'+engine
             blend=a.out/(stem+'.blend')
-            cmd=[a.blender,'-b','--disable-autoexec','--python',str(Path(__file__).resolve()),
+            cmd=[a.blender,'-b','--disable-autoexec','--python-exit-code','1','--python',str(Path(__file__).resolve()),
                  '--','--prepare',str(root/'benchmarks'/(name+'.json')),str(blend),engine,str(width),str(height),'video' if a.video else 'still']
             with (a.out/(stem+'-prepare.log')).open('w') as log:
                 subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)

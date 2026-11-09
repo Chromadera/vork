@@ -10,6 +10,7 @@ the authored glare example (examples/compositor-effects/glare.slang) reads the p
 <!-- all -->
 COMPOSITOR PROGRAM REFERENCE
 float4 composite(CompositeContext,Inputs): scene-linear premultiplied RGBA; compositor_sample(uv) reads previous result (first reads accumulated beauty).
+File/video image samples become premultiplied RGBA before filtering.
 compositor_sample(image,uv): clamped bilinear; compositor_load(image,int2): clamped pixel; compositor_size(image): pixels; compositor_size() reads previous extent. UV origin top left; ctx.size is working extent.
 Runs after shutter accumulation/denoising, before exposure/display. No history. std/bloom stages: prepare/downsample/upsample/combine; the authored glare example (examples/compositor-effects/glare.slang) returns additive RGBA for a separate merge.
 

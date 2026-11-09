@@ -98,7 +98,7 @@ fail:
 
 /* Consumes preparation and fd on every return. Match the actual Vulkan UUID. */
 NvSession *vork_nv_open(NvSession *s, int fd, uint64_t allocation_size, const unsigned char *uuid,
-                         unsigned width, unsigned height, unsigned pitch, unsigned fps, unsigned bitrate, unsigned gop_frames,
+                         unsigned width, unsigned height, unsigned pitch, unsigned fps_num, unsigned fps_den, unsigned bitrate, unsigned gop_frames,
                          unsigned capacity, int *error) {
     *error = -1;
     if (!s) { close(fd); return NULL; }
@@ -198,8 +198,8 @@ NvSession *vork_nv_open(NvSession *s, int fd, uint64_t allocation_size, const un
     initialize.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
     initialize.encodeWidth = initialize.darWidth = width;
     initialize.encodeHeight = initialize.darHeight = height;
-    initialize.frameRateNum = fps;
-    initialize.frameRateDen = 1;
+    initialize.frameRateNum = fps_num;
+    initialize.frameRateDen = fps_den;
     initialize.enablePTD = 1;
     initialize.encodeConfig = &config;
     CHECK(s->api.nvEncInitializeEncoder(s->encoder, &initialize));

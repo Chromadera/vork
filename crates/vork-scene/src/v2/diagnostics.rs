@@ -24,6 +24,11 @@ pub fn distance(a: &str, b: &str) -> usize {
 /// Dotted paths compare segment by segment, so an omitted intermediate object costs
 /// one (`render.shutter` finds `render.motion_blur.shutter`).
 pub fn unknown<'a>(kind: &str, name: &str, valid: impl IntoIterator<Item = &'a str>) -> String {
+    if kind == "program" && matches!(name,
+        "std/fog" | "blender/principled_volume" | "blender.volume" |
+        "post/vignette" | "post/lens_distortion" | "post/glare" | "std/highlight") {
+        return format!("unknown program {name:?}; this program was removed; see `vork help upgrade`");
+    }
     // Error-only Blender vocabulary; these names are never accepted as aliases.
     const BLENDER_HINTS: &[(&str, &str, &str)] = &[
         ("field", "world", "environment light (nodes[].shape: environment)"),
@@ -40,7 +45,8 @@ pub fn unknown<'a>(kind: &str, name: &str, valid: impl IntoIterator<Item = &'a s
         ("program", "blender/principled", "std/openpbr"),
     ];
     if let Some((_, _, hint)) = BLENDER_HINTS.iter().find(|(k, n, _)| *k == kind && *n == name) {
-        return format!("unknown {kind} {name:?}; use {hint}");
+        return format!("unknown {kind} {name:?}; use {hint}{}",
+            if kind == "program" { "; see `vork help upgrade`" } else { "" });
     }
     fn path_distance(a: &str, b: &str) -> usize {
         if !a.contains('.') && !b.contains('.') {
@@ -153,6 +159,9 @@ fn accepts(value: &Value, schema: &Value, root: &Value) -> bool {
 }
 fn inspect(value: &Value, schema: &Value, root: &Value, path: &str) -> Result<()> {
     let schema = resolve(schema, root);
+    if schema.get("x-clock").and_then(Value::as_bool)==Some(true) {
+        serde_json::from_value::<super::Time>(value.clone()).map_err(|error|anyhow::anyhow!("{path}: {error}"))?;
+    }
     if let Some(variants) = schema.get("enum").and_then(Value::as_array) {
         if !variants.contains(value) {
             let name = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
@@ -659,5 +668,16 @@ mod blender_hints {
             let error = decode_error(&bytes, original).to_string();
             assert!(error.contains(expected), "{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    #[test]
+    fn removed_programs_point_to_upgrade_without_accepting_aliases() {
+        for name in ["std/fog", "blender/principled_volume", "blender.volume", "post/vignette", "post/lens_distortion", "post/glare", "std/highlight"] {
+            assert!(super::unknown("program", name, ["std/openpbr"]).contains("vork help upgrade"));
+        }
+        assert!(!super::unknown("program", "std/typo", ["std/openpbr"]).contains("was removed"));
     }
 }

@@ -1,4 +1,4 @@
-import { engine } from './engine.js';
+import { engine, launchError } from './engine.js';
 import { execFileSync } from 'node:child_process';
 
 /** Run `vork std FUNCTION -` (VORK_BIN overrides the executable); failures carry the CLI's message. */
@@ -10,7 +10,7 @@ export function stdCommand(name: string, argument: unknown): unknown {
     }));
   } catch (error) {
     const stderr = String((error as { stderr?: unknown }).stderr ?? '').trim();
-    if (!stderr) throw error;
+    if (!stderr) launchError(error);
     throw new Error(`vork std ${name}: ${stderr}`, { cause: error });
   }
 }

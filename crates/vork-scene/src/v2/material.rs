@@ -7,10 +7,10 @@ pub struct Image {
     /// Seconds into media; omitted follows scene time. EXR sequences honor
     /// framesPerSecond metadata; other sequences use render.fps.
     #[serde(default)]
-    #[schemars(extend("x-source" = "vork (footage clock)", "x-help-path" = "image.time", "x-help" = "number|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends"))]
-    pub time: Option<f32>,
+    #[schemars(extend("x-source" = "vork (footage clock)", "x-help-path" = "image.time", "x-help" = "number|rational string|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends"))]
+    pub time: Option<vork_time::Clock>,
     #[serde(default)]
-    #[schemars(extend("x-source" = "vork (nested scene-linear render)", "x-help-path" = "image.render", "x-help" = "ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA", "x-help-extra" = "image.render restrictions: first shared pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported"))]
+    #[schemars(extend("x-source" = "vork (nested scene-linear render)", "x-help-path" = "image.render", "x-help" = "ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA", "x-help-extra" = "image.render restrictions: shared parent pose; aperture sampling is renderer-selected; geometry_opacity/alpha_cutoff/geometry_normal/environment image inputs unsupported"))]
     pub render: Option<ImageRender>,
     /// Blender `Image.colorspace_settings.name`. Omitted follows Blender's file default.
     #[serde(default)]
@@ -223,11 +223,11 @@ pub enum ComputeSchedule {
 #[serde(deny_unknown_fields)]
 pub struct Simulation {
     /// Time of the initialized state S0, in seconds.
-    #[schemars(extend("x-source" = "vork simulation contract", "x-help-path" = "simulation.t0", "x-help" = "seconds; initialized state S0; requests before t0 hold S0"))]
-    pub t0: f64,
+    #[schemars(extend("x-source" = "vork simulation contract", "x-help-path" = "simulation.t0", "x-help" = "number|rational string; seconds; initialized state S0; requests before t0 hold S0"))]
+    pub t0: vork_time::Clock,
     /// Positive fixed tick duration, in seconds; independent of render FPS.
-    #[schemars(extend("x-source" = "vork simulation contract", "x-help-path" = "simulation.dt", "x-help" = "positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints"))]
-    pub dt: f64,
+    #[schemars(extend("x-source" = "vork simulation contract", "x-help-path" = "simulation.dt", "x-help" = "number|rational string; positive finite seconds; fixed tick independent of output FPS; inputs sample left endpoints"))]
+    pub dt: vork_time::Clock,
     /// Simulation randomness is independent of image sampling randomness.
     #[schemars(extend("x-source" = "vork simulation contract", "x-help-path" = "simulation.seed", "x-help" = "u32; independent of image sampling seed"))]
     pub seed: u32,
@@ -279,8 +279,8 @@ pub enum Opacity { #[default] Coverage, Transmittance }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Input {
-    Number(f32),
-    Vector(Vec<f32>),
+    Number(#[serde(deserialize_with="super::numeric")] f32),
+    Vector(#[serde(deserialize_with="super::numeric")] Vec<f32>),
     Bool(bool),
     Texture(TextureBinding),
     Attribute(AttributeBinding),
@@ -367,8 +367,8 @@ pub struct TextureBinding {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Factor {
-    Number(f32),
-    Vector(Vec<f32>),
+    Number(#[serde(deserialize_with="super::numeric")] f32),
+    Vector(#[serde(deserialize_with="super::numeric")] Vec<f32>),
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

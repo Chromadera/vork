@@ -57,7 +57,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
                 gpu(),
                 63,
                 32,
-                24,
+                vork_encode::Time::integer(24),
                 EncodeSettings::default(),
                 root.join("odd.mp4"),
                 3
@@ -70,7 +70,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
             backend,
             device.limits().max_texture_dimension_2d + 2,
             32,
-            24,
+            vork_encode::Time::integer(24),
             EncodeSettings::default(),
             &limits_path,
         )
@@ -88,7 +88,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
             gpu(),
             64,
             32,
-            24,
+            vork_encode::Time::integer(24),
             EncodeSettings::default(),
             root.join("empty.mp4"),
             3,
@@ -99,7 +99,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
             gpu(),
             64,
             32,
-            24,
+            vork_encode::Time::integer(24),
             EncodeSettings::default(),
             root.join("missing.mp4"),
             3,
@@ -114,7 +114,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
         missing.finish().unwrap();
         let full_path = root.join(format!("full.{extension}"));
         let prepared = std::thread::spawn(move || {
-            Encoder::prepare(backend, 64, 32, 24, EncodeSettings::default(), full_path)
+            Encoder::prepare(backend, 64, 32, vork_encode::Time::integer(24), EncodeSettings::default(), full_path)
         })
         .join()
         .unwrap()
@@ -227,7 +227,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
     };
     let bad_path = root.join("missing-parent/failed.mov");
     let mut failed =
-        Encoder::open(gpu(), 64, 32, 24, EncodeSettings::default(), &bad_path, 3).unwrap();
+        Encoder::open(gpu(), 64, 32, vork_encode::Time::integer(24), EncodeSettings::default(), &bad_path, 3).unwrap();
     // A short stream can queue all its pixels before ffmpeg rejects the destination.
     let mut failed_surface = failed.create_surface().unwrap();
     let source = texture();
@@ -256,7 +256,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
             hardware,
             64,
             32,
-            24,
+            vork_encode::Time::integer(24),
             EncodeSettings::default(),
             root.join("hardware.mov"),
             3
@@ -277,7 +277,7 @@ fn dropping_preparation_preserves_existing_output() {
             Backend::Auto,
             64,
             32,
-            24,
+            vork_encode::Time::integer(24),
             EncodeSettings::default(),
             worker_path,
         )

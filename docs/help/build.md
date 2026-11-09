@@ -69,7 +69,8 @@ cargo +1.96 build --release --workspace --locked
 ./target/release/vork help
 ```
 
-The build compiles shaders for both Vulkan and Metal on either host. It checks
+The build compiles shaders for both Vulkan and Metal on either host. Linux builds
+that only need Vulkan may set VORK_SHADER_TARGETS=spirv to skip Metal compilation. It checks
 the Slang version against the pin. `VORK_SLANGC` must be an absolute executable
 path; alternatively the build can find the pinned `slangc` on `PATH`. Export
 `VORK_SLANGC` again in each new shell, or add the export to your shell startup

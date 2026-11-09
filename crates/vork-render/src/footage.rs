@@ -2,6 +2,7 @@
 //! decoder: timestamp/keyframe lookup, sequential raw-frame pipe, indexed backwards
 //! seeks. No clip is decoded into an unbounded in-memory frame collection.
 use anyhow::{Context, Result, ensure};
+use vork_time::exact::{Germ, Rational, decimal};
 use std::{io::Read, path::{Path, PathBuf}, process::{Child, ChildStdout, Command, Stdio}};
 
 pub fn is_media(path: &Path) -> bool {
@@ -22,18 +23,26 @@ fn is_sequence(path:&Path)->bool {
 }
 
 pub enum Source {
-    Sequence { files:Vec<PathBuf>, fps:Option<f32> },
+    Sequence { files:Vec<PathBuf>, fps:Option<vork_time::Time> },
     Video(Video),
 }
 impl Source {
+    /// Files owned by this opened source, including every discovered sequence frame.
+    pub fn files(&self) -> &[PathBuf] {
+        match self {
+            Self::Sequence {files,..} => files,
+            Self::Video(video) => std::slice::from_ref(&video.path),
+        }
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if is_sequence(path) {
             let files=sequence(path)?;
             let fps=if files[0].extension().is_some_and(|e|e.eq_ignore_ascii_case("exr")) {
                 exr::meta::MetaData::read_from_file(&files[0],false)?.headers[0].own_attributes.frames_per_second
-                    .map(|(n,d)|n as f32/d as f32)
+                    .map(|(n,d)|vork_time::Time::new(n.into(),d.into())).transpose().context("EXR sequence framesPerSecond must be positive")?
             } else {None};
-            ensure!(fps.is_none_or(|fps|fps.is_finite() && fps>0.),"EXR sequence framesPerSecond must be positive");
+            ensure!(fps.is_none_or(|fps|fps > vork_time::Time::ZERO),"EXR sequence framesPerSecond must be positive");
             return Ok(Self::Sequence {files,fps});
         }
         Ok(Self::Video(Video::open(path)?))
@@ -49,10 +58,44 @@ impl Source {
         }
         Ok(source)
     }
-    pub fn timeline(&self,fps:f32)->Result<Vec<f32>> {
-        ensure!(fps.is_finite() && fps>0.,"footage fps must be positive");
-        let mut times=match self {Self::Sequence {files,fps:source_fps}=>(0..files.len()).map(|k| {let fps=source_fps.unwrap_or(fps);let mut t=k as f32/fps;while (t as f64*fps as f64).floor()<(k as f64) {t=t.next_up();}t}).collect::<Vec<_>>(),Self::Video(video)=>video.times.iter().map(|t|*t as f32).collect()};
-        times.dedup();Ok(times)
+    pub fn timeline(&self,fps:vork_time::Time)->Result<Vec<vork_time::Clock>> {
+        self.exact_timeline(fps)?.iter().map(|time|time.value().to_string().parse()).collect()
+    }
+    /// All identity consumers, including timeline generation, use these same
+    /// boundaries. The decoder receives the selected integer, never a rounded time.
+    pub(crate) fn frame_index_exact(&self, time:&Germ, fps:vork_time::Time)->Result<usize> {
+        match self {
+            Self::Sequence {files,fps:source_fps} => {
+                let rate=source_fps.map(|rate|decimal(&rate.to_string())).transpose()?
+                    .unwrap_or(decimal(&fps.to_string())?);
+                Ok(time.scale(&rate).floor_clamped(0,i64::try_from(files.len()-1)?)? as usize)
+            }
+            Self::Video(video) => Ok(video.frame_index(time)),
+        }
+    }
+    pub(crate) fn exact_timeline(&self, fps:vork_time::Time)->Result<Vec<Germ>> {
+        Ok(match self {
+            Self::Sequence {files,fps:source_fps} => {
+                let rate=source_fps.map(|rate|decimal(&rate.to_string())).transpose()?.unwrap_or(decimal(&fps.to_string())?);
+                (0..files.len()).map(|n|Germ::point(Rational::from_integer(n.into())/&rate)).collect()
+            }
+            Self::Video(video) => {
+                let mut times:Vec<_>=video.pts.iter().map(|&pts|Germ::point(
+                    (Rational::from_integer(pts.into())-Rational::from_integer(video.pts[0].into()))*&video.timebase)).collect();
+                times.dedup();times
+            }
+        })
+    }
+    pub(crate) fn frame_exact(&mut self,time:&Germ,fps:vork_time::Time,max_side:u32)->Result<image::DynamicImage> {
+        let index=self.frame_index_exact(time,fps)?;
+        match self {
+            Self::Sequence {files,..} => {
+                let path=&files[index];
+                crate::texture_source::decode(path,&std::fs::read(path)?,max_side)
+                    .with_context(||format!("decode sequence frame {}",path.display()))
+            }
+            Self::Video(video) => video.frame_at(index,max_side),
+        }
     }
     pub(crate) fn identity(&self)->Result<blake3::Hash> {
         let mut hash=blake3::Hasher::new();
@@ -60,25 +103,10 @@ impl Source {
         for file in files {let mut part=blake3::Hasher::new();part.update_reader(std::fs::File::open(file)?)?;hash.update(part.finalize().as_bytes());}
         Ok(hash.finalize())
     }
-    pub(crate) fn frame_index(&self,time:f32,fps:f32)->usize {
-        match self {
-            Self::Sequence {files,fps:source_fps}=>((time.max(0.) as f64*source_fps.unwrap_or(fps) as f64).floor() as usize).min(files.len()-1),
-            Self::Video(video)=>video.times.partition_point(|&t|(t as f32)<=time).saturating_sub(1),
-        }
+    pub fn frame(&mut self,time:impl Into<vork_time::Request>,fps:vork_time::Time,max_side:u32)->Result<image::DynamicImage> {
+        self.frame_exact(&time.into().exact()?,fps,max_side)
     }
-    pub fn frame(&mut self, time: f32, fps: f32, max_side: u32) -> Result<image::DynamicImage> {
-        ensure!(time.is_finite(), "image.time must be finite");
-        match self {
-            Self::Sequence {files:frames,fps:source_fps} => {
-                let fps=source_fps.unwrap_or(fps);
-                let index = ((time.max(0.) as f64 * fps as f64).floor() as usize).min(frames.len()-1);
-                let path = &frames[index];
-                crate::texture_source::decode(path, &std::fs::read(path)?, max_side)
-                    .with_context(|| format!("decode sequence frame {}", path.display()))
-            }
-            Self::Video(video) => video.frame(time as f64, max_side),
-        }
-    }
+
 }
 
 fn sequence(path: &Path) -> Result<Vec<PathBuf>> {
@@ -124,8 +152,11 @@ impl Drop for Session {
 }
 pub struct Video {
     path: PathBuf,
+    #[cfg(test)]
     times: Vec<f64>,
-    keyframes: Vec<(usize,f64)>,
+    keyframes: Vec<(usize,i64)>,
+    pts: Vec<i64>,
+    timebase: Rational,
     last_request: Option<usize>,
     #[cfg(test)]
     decoded: usize,
@@ -135,6 +166,12 @@ pub struct Video {
     frames: std::collections::VecDeque<(usize, image::DynamicImage)>,
 }
 impl Video {
+    fn frame_index(&self,time:&Germ)->usize {
+        self.pts.partition_point(|&pts| {
+            let delta=Rational::from_integer(pts.into())-Rational::from_integer(self.pts[0].into());
+            time.compare_point(&(delta*&self.timebase)).is_ge()
+        }).saturating_sub(1)
+    }
     fn open(path: &Path) -> Result<Self> {
         // ffprobe and ffmpeg both apply container edit lists. Presentation times
         // are relative to the first displayed frame, never packet/decode order.
@@ -150,26 +187,39 @@ impl Video {
             if rotation.rem_euclid(180) == 90 {size.swap(0,1);}
         }
         let (numerator,denominator)=stream["time_base"].as_str().context("video time base missing")?.split_once('/').context("invalid video time base")?;
+        let timebase=decimal(&format!("{numerator}/{denominator}"))?;
+        ensure!(timebase > Rational::from_integer(0.into()), "video time base must be positive");
+        let pts:Vec<i64> = value["frames"].as_array().context("video has no displayed frames")?.iter()
+            .map(|f|f["best_effort_timestamp"].as_i64().context("video frame has no presentation timestamp")).collect::<Result<_>>()?;
+        ensure!(pts.windows(2).all(|p|p[0]<=p[1]), "video presentation timestamps must be ordered");
+        #[cfg(test)]
         let tick=numerator.parse::<f64>()?/denominator.parse::<f64>()?;
+        #[cfg(test)]
         let mut times: Vec<f64> = value["frames"].as_array().context("video has no displayed frames")?.iter()
             .map(|f| f["best_effort_timestamp"].as_i64().map(|pts|pts as f64*tick).context("video frame has no presentation timestamp"))
             .collect::<Result<_>>()?;
-        ensure!(!times.is_empty() && size.iter().all(|&n|n>0), "video has no displayed frames");
+        ensure!(!pts.is_empty() && size.iter().all(|&n|n>0), "video has no displayed frames");
         // Only unique presentation times are seek anchors: a later keyframe
         // sharing a timestamp cannot identify which duplicate FFmpeg will emit.
-        let keyframes=times.iter().enumerate().filter_map(|(i,&time)| {
+        let keyframes=pts.iter().enumerate().filter_map(|(i,&time)| {
             (i>0 && value["frames"][i]["key_frame"].as_u64()==Some(1)
-                && times[i-1]<time && times.get(i+1).is_none_or(|&t|t>time))
+                && pts[i-1]<time && pts.get(i+1).is_none_or(|&t|t>time))
                 .then_some((i,time))
         }).collect();
-        let first = times[0];
-        for time in &mut times {*time -= first;}
-        ensure!(times.iter().all(|t|t.is_finite()) && times.windows(2).all(|w|w[1]>=w[0]), "video presentation timestamps are invalid");
-        Ok(Self {path:path.into(), times, keyframes, last_request:None, #[cfg(test)] decoded:0, size, session:None, hardware:false, frames:Default::default()})
+        #[cfg(test)] {
+            let first = times[0];
+            for time in &mut times {*time -= first;}
+        }
+        Ok(Self {path:path.into(), #[cfg(test)] times, pts, timebase, keyframes, last_request:None, #[cfg(test)] decoded:0, size, session:None, hardware:false, frames:Default::default()})
     }
+    #[cfg(test)]
     fn frame(&mut self, time: f64, max_side:u32) -> Result<image::DynamicImage> {
         ensure!(self.size.iter().all(|&n|n<=max_side), "video {} exceeds GPU texture side {max_side}", self.path.display());
-        let index = self.times.partition_point(|&t|(t as f32)<=time as f32).saturating_sub(1);
+        let index = self.frame_index(&Germ::point(vork_time::Clock::from(time).exact()));
+        self.frame_at(index,max_side)
+    }
+    fn frame_at(&mut self,index:usize,max_side:u32)->Result<image::DynamicImage> {
+        ensure!(self.size.iter().all(|&n|n<=max_side), "video {} exceeds GPU texture side {max_side}", self.path.display());
         let previous=self.last_request.replace(index);
         if let Some((_,frame)) = self.frames.iter().find(|(cached,_)|*cached==index) {return Ok(frame.clone());}
         // For a reverse walk retain the next predicted request too. The existing
@@ -187,7 +237,11 @@ impl Video {
                 // Absolute container timestamps avoid assuming stream/container
                 // start times agree. Round down at FFmpeg's microsecond boundary
                 // so a fractional tick never discards the anchor itself.
-                command.args(["-seek_timestamp","1","-ss",&format!("{:.6}",(time*1e6).floor()/1e6)]);
+                let micros=(Rational::from_integer(time.into())*&self.timebase*Rational::from_integer(1_000_000.into())).floor().to_integer().to_string();
+                let (sign,digits)=micros.strip_prefix('-').map_or(("",micros.as_str()),|s|("-",s));
+                let digits=format!("{digits:0>7}");
+                let seek=format!("{sign}{}.{}",&digits[..digits.len()-6],&digits[digits.len()-6..]);
+                command.args(["-seek_timestamp","1","-ss",&seek]);
             }
             let mut child = command.arg("-i").arg(&self.path)
                 .args(["-map","0:v:0","-an","-sn","-fps_mode","passthrough","-f","rawvideo","-pix_fmt","rgba64le","pipe:1"])
@@ -195,7 +249,10 @@ impl Video {
             let stdout = child.stdout.take().unwrap();
             self.session = Some(Session {child,stdout,next:start});
         }
-        let session = self.session.as_mut().unwrap();
+        // A read can consume a partial frame before failing. Retain the pipe
+        // only after a complete request; every error drops and reaps it so the
+        // next uncached request restarts at its keyframe with aligned pixels.
+        let mut session = self.session.take().unwrap();
         let mut bytes = vec![0; self.size[0] as usize * self.size[1] as usize * 8];
         let mut result=None;
         while session.next<=index {
@@ -211,6 +268,7 @@ impl Video {
             session.next+=1;
         }
         let image=result.context("video frame missing")?;
+        self.session=Some(session);
         Ok(image)
     }
 }
@@ -218,6 +276,23 @@ impl Video {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_nominal_playback_and_timeline_share_boundaries()->Result<()> {
+        for rate in ["24", "30000/1001", "60000/1001"] {
+            let fps:vork_time::Time=rate.parse()?;
+            let source=Source::Sequence {files:vec![PathBuf::new();107893],fps:None};
+            let timeline=source.exact_timeline(fps)?;
+            for (n,time) in timeline.iter().enumerate() {
+                let nominal=vork_time::Request::Frame(n as u32,fps).exact()?;
+                assert_eq!(time,&nominal);
+                assert_eq!(source.frame_index_exact(&nominal,fps)?,n);
+                if n>0 {
+                    assert_eq!(source.frame_index_exact(&Germ::left(time.value().clone()),fps)?,n-1);
+                }
+            }
+        }
+        Ok(())
+    }
     #[test]
     #[ignore="requires a real GPU and pinned Slang"]
     fn sequence_compositor_samples_its_own_extent_and_updates_with_the_clock()->Result<()> {
@@ -259,14 +334,182 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real GPU and pinned Slang"]
+    fn aborted_recording_rejects_all_slots_until_reinstall() -> Result<()> {
+        // Both early per-sample uploads and late compositor reads can abort an
+        // exposure after retained keys advance. Exercise streaming and batching.
+        let r = crate::Renderer::new()?;
+        let root = std::env::temp_dir().join(format!("vork-aborted-recording-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        for name in ["a", "b"] {
+            for (frame, color) in [(0, [255, 0, 0, 255]), (1, [0, 0, 255, 255])] {
+                image::RgbaImage::from_pixel(4, 4, image::Rgba(color))
+                    .save(root.join(format!("{name}{frame}.png")))?;
+            }
+        }
+        for early in [false, true] {
+            for samples in [1, 2] {
+                let mut input = serde_json::json!({"version":2,
+                    "render":{"resolution":[4,4],"fps":24,"compositor":["comp"],
+                        "settings":{"samples":samples,"integrator":"path","denoiser":null}},
+                    "images":{"a":{"file":"a%d.png"},"b":{"file":"b%d.png"}},
+                    "programs":{"plate":{"source":"import vork; struct Inputs {Image a; Image b;}; float4 composite(CompositeContext c, Inputs i) {return 0.5*(compositor_sample(i.a,c.uv)+compositor_sample(i.b,c.uv));}"}},
+                    "materials":{"comp":{"program":"plate","inputs":{"a":{"image":"a"},"b":{"image":"b"}}}},
+                    "nodes":[{"type":"camera","name":"camera"}]});
+                if early {
+                    if samples == 2 {
+                        input["render"]["motion_blur"] = serde_json::json!({"shutter":1});
+                    }
+                    input["images"]["capture"] = serde_json::json!({"render":{
+                        "camera":"camera","resolution":[4,4],"compositor":["capture_mix"]
+                    }});
+                    input["materials"]["capture_mix"] = input["materials"]["comp"].clone();
+                    input["programs"]["capture_copy"] = serde_json::json!({"source":"import vork; struct Inputs {Image capture;}; float4 composite(CompositeContext c, Inputs i) {return compositor_sample(i.capture,c.uv);}"});
+                    input["materials"]["comp"] = serde_json::json!({"program":"capture_copy","inputs":{"capture":{"image":"capture"}}});
+                }
+                let input: crate::Scene = serde_json::from_value(input)?;
+                let scene = r.install(input.clone(), &root)?;
+                assert!(scene.footage.values().all(|source| source.per_sample == early));
+                let mut slot = scene.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
+                let mut other = scene.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
+                assert_eq!(!slot.image_views.is_empty(), early, "early abort covers moved capture owners");
+                let outputs = crate::ReadbackOutputs { float: crate::FloatOutputs {color:true,..Default::default()},..Default::default() };
+                slot.submit_outputs(&scene, &r, 0., outputs)?;
+                assert!(slot.collect(&r)?.linear_rgba.unwrap().iter().all(|p| *p == [1.,0.,0.,1.]));
+                other.submit_outputs(&scene, &r, 0., outputs)?;
+                std::fs::rename(root.join("b1.png"), root.join("b1.hidden"))?;
+                let failure = slot.submit_outputs(&scene, &r, 1./24., outputs).unwrap_err();
+                std::fs::rename(root.join("b1.hidden"), root.join("b1.png"))?;
+                assert_eq!(failure.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::NotFound);
+                if early && samples == 2 {
+                    assert_eq!(slot.view.sample_index, 1, "one streaming sample submitted before the abort");
+                }
+                assert!(other.collect(&r)?.linear_rgba.unwrap().iter().all(|p| *p == [1.,0.,0.,1.]),
+                    "an earlier submitted exposure can still be collected");
+                for target in [&mut slot, &mut other] {
+                    let retry = target.submit_outputs(&scene, &r, 1./24., outputs);
+                    assert!(retry.is_err(), "aborted recording admitted another submission (early={early}, samples={samples})");
+                    let error = format!("{:#}", retry.unwrap_err());
+                    assert!(error.contains("reinstall") && error.contains(&failure.root_cause().to_string()), "{error}");
+                }
+                let mut fresh = scene.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
+                assert!(fresh.submit_outputs(&scene, &r, 1./24., outputs).is_err());
+                // Reinstallation is the explicit recovery boundary; the renderer
+                // remains usable and restored sources must publish the new frame.
+                let clean = r.install(input, &root)?;
+                let mut recovered = clean.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
+                recovered.submit_outputs(&clean, &r, 2./24., outputs)?;
+                assert!(recovered.collect(&r)?.linear_rgba.unwrap().iter().all(|p| *p == [0.,0.,1.,1.]));
+            }
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    // This contract uses private corpus assets; private CI opts in explicitly.
+    #[cfg(vork_private_tests)]
+    #[test]
+    #[ignore = "requires a real GPU and pinned Slang"]
+    fn aborted_first_tlas_recording_cannot_be_reused() -> Result<()> {
+        let r = crate::Renderer::new()?;
+        let root = std::env::temp_dir().join(format!("vork-aborted-tlas-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join("geometry.bin"), include_bytes!("../tests/fixtures/geometry.bin"))?;
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0u8,0,255,255])).save(root.join("plate0.png"))?;
+        let mut input: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/analytic.json"))?;
+        input["render"]["resolution"] = serde_json::json!([32,24]);
+        input["render"]["settings"] = serde_json::json!({"samples":1,"integrator":"raster","denoiser":null});
+        input["render"]["compositor"] = serde_json::json!(["comp"]);
+        input["images"] = serde_json::json!({"plate":{"file":"plate%d.png"}});
+        input["programs"] = serde_json::json!({"plate":{"source":"import vork; struct Inputs {Image plate;}; float4 composite(CompositeContext c, Inputs i) {return 0.5*(compositor_sample(c.uv)+compositor_sample(i.plate,c.uv));}"}});
+        input["materials"]["comp"] = serde_json::json!({"program":"plate","inputs":{"plate":{"image":"plate"}}});
+        let input = vork_scene::v2::from_test_value(input)?;
+        let scene = r.install(input, &root)?;
+        assert!(!scene.footage["plate"].per_sample);
+        let mut slot = scene.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
+        assert_eq!(slot.rays.as_ref().expect("ray-shadow scene").builds, 0);
+        std::fs::rename(root.join("plate0.png"), root.join("plate.hidden"))?;
+        let error = slot.submit(&scene, &r, 0.).unwrap_err();
+        std::fs::rename(root.join("plate.hidden"), root.join("plate0.png"))?;
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(slot.rays.as_ref().unwrap().builds, 1, "the first TLAS build was recorded before the abort");
+        let retry = slot.submit(&scene, &r, 0.);
+        assert!(retry.is_err(), "retry admitted a recorded-but-unsubmitted TLAS");
+        let error = format!("{:#}", retry.unwrap_err());
+        assert!(error.contains("reinstall"), "{error}");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn image_clock_uses_track_layers_for_reverse_hold_and_loop() -> Result<()> {
         let scene:crate::Scene=serde_json::from_value(serde_json::json!({"version":2,"images":{"plate":{"file":"plate.mp4"}},"nodes":[{"type":"camera"}],
             "animation":[{"loop":true,"tracks":[{"path":["images","plate","time"],"keys":[[0,2],[1,1],[2,1],[3,0]]}]}]}))?;
         let plan=crate::animation::Plan::compile(&scene,Path::new("."))?;
         for (time,expected) in [(0.,2.),(0.5,1.5),(1.5,1.),(2.5,0.5),(3.5,1.5)] {
             let mut samples=plan.samples();plan.sample_into(time,&mut samples);
-            assert!((plan.image_time(&samples,"plate",time)-expected).abs()<1e-5);
+            let request=vork_time::Request::Numeric(time).exact()?;
+            assert!((plan.image_time_exact(&samples,&request,"plate",request.clone())?.numeric()?-expected).abs()<1e-5);
         }
+        Ok(())
+    }
+    #[test]
+    fn failed_video_reads_restart_at_the_same_request() -> Result<()> {
+        let root=std::env::temp_dir().join(format!("vork-footage-recovery-{}",std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let path=root.join("source.mp4");
+        let status=Command::new("ffmpeg").args(["-v","error","-y","-f","lavfi","-i","testsrc2=size=16x16:rate=6:duration=2",
+            "-c:v","libx264","-g","6","-keyint_min","6","-sc_threshold","0"]).arg(&path).status()?;
+        ensure!(status.success(),"make recovery video fixture");
+        let expected=Command::new("ffmpeg").args(["-v","error","-i"]).arg(&path)
+            .args(["-fps_mode","passthrough","-f","rawvideo","-pix_fmt","rgba64le","pipe:1"]).output()?;
+        ensure!(expected.status.success(),"decode recovery reference");
+        let frame_bytes=16*16*8;
+        // Model a decoder ending before a frame, inside a frame, or after
+        // complete frames, on both forward and reverse requests. The data
+        // demuxer copies the exact prefix into a real child stdout pipe.
+        for (request,previous) in [(0,None),(4,None),(4,Some(5)),(10,None),(10,Some(11))] {
+            for length in [0,frame_bytes/2,2*frame_bytes,2*frame_bytes+frame_bytes/2,4*frame_bytes,4*frame_bytes+frame_bytes/2] {
+                if length/frame_bytes>request {continue;}
+                let mut source=Video::open(&path)?;
+                source.last_request=previous;
+                let start=source.keyframes.iter().rev().find(|&&(i,_)|i<=request).map_or(0,|&(i,_)|i);
+                assert_eq!(start,if request>=6 {6} else {0});
+                let truncated=root.join("truncated.raw");
+                std::fs::write(&truncated,&expected.stdout[start*frame_bytes..start*frame_bytes+length])?;
+                let mut child=Command::new("ffmpeg").args(["-v","error","-f","data","-i"]).arg(&truncated)
+                    .args(["-map","0:0","-c","copy","-f","data","pipe:1"])
+                    .stdout(Stdio::piped()).spawn()?;
+                let stdout=child.stdout.take().unwrap();
+                source.session=Some(Session {child,stdout,next:start});
+                let error=source.frame_at(request,32).unwrap_err();
+                let failed_frame=start+length/frame_bytes;
+                assert!(error.to_string().contains(&format!("frame {failed_frame}")),"{error:#}");
+                assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(),std::io::ErrorKind::UnexpectedEof);
+                assert!(source.session.is_none(),"failed decoder must be closed");
+                assert!(source.frames.iter().all(|(index,_)|*index<failed_frame),"never cache a partial frame");
+                // Retry the identical position without clearing state or seeking.
+                let actual=source.frame_at(request,32)?.to_rgba16();
+                let bytes:Vec<_>=actual.as_raw().iter().flat_map(|v|v.to_le_bytes()).collect();
+                assert_eq!(bytes,expected.stdout[request*frame_bytes..(request+1)*frame_bytes]);
+                assert_eq!(source.session.as_ref().unwrap().next,request+1);
+            }
+        }
+        // Metadata survives a source disappearing before decoder startup.
+        // Repeated failures must remain visible, then recover when it returns.
+        let mut source=Video::open(&path)?;
+        let saved=root.join("saved.mp4");
+        std::fs::rename(&path,&saved)?;
+        for _ in 0..2 {
+            assert!(source.frame_at(0,32).is_err());
+            assert!(source.session.is_none());
+        }
+        std::fs::rename(&saved,&path)?;
+        let actual=source.frame_at(0,32)?.to_rgba16();
+        let bytes:Vec<_>=actual.as_raw().iter().flat_map(|v|v.to_le_bytes()).collect();
+        assert_eq!(bytes,expected.stdout[..frame_bytes]);
+        drop(source);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
@@ -285,7 +528,9 @@ mod tests {
         requests.extend([5,590,60,450,300,0,599,599,10]);
         for index in requests {
             let before=source.decoded;
-            let actual=source.frame(source.times[index],32)?.to_rgba16();
+            let request=Germ::point((Rational::from_integer(source.pts[index].into())-Rational::from_integer(source.pts[0].into()))*&source.timebase);
+            assert_eq!(source.frame_index(&request),index);
+            let actual=source.frame_at(source.frame_index(&request),32)?.to_rgba16();
             let bytes:Vec<_>=actual.as_raw().iter().flat_map(|v|v.to_le_bytes()).collect();
             assert_eq!(bytes,&expected.stdout[index*16*16*8..(index+1)*16*16*8],"seek frame {index}");
             assert!(source.decoded-before<=30,"seek {index} decoded {} frames",source.decoded-before);
@@ -349,21 +594,21 @@ mod tests {
             write(1,rate)?;
             let mut source=Source::open(&root.join("%04d.exr"))?;
             let fps=if rate.is_some() {2.} else {24.};
-            assert_eq!(source.timeline(24.)?,vec![0.,1./fps]);
-            assert_eq!(source.frame_index(0.04,24.),0);
-            assert_eq!(source.frame_index(0.04,48.),usize::from(rate.is_none()));
-            for render_fps in [24.,48.] {
+            assert_eq!(source.timeline(vork_time::Time::integer(24))?.iter().map(|t|t.as_f32()).collect::<Vec<_>>(),vec![0.,1./fps]);
+            assert_eq!(source.frame_index_exact(&vork_time::Request::Numeric(0.04).exact()?,vork_time::Time::integer(24))?,0);
+            assert_eq!(source.frame_index_exact(&vork_time::Request::Numeric(0.04).exact()?,vork_time::Time::integer(48))?,usize::from(rate.is_none()));
+            for render_fps in [vork_time::Time::integer(24),vork_time::Time::integer(48)] {
                 for time in [-1.,0.,0.04,0.5,100.,0.] {
-                    let expected=1.+source.frame_index(time,render_fps) as f32;
+                    let expected=1.+source.frame_index_exact(&vork_time::Request::Numeric(time).exact()?,render_fps)? as f32;
                     assert_eq!(source.frame(time,render_fps,16)?.to_rgb32f()[(0,0)][0],expected);
                 }
-                for (index,time) in source.timeline(render_fps)?.into_iter().enumerate() {assert_eq!(source.frame_index(time,render_fps),index);}
+                for (index,time) in source.timeline(render_fps)?.into_iter().enumerate() {assert_eq!(source.frame_index_exact(&vork_time::Request::from(&time).exact()?,render_fps)?,index);}
             }
         }
         for rate in [(0,1),(1,0),(-1,1)] {
             write(1,Some(rate))?;
             let error=Source::open(&root.join("%04d.exr")).err().context("invalid EXR rate accepted")?;
-            assert!(error.to_string().contains("framesPerSecond must be positive"),"{error:#}");
+            assert!(format!("{error:#}").contains("framesPerSecond must be positive"),"{error:#}");
         }
         std::fs::remove_dir_all(root)?;Ok(())
     }
@@ -378,7 +623,7 @@ mod tests {
         }
         let mut source = Source::open(&dir.join("%04d.png"))?;
         for (time,expected) in [(-1.,1),(0.,1),(0.041,1),(1./24.,2),(100.,2)] {
-            assert_eq!(source.frame(time,24.,16)?.to_rgba8()[ (0,0) ][0],expected);
+            assert_eq!(source.frame(time,vork_time::Time::integer(24),16)?.to_rgba8()[ (0,0) ][0],expected);
         }
         std::fs::rename(dir.join("1002.png"),dir.join("1004.png"))?;
         let error = Source::open(&dir.join("%04d.png")).err().unwrap().to_string();
@@ -392,7 +637,7 @@ mod tests {
 /// writes so several shutter samples can coexist in one command submission.
 pub(crate) struct Installed {
     pub name: String,
-    pub time: Option<f32>,
+    pub time: Option<vork_time::Clock>,
     pub per_sample: bool,
     pub final_compositor: bool,
     pub view: wgpu::TextureView,
@@ -408,9 +653,9 @@ impl Installed {
             video.session = None; // Session kills and reaps before closing its reader.
         }
     }
-    pub(crate) fn new(r:&crate::Renderer,name:&str,path:&Path,time:Option<f32>,srgb:bool,fps:f32)->Result<Self> {
+    pub(crate) fn new(r:&crate::Renderer,name:&str,path:&Path,time:Option<vork_time::Clock>,srgb:bool,fps:vork_time::Time)->Result<Self> {
         let mut source=Source::open_gpu(path,r)?;
-        let frame=source.frame(time.unwrap_or(0.),fps,r.device.limits().max_texture_dimension_2d)?;
+        let frame=source.frame(time.as_ref().map(vork_time::Request::from).unwrap_or(vork_time::Request::Numeric(0.)),fps,r.device.limits().max_texture_dimension_2d)?;
         let size=wgpu::Extent3d {width:frame.width(),height:frame.height(),depth_or_array_layers:1};
         let texture=crate::gpu_memory::texture(&r.device,&wgpu::TextureDescriptor {
             label:Some("footage image"),size,mip_level_count:32-size.width.max(size.height).leading_zeros(),sample_count:1,
@@ -422,12 +667,11 @@ impl Installed {
         let mips=crate::materials::MipChain::new(&r.device,&texture,None,&pipelines[2],sampler);
         Ok(Self {name:name.into(),time,per_sample:true,final_compositor:false,view:texture.create_view(&Default::default()),texture,mips,source:std::sync::Mutex::new(source),srgb})
     }
-    pub(crate) fn frame_index(&self,time:f32,fps:f32)->Result<usize> {
-        ensure!(time.is_finite(),"image {}: time must be finite",self.name);
-        Ok(self.source.lock().unwrap().frame_index(time,fps))
+    pub(crate) fn frame_index(&self,time:&Germ,fps:vork_time::Time)->Result<usize> {
+        self.source.lock().unwrap().frame_index_exact(time,fps)
     }
-    pub(crate) fn encode(&self,r:&crate::Renderer,encoder:&mut wgpu::CommandEncoder,time:f32,fps:f32)->Result<()> {
-        let frame=self.source.lock().unwrap().frame(time,fps,r.device.limits().max_texture_dimension_2d)?;
+    pub(crate) fn encode(&self,r:&crate::Renderer,encoder:&mut wgpu::CommandEncoder,time:&Germ,fps:vork_time::Time)->Result<()> {
+        let frame=self.source.lock().unwrap().frame_exact(time,fps,r.device.limits().max_texture_dimension_2d)?;
         ensure!(frame.width()==self.texture.width() && frame.height()==self.texture.height(),"image {}: media frame dimensions changed",self.name);
         let rgba=frame.into_rgba32f();
         let pitch=(self.texture.width()*8).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)*wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;

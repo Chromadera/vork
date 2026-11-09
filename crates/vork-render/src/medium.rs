@@ -79,12 +79,14 @@ impl Native {
         // Camera selection (including imported cameras) happens after media
         // installation. Reserve the maximum visibility budget here; each view
         // allocates its actual camera-specific count below.
+        let animated_shutter = scene.track_targets()?.iter().flatten().any(|target|
+            matches!(target, v2::TrackTarget::Render(v2::RenderProperty::MotionBlurShutter)));
         let (bytes,sample_bytes)=std::iter::once((false,scene.render.clone()))
             .chain(scene.images.values().filter_map(|i|i.render.as_ref()).map(|r|(true,r.resolve(&scene.render))))
             .filter(|(_,render)|!render.settings.integrator.is_path())
             .map(|(capture,render)| {
                 let extent=render.resolution;
-                let (_,samples)=crate::plan::sampling_counts(&render,!capture);
+                let (_,samples)=crate::plan::sampling_counts(&render,!capture && !animated_shutter);
                 (self.froxel_bytes(extent),self.sample_bytes(extent,samples))
             }).fold((0,0),|(grid,samples),(a,b)|(grid.max(a),samples.max(b)));
         // Each address is a float4. Page boundaries may cut a prefix column:

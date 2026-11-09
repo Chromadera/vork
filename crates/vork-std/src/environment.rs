@@ -119,11 +119,11 @@ fn core_residual(image: &image::Rgb32FImage, threshold:f32) -> image::Rgb32FImag
 pub fn prepare(argument:&str, mut cached:impl FnMut(blake3::Hash)->Option<Vec<u8>>,mut publish:impl FnMut(blake3::Hash,&[u8]))->Result<String> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Options {file:String,output:String,#[serde(default="name")] name:String,#[serde(default)] color_space:Option<String>,#[serde(default)] fps:Option<f32>,#[serde(default="threshold")] threshold:f32}
+    struct Options {file:String,output:String,#[serde(default="name")] name:String,#[serde(default)] color_space:Option<String>,#[serde(default)] fps:Option<vork_time::Time>,#[serde(default="threshold")] threshold:f32}
     fn name()->String {"environment".into()}
     fn threshold()->f32 {10.}
     let o:Options=serde_json::from_str(argument)?;
-    ensure!(o.fps.is_none_or(|fps|fps.is_finite() && fps>0.),"environment fps must be positive");
+    ensure!(o.fps.is_none_or(|fps|fps>vork_time::Time::ZERO),"environment fps must be positive");
     ensure!(!o.name.is_empty() && o.threshold.is_finite() && o.threshold>0.,"environment requires a name and positive finite threshold");
     ensure!(Path::new(&o.output).extension().is_some_and(|e|e.eq_ignore_ascii_case("exr")),"environment output must be an EXR path");
     ensure!(std::path::absolute(&o.file)?!=std::path::absolute(&o.output)?,"environment output must differ from source");
@@ -181,15 +181,60 @@ fn sequence_attributes()->exr::prelude::LayerAttributes {
     exr::prelude::LayerAttributes {frames_per_second:Some((1,1)),..Default::default()}
 }
 
-/// The host streams frames through its existing decoder; std owns splitting.
-pub fn prepare_frames(argument:&str,times:&[f32],mut frame:impl FnMut(f32)->Result<image::DynamicImage>,mut cached:impl FnMut(blake3::Hash)->Option<Vec<u8>>,mut publish:impl FnMut(blake3::Hash,&[u8]))->Result<String> {
+// Follow symlinks and identify hard links without retaining one open file per
+// frame. Only missing paths lack an identity; other errors must stop the write.
+fn file_identity(path:&Path)->std::io::Result<Option<(u64,u128)>> {
+    let identity:std::io::Result<_>=(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata=std::fs::metadata(path)?;
+            Ok((metadata.dev(),metadata.ino() as u128))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandleEx,FileIdInfo,FILE_ID_INFO};
+            let file=std::fs::File::open(path)?;
+            let mut info=FILE_ID_INFO::default();
+            // SAFETY: the live file owns the handle and info is a writable,
+            // correctly sized FILE_ID_INFO for the requested information class.
+            let ok=unsafe {GetFileInformationByHandleEx(file.as_raw_handle(),FileIdInfo,(&mut info as *mut FILE_ID_INFO).cast(),std::mem::size_of::<FILE_ID_INFO>() as u32)};
+            if ok==0 {return Err(std::io::Error::last_os_error());}
+            Ok((info.VolumeSerialNumber,u128::from_le_bytes(info.FileId.Identifier)))
+        }
+    })();
+    match identity {
+        Ok(identity)=>Ok(Some(identity)),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+        Err(error)=>Err(error),
+    }
+}
+
+/// The host supplies the opened source files and streams decoded frames; std owns splitting.
+pub fn prepare_frames(argument:&str,inputs:&[std::path::PathBuf],times:&[vork_time::Clock],mut frame:impl FnMut(&vork_time::Clock)->Result<image::DynamicImage>,mut cached:impl FnMut(blake3::Hash)->Option<Vec<u8>>,mut publish:impl FnMut(blake3::Hash,&[u8]))->Result<String> {
     let mut options:serde_json::Value=serde_json::from_str(argument)?;
-    let fps=options.get("fps").and_then(serde_json::Value::as_f64).unwrap_or(24.) as f32;
-    ensure!(fps.is_finite() && fps>0. && !times.is_empty(),"environment footage needs positive fps and displayed frames");
+    let fps:vork_time::Time=serde_json::from_value(options.get("fps").cloned().unwrap_or(24.into()))?;
+    ensure!(fps>vork_time::Time::ZERO && !times.is_empty(),"environment footage needs positive fps and displayed frames");
     let output=std::path::absolute(options["output"].as_str().context("environment output path")?)?;
     ensure!(output.extension().is_some_and(|e|e.eq_ignore_ascii_case("exr")),"environment footage output must be an EXR path");
 
+    // Refuse every destination before decoding or writing any frame. Retain
+    // the original input identity: prepare() only sees our scratch EXR.
+    let mut input_identities=std::collections::HashSet::new();
+    for input in inputs {
+        if let Some(identity)=file_identity(&input).with_context(||format!("identify environment source {}",input.display()))? {
+            input_identities.insert(identity);
+        }
+    }
     let stem=output.with_extension("").to_string_lossy().into_owned();
+    for index in 0..times.len() {
+        for destination in [format!("{stem}.{index:06}.exr"),format!("{stem}.source.{index:06}.exr")] {
+            if let Some(identity)=file_identity(Path::new(&destination)).with_context(||format!("identify environment output {destination}"))? {
+                ensure!(!input_identities.contains(&identity),"environment output must differ from source: {destination}");
+            }
+        }
+    }
     let name=options.get("name").and_then(serde_json::Value::as_str).unwrap_or("environment").to_owned();
     let image_name=format!("{name}_image");let weight_name=format!("{name}_lighting_weight");let sun_name=format!("{name}_sun");
     let scratch=std::env::temp_dir().join(format!("vork-environment-source-{}-{}.exr",std::process::id(),blake3::hash(argument.as_bytes())));
@@ -202,7 +247,7 @@ pub fn prepare_frames(argument:&str,times:&[f32],mut frame:impl FnMut(f32)->Resu
     let mut result=None;
     let mut fields=["rotation","color","energy","angle"].map(|field|(field,Vec::new()));
     let mut clocks=Vec::new();
-    for (index,&time) in times.iter().enumerate() {
+    for (index,time) in times.iter().enumerate() {
         let file=format!("{stem}.{index:06}.exr");
         let source=frame(time)?.into_rgba32f();
         source.save(&scratch.0)?;
@@ -235,6 +280,52 @@ pub fn prepare_frames(argument:&str,times:&[f32],mut frame:impl FnMut(f32)->Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn frame_rates_reject_invalid_values_before_decoding() {
+        for fps in [serde_json::json!("0/1"),serde_json::json!("-30000/1001"),serde_json::json!("1/0"),serde_json::json!("bad")] {
+            let argument=serde_json::json!({"file":"missing.mov","output":"weighted.exr","fps":fps}).to_string();
+            assert!(prepare_frames(&argument,&[],&[0_f32.into()],|_|panic!("invalid rate must be rejected first"),|_|None,|_,_|{}).is_err());
+            assert!(prepare(&argument,|_|None,|_,_|{}).is_err());
+        }
+    }
+    #[test]
+    fn percent_video_name_reaches_decoder() {
+        let argument=serde_json::json!({"file":"100%clip.mov","output":"weighted.exr"}).to_string();
+        let error=prepare_frames(&argument,&["100%clip.mov".into()],&[0_f32.into()],|_|anyhow::bail!("decoder reached"),|_|None,|_,_|{}).unwrap_err();
+        assert_eq!(error.to_string(),"decoder reached");
+    }
+    #[test]
+    fn frame_outputs_cannot_overwrite_input_sequence() -> Result<()> {
+        let root=std::env::temp_dir().join(format!("vork-environment-collision-{}",std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        for suffix in ["", ".source"] {
+            let input=root.join(format!("weighted{suffix}.000000.exr"));
+            let bytes=b"source must survive";std::fs::write(&input,bytes)?;
+            let argument=serde_json::json!({"file":root.join(format!("weighted{suffix}.%06d.exr")),"output":root.join("weighted.exr")}).to_string();
+            let error=prepare_frames(&argument,&[input.clone()],&[0_f32.into()],|_|panic!("must reject before decoding"),|_|None,|_,_|{}).unwrap_err();
+            assert!(error.to_string().contains("output must differ from source"),"{error}");
+            assert_eq!(std::fs::read(input)?,bytes);
+        }
+        std::fs::remove_dir_all(root)?;Ok(())
+    }
+    #[test]
+    fn frame_outputs_cannot_overwrite_hard_linked_input() -> Result<()> {
+        let root=std::env::temp_dir().join(format!("vork-environment-hard-link-{}",std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let input=root.join("input.000000.exr");
+        let bytes=b"source must survive";std::fs::write(&input,bytes)?;
+        for suffix in ["", ".source"] {
+            let destination=root.join(format!("weighted{suffix}.000000.exr"));
+            std::fs::hard_link(&input,&destination)?;
+            let argument=serde_json::json!({"file":root.join("input.%06d.exr"),"output":root.join("weighted.exr")}).to_string();
+            let error=prepare_frames(&argument,&[input.clone()],&[0_f32.into()],|_|panic!("must reject before decoding"),|_|None,|_,_|{}).unwrap_err();
+            assert!(error.to_string().contains("output must differ from source"),"{error}");
+            assert_eq!(std::fs::read(&input)?,bytes);
+            assert_eq!(std::fs::read(&destination)?,bytes);
+            std::fs::remove_file(destination)?;
+        }
+        std::fs::remove_dir_all(root)?;Ok(())
+    }
     #[test]
     fn core_split_preserves_camera_rgb_and_measured_rgb_energy() -> Result<()> {
         let mut image=image::Rgb32FImage::from_pixel(512,256,image::Rgb([2.,3.,4.]));
@@ -274,8 +365,8 @@ mod tests {
     #[test]
     fn frame_preprocessing_preserves_vfr_clock_and_step_lights() ->Result<()> {
         let root=std::env::temp_dir().join(format!("vork-std-environment-vfr-{}",std::process::id()));std::fs::create_dir_all(&root)?;
-        let argument=serde_json::json!({"file":"source.mov","output":root.join("weighted.exr"),"fps":30}).to_string();
-        let result=prepare_frames(&argument,&[0.,0.04,0.15],|time|Ok(image::DynamicImage::ImageRgb32F(image::Rgb32FImage::from_pixel(8,4,image::Rgb([time,0.,0.])))),|_|None,|_,_|{})?;
+        let argument=serde_json::json!({"file":"source.mov","output":root.join("weighted.exr"),"fps":"30000/1001"}).to_string();
+        let result=prepare_frames(&argument,&[],&[0_f32.into(),0.04_f32.into(),0.15_f32.into()],|time|Ok(image::DynamicImage::ImageRgb32F(image::Rgb32FImage::from_pixel(8,4,image::Rgb([time.as_f32(),0.,0.])))),|_|None,|_,_|{})?;
         let fragment:serde_json::Value=serde_json::from_str(&result)?;
         let tracks=fragment["animation"][0]["tracks"].as_array().unwrap();
         assert_eq!(tracks.len(),6);let clocks=tracks.last().unwrap();

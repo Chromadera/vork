@@ -5,7 +5,6 @@ from importlib.util import find_spec
 from pathlib import Path
 import subprocess
 import sys
-import threading
 
 
 def engine(require_native=False):
@@ -25,15 +24,6 @@ def engine(require_native=False):
 
 def main():
     args = sys.argv[1:]
-    if args and args[0] in ('setup', 'render'):
-        print('vork: GPU shader compilation can take several minutes on first use. '
-              'Run `vork setup` after upgrading or changing drivers.', file=sys.stderr, flush=True)
-    stop = threading.Event()
-    def progress():
-        while not stop.wait(15):
-            print('vork: setup is still compiling GPU shaders…', file=sys.stderr, flush=True)
-    if args and args[0] == 'setup':
-        threading.Thread(target=progress, daemon=True).start()
     try:
         result = subprocess.run([engine(require_native=True), *args])
         return result.returncode if result.returncode >= 0 else 128 - result.returncode
@@ -41,5 +31,15 @@ def main():
         print(f'vork: {error}', file=sys.stderr)
         return 1
 
-    finally:
-        stop.set()
+
+
+def run_engine(args, **kwargs):
+    executable = engine()
+    try:
+        return subprocess.run([executable, *args], **kwargs)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"vork executable not found: {executable!r}. Add the directory containing "
+            "vork to PATH (for example, export PATH=\"$HOME/.local/bin:$PATH\"), "
+            "or set VORK_BIN to the full path to the vork executable."
+        ) from None

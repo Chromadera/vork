@@ -6,6 +6,9 @@ highlights can narrow or change brightness; ray-camera effects can remain grainy
 Judge the finished lighting with final or path.
 std/draft: 4 samples with scene-ray indirect lighting and OIDN denoising.
 std/final: 8 samples, the default; scene-ray lighting and OIDN denoising.
+Final's approximate GI can omit bounced paths such as camera → diffuse → glossy → light.
+A custom surface material selects the older one-hit GI for the whole scene.
+More samples cannot recover omitted paths; choose --profile std/path for full bounce lighting.
 std/path: 4096 samples; accuracy, especially interiors, indirect lighting, glass and caustics.
 Draft, final and path denoise with bundled OIDN by default. --set denoise=false uses the profile
 reconstruction (raw path samples for path); --set seed=42 makes sampling repeatable on the same backend.

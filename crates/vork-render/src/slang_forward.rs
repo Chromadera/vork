@@ -32,6 +32,7 @@ pub(crate) struct SlangScene {
     pub(crate) connection_transmission: bool,
     /// Installed coverage proof, shared by table, imported and program materials.
     pub(crate) surface_coverage: bool,
+    pub(crate) attribute_coverage: bool,
     pub(crate) shadow_capacity: u32,
     pub(crate) no_shadow_containment: bool,
     /// The irradiance volume (probes.slang) replaces world diffuse light.
@@ -220,6 +221,7 @@ impl SlangForward {
         let mut kernel_defines=vec![format!("-DVORK_AOV_COUNT={}",self.scene.aov_count),format!("-DVORK_SHADOW_CAPACITY={}",self.scene.shadow_capacity)];
         if !self.scene.field_controls && !matches!(kernel,Some(ProgramKernel::Path {..})) {kernel_defines.push("-DVORK_NO_IMPLICIT".into());}
         if self.scene.no_shadow_containment {kernel_defines.push("-DVORK_NO_SHADOW_CONTAINMENT".into());}
+        if !self.scene.connection_transmission {kernel_defines.push("-DVORK_NO_CONNECTION_TRANSMISSION".into());}
         // Medium kernels already have their own outlining policy. Combining it
         // with field outlining makes the NVIDIA driver expand nested closures.
         if self.scene.field_controls && self.scene.medium.is_none() {kernel_defines.push("-DVORK_FIELD_OUTLINE".into());}
@@ -328,7 +330,7 @@ impl SlangForward {
                 if !program_modules.iter().any(|(name,_)|name==&module.0) {program_modules.push(module.clone());}
             }
         }
-        let secondary=entry.1=="compute" && (self.scene.ray_refraction || self.ray_shadows && (self.scene.connection_transmission || all_programs.is_some_and(|p|p.coverage || self.scene.fibre)));
+        let secondary=entry.1=="compute" && (self.scene.ray_refraction || self.ray_shadows && (self.scene.connection_transmission || self.scene.attribute_coverage || all_programs.is_some_and(|p|p.coverage || self.scene.fibre)));
         if primary.is_some() && secondary {
             for module in &all_programs.unwrap().modules {
                 if let Some(existing)=program_modules.iter_mut().find(|(name,_)|name==&module.0) {*existing=module.clone();} else {program_modules.push(module.clone());}
@@ -341,7 +343,7 @@ impl SlangForward {
         // Secondary camera transport already receives CameraPrograms as P.
         // Shadow/probe candidate callbacks still import their shared dispatcher.
         let medium_sources=self.scene.medium.as_ref().is_some_and(|m|m.mesh_sources);
-        let program_coverage=secondary && self.ray_shadows && (medium_sources || self.scene.connection_transmission || all_programs.is_some_and(|p|p.coverage || self.scene.fibre));
+        let program_coverage=secondary && self.ray_shadows && (medium_sources || self.scene.connection_transmission || self.scene.attribute_coverage || all_programs.is_some_and(|p|p.coverage || self.scene.fibre));
         if let Some(p)=all_programs.filter(|_|program_coverage) {
             let p=if receivers && !self.scene.connection_transmission && !medium_sources {p.for_coverage()} else {p};
             program_modules.push(("scene_programs".into(),p.code.replace("struct Programs :","struct ScenePrograms :")));
@@ -418,6 +420,7 @@ impl SlangForward {
             .chain(flags.iter().copied())
             .chain(native_registers.iter().map(String::as_str))
             .chain(program_coverage.then_some("-DVORK_PROGRAM_COVERAGE"))
+            .chain(self.scene.attribute_coverage.then_some("-DVORK_ATTRIBUTE_COVERAGE"))
             .chain(kernel_defines.iter().map(String::as_str))
             .chain(query_defines.iter().copied())
 
@@ -521,7 +524,7 @@ impl SlangForward {
         if self.scene.surface_coverage && matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {..}) {return None;}
         if self.metal || self.scene.field_controls || self.scene.medium.as_ref().is_some_and(|n|n.surface_connection.is_none()) || self.scene.attributes!=0 || self.scene.aov_count!=0
             || self.scene.environment.is_some() || self.scene.fibre
-            || self.scene.connection_transmission && (!self.scene.no_shadow_containment || self.scene.programs.is_some())
+            || !self.scene.no_shadow_containment || self.scene.connection_transmission && (self.scene.programs.is_some() || !self.ray_shadows)
             || self.table_programs(Some(kernel)).is_some() {return None;}
         let boundaries=match kernel {ProgramKernel::Decoupled {boundaries,..}=>boundaries,_=>0};
         // Shared transport has no authored medium continuation. Keep those links
@@ -531,7 +534,11 @@ impl SlangForward {
         // established runtime executable: late-specialized native arithmetic can
         // perturb narrow glass highlights before denoising in that configuration.
         if self.scene.ray_refraction && !self.scene.probes {return None;}
-        let coverage=self.scene.no_shadow_containment && self.ray_shadows;
+        // Full candidate evaluation reads hit records installed for transmission.
+        // No containment alone does not provide those records: an opaque scene
+        // can have only compact alpha entries, whose hit address is NO_ALPHA.
+        // Caster links force even opaque geometry through the candidate reader.
+        let coverage=self.scene.connection_transmission && self.scene.no_shadow_containment && self.ray_shadows;
         let (family,features,ray_shadows,subsurface,emitter_profiles)=match kernel {
             // The existing fixed probe entry owns the unspecialized zero key.
             ProgramKernel::Probes {features:0,..}=>return None,
@@ -563,7 +570,7 @@ impl SlangForward {
         self.scene.programs.as_deref().filter(|_|!table || self.transport_programs())
     }
     fn transport_programs(&self)->bool {
-        self.scene.programs.as_ref().is_some_and(|p|self.scene.ray_refraction || self.ray_shadows && p.coverage || self.scene.fibre)
+        self.scene.programs.as_ref().is_some_and(|p|self.scene.ray_refraction || self.ray_shadows && (p.coverage || self.scene.connection_transmission) || self.scene.fibre)
     }
 
     fn camera_specialized(&self,kernel:crate::pipelines::ProgramKernel,probe:bool)->anyhow::Result<Lookup<(wgpu::ShaderModule,&'static str)>> {
@@ -878,7 +885,12 @@ mod tests {
         assert_ne!(a.shared_kernel_key(kernel),textures.shared_kernel_key(kernel));
         let mut thin=base.clone();thin.connection_transmission=true;thin.ray_refraction=true;
         let thin=SlangForward::new(&r,true,false,thin);
-        assert_eq!(a.shared_kernel_key(kernel),thin.shared_kernel_key(kernel),"thin connections share setup's executable");
+        assert_ne!(a.shared_kernel_key(kernel),thin.shared_kernel_key(kernel),"transmitting connections require the full hit reader");
+        assert_eq!(a.surface_fixed(kernel).unwrap().0.name,"surface_gi_0_1_0_0");
+        assert_eq!(thin.surface_fixed(kernel).unwrap().0.name,"surface_gi_0_1_1_0");
+        let mut unshadowed=base.clone();unshadowed.connection_transmission=true;
+        let unshadowed=SlangForward::new(&r,false,false,unshadowed);
+        assert!(unshadowed.shared_kernel_key(kernel).is_none(),"compact shipped hit lighting requires the no-transmission proof independently of primary ray bindings");
         let transport=ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::Evaluate,
             features:3,subsurface:false,emitter_profiles:false,boundaries:1};
         assert!(thin.shared_kernel_key(transport).is_some(),"ordinary single-boundary transport is shipped");
@@ -896,6 +908,11 @@ mod tests {
         let mut authored=base.clone();authored.connection_transmission=true;authored.programs=compiled.native;
         let authored=SlangForward::new(&r,true,false,authored);
         assert!(authored.shared_kernel_key(ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::EvaluateOpaque,features:3,subsurface:false,emitter_profiles:false,boundaries:0}).is_none(),"authored transmitting shadows must keep their dispatcher");
+        assert!(!authored.scene.programs.as_ref().unwrap().coverage,"constant coverage does not remove transmission");
+        assert!(authored.table_programs(Some(transport)).is_some(),"table receivers must evaluate transmitting programs even at constant coverage");
+        let mut contained=base.clone();contained.no_shadow_containment=false;
+        let contained=SlangForward::new(&r,true,false,contained);
+        assert!(contained.shared_kernel_key(kernel).is_none(),"shipped surfaces require the no-containment proof independently of candidate layout");
         let mut transmitting=base;transmitting.connection_transmission=true;transmitting.no_shadow_containment=false;
         let c=SlangForward::new(&r,true,false,transmitting);
         assert!(c.shared_kernel_key(kernel).is_none(),"transmission must retain its different executable");

@@ -129,6 +129,7 @@ fn live_context(module: &naga::Module, ty: naga::Handle<naga::Type>, wavelength:
 
 #[derive(Clone, Default)]
 struct State {
+    image_reads: Option<std::sync::Arc<std::sync::Mutex<Option<BTreeSet<u32>>>>>,
     numeric: bool,
     certified: bool,
     proof_failures: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
@@ -715,6 +716,7 @@ fn merge_observed(state: &mut State, other: &State) {
     }
 }
 fn unknown(state: &mut State) -> Option<Value> {
+    if let Some(reads)=&state.image_reads {*reads.lock().unwrap()=None;}
     // A live probe abandons code that may read a live source.
     let value = if state.live.is_some() { Value::Time } else { Value::dependent(state.arguments.iter().chain(state.locals.values()).cloned()) };
     state.arguments.fill(value.clone());
@@ -860,7 +862,7 @@ fn block(
                     })
                     .collect();
                 let (value, mut after) =
-                    evaluate_mode(module, &module.functions[*callee], &values, depth + 1,state.dependency,state.words.clone(),state.live,state.certified,state.numeric);
+                    evaluate_mode(module, &module.functions[*callee], &values, depth + 1,state.dependency,state.words.clone(),state.live,state.certified,state.numeric,state.image_reads.clone());
                 if state.certified {
                     state.proof_failures.lock().unwrap().extend(after.proof_failures.lock().unwrap().iter().cloned());
                 }
@@ -1101,7 +1103,7 @@ fn evaluate(
     live: Option<Live>,
     certified: bool,
 ) -> (Value, State) {
-    evaluate_mode(module,function,args,depth,dependency,words,live,certified,false)
+    evaluate_mode(module,function,args,depth,dependency,words,live,certified,false,None)
 }
 fn evaluate_mode(
     module: &naga::Module,
@@ -1113,7 +1115,22 @@ fn evaluate_mode(
     live: Option<Live>,
     certified: bool,
     numeric: bool,
+    image_reads: Option<std::sync::Arc<std::sync::Mutex<Option<BTreeSet<u32>>>>>,
 ) -> (Value, State) {
+    if let Some(reads)=&image_reads {
+        let name=function.name.as_deref().unwrap_or("");
+        if matches!(name,SAMPLE_IMAGE|"vork_compositor_load"|"vork_compositor_size"|"vork_compositor_context"|MATERIAL_WORD) {
+            if matches!(name,SAMPLE_IMAGE|"vork_compositor_load"|"vork_compositor_size") {
+                let mut reads=reads.lock().unwrap();
+                match args.first() {
+                    Some(Value::Integer(0)) if name=="vork_compositor_size"=>(),
+                    Some(Value::Integer(slot)) if u32::try_from(*slot).is_ok()=>{if let Some(reads)=reads.as_mut() {reads.insert(*slot as u32);}},
+                    _=>*reads=None,
+                }
+            }
+            return (Value::Unknown,State {image_reads,arguments:args.to_vec(),..Default::default()});
+        }
+    }
     if let Some(live) = live {
         let name = function.name.as_deref().unwrap_or("");
         let value = match name {
@@ -1185,6 +1202,7 @@ fn evaluate_mode(
         );
     }
     let mut state = State {
+        image_reads,
         numeric,
         certified,
         dependency,
@@ -1435,6 +1453,28 @@ pub(super) fn displacement_depends_on(wgsl: &str, entry: &str, parameter: usize)
     };
     Ok(evaluate(&module, function, &args, 0, false, None, None, false).0.time())
 }
+/// Trace lowered image handles through structs, helpers and control flow with
+/// the same interprocedural evaluator as material proofs. The shared observation
+/// survives branch returns and loop widening. Unknown flow/addresses fail closed.
+pub(super) fn composite_reads(wgsl: &str, entry: &str, abi: &Abi) -> Result<Option<Vec<u32>>> {
+    let module=super::validated_module(wgsl,abi)?;
+    let function=module.functions.iter().find(|(_,f)|f.name.as_deref()==Some(entry)).context("compositor wrapper missing")?.1;
+    let mut pending=Vec::new();calls(&function.body,&mut pending);
+    let mut visited=BTreeSet::new();let mut image_call=false;
+    while let Some(callee)=pending.pop() {
+        if !visited.insert(callee.index()) {continue;}
+        let callee=&module.functions[callee];
+        image_call |= matches!(callee.name.as_deref(),Some(SAMPLE_IMAGE|"vork_compositor_load"|"vork_compositor_size"));
+        calls(&callee.body,&mut pending);
+    }
+    if !image_call {return Ok(Some(Vec::new()));}
+    let reads=std::sync::Arc::new(std::sync::Mutex::new(Some(BTreeSet::new())));
+    let args=vec![Value::Unknown;function.arguments.len()];
+    evaluate_mode(&module,function,&args,0,false,None,None,false,false,Some(reads.clone()));
+    let result=reads.lock().unwrap().clone().map(|reads|reads.into_iter().collect());
+    Ok(result)
+}
+
 pub(super) fn displacement_reads(wgsl: &str, count: usize) -> Result<Vec<bool>> {
     let wgsl = wgsl.replace("vork_attribute", "vork_displacement_attribute_probe");
     let source = super::coordinates::validation_stubs().to_owned()
@@ -2242,7 +2282,7 @@ pub(super) fn camera_calibration(module: &naga::Module, entry: &str, words: &[u3
     let args=[Value::Number(aspect.into()),Value::Number(focus.into()),Value::Number(time.into()),Value::Integer(0),
         Value::Parts(vec![Value::Parts(vec![Value::Number(0.);4]);4])];
     let words=words.iter().copied().map(Some).collect::<Vec<_>>();
-    let (_,state)=evaluate_mode(module,function,&args,0,false,Some(words.into()),None,false,true);
+    let (_,state)=evaluate_mode(module,function,&args,0,false,Some(words.into()),None,false,true,None);
     let mut result=[[0.;4];4];
     for row in 0..4 {for col in 0..4 {
         let Value::Number(v)=state.arguments[4].part(row).part(col) else {

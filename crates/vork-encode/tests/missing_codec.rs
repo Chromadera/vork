@@ -30,7 +30,7 @@ fn missing_software_encoder_is_reported_before_streaming() {
                     },
                     64,
                     32,
-                    24,
+                    vork_encode::Time::integer(24),
                     EncodeSettings::default(),
                     &path,
                     3,
@@ -87,7 +87,7 @@ fn missing_ffmpeg_is_reported_before_native_nvenc_preparation() {
     const CHILD: &str = "VORK_TEST_NO_FFMPEG";
     if let Some(root) = std::env::var_os(CHILD) {
         for backend in [Backend::Auto, Backend::Readback] {
-            let error = match Encoder::prepare(backend, 64, 32, 24, EncodeSettings::default(), std::path::Path::new(&root).join("output.mp4")) {
+            let error = match Encoder::prepare(backend, 64, 32, vork_encode::Time::integer(24), EncodeSettings::default(), std::path::Path::new(&root).join("output.mp4")) {
                 Err(error) => error,
                 Ok(_) => panic!("ffmpeg is required even with native NVENC"),
             };

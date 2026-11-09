@@ -87,9 +87,15 @@ try:
     project = a.work / 'project'
     project.mkdir()
     if a.init:
-        run([npm, 'create', 'vork', 'starter project', *registry, '--yes', '--', '--language', 'typescript'], a.work)
-        run([npm, 'exec', '--offline', '--', 'vork', 'help'], a.work / 'starter project')
-        run([shutil.which('node'), 'scene.ts'], a.work / 'starter project')
+        for language in ['typescript', 'json', 'python']:
+            starter = a.work / f'{language} starter project'
+            run([npm, 'create', 'vork', starter.name, *registry, '--yes', '--', '--language', language], a.work)
+            manifest = json.loads((starter / 'package.json').read_text())
+            assert manifest['private'] is True and manifest['type'] == 'module', manifest
+            installed_sdk = json.loads((starter / 'node_modules/@voyager-so/vork/package.json').read_text())
+            assert manifest['dependencies'] == {'@voyager-so/vork': installed_sdk['version']}, manifest
+            run([npm, 'exec', '--offline', '--', 'vork', 'help'], starter)
+        run([shutil.which('node'), 'scene.ts'], a.work / 'typescript starter project')
     run([npm, 'init', '-y'], project)
     run([npm, 'install', '@voyager-so/vork', *registry, '--ignore-scripts'], project)
     installed = sorted(p.name for p in (project / 'node_modules/@voyager-so').iterdir())
@@ -104,6 +110,7 @@ try:
     run([python, '-m', 'pip', 'install', '--index-url', f'http://127.0.0.1:{http.server_address[1]}/simple/', '--no-cache-dir', 'vork'], project)
     run([python, ROOT / 'scripts/test-registry-install', *(['--gpu'] if a.gpu else [])], project)
     if a.init:
+        run([python, 'scene.py'], a.work / 'python starter project')
         run([npm, 'exec', '--offline', '--', 'vork', 'init', 'python starter', '--language', 'python'], project)
         run([python, 'scene.py'], project / 'python starter')
         # Kill the sole npm server: prove cached project creation has no network fallback.

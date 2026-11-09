@@ -5,12 +5,12 @@ import hashlib
 import json
 import math
 import os
-from ._engine import engine as _engine
+from ._engine import run_engine as _run_engine
 import struct
 import stat
-import subprocess
 import tempfile
 import uuid
+import re
 from typing import Any, Optional, Sequence, Union, TypedDict
 from .types import Scene
 from ._validate import helper_options as _helper_options
@@ -100,14 +100,26 @@ def _external_buffers(scene: dict, file: str) -> Optional[bytes]:
     return b''.join(parts) if parts else None
 
 
+def _previous_sidecars(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            previous = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return set()
+    pattern = re.escape(os.path.basename(path)) + r'\.buffers\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bin'
+    return {os.path.join(os.path.dirname(path), buffer['file']) for _, buffer in _scene_buffers(previous)
+            if isinstance(buffer.get('file'), str) and re.fullmatch(pattern, buffer['file'])}
+
+
 def write_scene(scene: Scene, path: str, base_dir: Optional[str] = None) -> str:
     """Write scene JSON with relative resource paths and a binary sidecar for large buffers.
 
     Mirrors writeScene in @voyager-so/vork: resource paths resolve against base_dir (default:
     the working directory) and are written relative to the scene's directory; inline buffers
     of at least 4 KiB go to an immutable PATH.buffers.UUID.bin sidecar. The JSON is
-    atomically replaced after its sidecar is complete; old sidecars are retained for readers. The input is not
-    modified. Returns the absolute scene path.
+    atomically replaced after its sidecar is complete; obsolete owned sidecars are removed. The input is not
+    modified. Serialize saves and buffer reads at one destination; copy JSON and
+    its resources for a lasting snapshot. Returns the absolute scene path.
     """
     destination = os.path.abspath(path)
     os.makedirs(os.path.dirname(destination), exist_ok=True)
@@ -153,18 +165,23 @@ def write_scene(scene: Scene, path: str, base_dir: Optional[str] = None) -> str:
     walk(result, graph['root'])
     for parent, key in slots.values():
         parent[key] = asset_path(parent[key])
-    # Immutable sidecar first, then one atomic JSON publication. Retain previous
-    # sidecars for readers that have already opened an earlier JSON snapshot.
+    previous = _previous_sidecars(physical)
+    # Publish a complete pair before retiring obsolete generated siblings.
     binary_path = f'{physical}.buffers.{uuid.uuid4()}.bin'
     binary = _external_buffers(result, os.path.relpath(binary_path, scene_dir))
     text = json.dumps(result, indent=2, allow_nan=False) + '\n'
     temporary = None
+    binary_created = False
+    temporary_created = False
     try:
         if binary is not None:
-            handle = os.open(binary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            handle = os.open(binary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            binary_created = True
             with os.fdopen(handle, 'wb') as f:
                 f.write(binary)
-        handle, temporary = tempfile.mkstemp(dir=scene_dir, prefix='.vork-')
+        temporary = f'{physical}.{uuid.uuid4()}.tmp'
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        temporary_created = True
         with os.fdopen(handle, 'wb') as f:
             f.write(text.encode('utf-8'))
         try:
@@ -173,12 +190,22 @@ def write_scene(scene: Scene, path: str, base_dir: Optional[str] = None) -> str:
             existing = None
         if existing is not None and stat.S_ISREG(existing.st_mode):
             os.chmod(temporary, stat.S_IMODE(existing.st_mode))
-        # Fresh files retain private mode; never query or change process umask.
+        # Creation respects umask; replacement JSON preserves its existing mode.
         os.replace(temporary, physical)
     except BaseException:
-        if temporary is not None and os.path.exists(temporary):
+        if temporary_created and os.path.exists(temporary):
             os.unlink(temporary)
+        if binary_created:
+            os.unlink(binary_path)
         raise
+    retained = {os.path.realpath(os.path.join(scene_dir, parent[key])) for parent, key in slots.values()}
+    for old in previous:
+        if os.path.realpath(old) not in retained:
+            try:
+                if stat.S_ISREG(os.lstat(old).st_mode):
+                    os.unlink(old)
+            except FileNotFoundError:
+                pass
     return destination
 
 
@@ -189,8 +216,8 @@ def std(function: str, argument: Any = None, **options: Any) -> Any:
     """
     if argument is not None and options:
         raise TypeError('pass an argument or keyword options')
-    result = subprocess.run(
-        [_engine(), 'std', function, '-'],
+    result = _run_engine(
+        ['std', function, '-'],
         input=json.dumps(options if argument is None else argument, allow_nan=False),
         text=True, capture_output=True,
     )
@@ -262,7 +289,7 @@ def render(scene: str, out: Union[str, Sequence[str]], **options: Any) -> Render
     set, channels). EXR and control-only outputs have no exposure entry.
     VORK_BIN selects the executable; the scene file is unchanged.
     """
-    subprocess.run([_engine(), *_render_arguments(scene, out, **options)],
+    _run_engine(_render_arguments(scene, out, **options),
                    check=True)
     exposure = []
     warnings = []
@@ -277,7 +304,7 @@ def render(scene: str, out: Union[str, Sequence[str]], **options: Any) -> Render
         path = os.path.join(os.path.dirname(output), sidecar) if file else os.path.join(output, 'meta.json')
         with open(path, encoding='utf-8') as f:
             metadata = json.load(f)
-        for warning in metadata.get('warnings', []):
+        for warning in metadata['warnings']:
             if warning not in warnings:
                 warnings.append(warning)
         if metadata.get('exposure') is not None:

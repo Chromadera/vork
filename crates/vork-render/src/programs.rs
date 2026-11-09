@@ -291,7 +291,7 @@ fn instance_key(p: &Instance) -> String {
 
 /// Resolve surface/geometry combinations before compiling their GPU consumers.
 /// Copies are per node, so a shared material keeps its supported uses unchanged.
-pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:&Path)->Result<()> {
+pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:&Path, stages:&std::collections::BTreeMap<String,Stages>)->Result<()> {
     let mut replacements=std::collections::BTreeMap::<String,(v2::Material,String)>::new();
     let mut nodes=scene.nodes.clone();
     let mut path_needed=false;
@@ -305,7 +305,7 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
     let mut abi=abi(); abi.aov_count=scene.render.aovs.len();
     let mut proof=std::collections::BTreeMap::new();
     fn visit(r:&Renderer,scene:&v2::Scene,nodes:&mut [v2::Node],base:&Path,compiler:&Compiler,abi:&Abi,
-        proof:&mut std::collections::BTreeMap<String,vork_slang::ProgramCapabilities>,replacements:&mut std::collections::BTreeMap<String,(v2::Material,String)>,path_needed:&mut bool,computed:bool)->Result<()> {
+        stages:&std::collections::BTreeMap<String,Stages>,proof:&mut std::collections::BTreeMap<String,vork_slang::ProgramCapabilities>,replacements:&mut std::collections::BTreeMap<String,(v2::Material,String)>,path_needed:&mut bool,computed:bool)->Result<()> {
         for node in nodes {
             if let v2::NodeKind::Light {shape:v2::LightShape::Environment,material:Some(name),..}=&node.kind {
                 if scene.materials[name].inputs.values().any(|v|matches!(v,v2::Input::Texture(binding) if scene.images[&binding.image].render.is_some())) {
@@ -319,6 +319,9 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
                 _=>(Vec::new(),false,false),
             };
             for binding in bindings {
+                // Bound media were refused by admission. Unused medium remaps
+                // have no surface to approximate and keep their authored data.
+                if stages.get(binding.as_str()).is_some_and(|stage|stage.medium) {continue;}
                 let material=&scene.materials[binding.as_str()];
                 let mut replacement=None;
                 if material.program=="std/openpbr" {
@@ -346,11 +349,11 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
                     let name=format!("__vork_launch_{}",replacements.len());replacements.insert(name.clone(),(m,binding.clone()));*binding=name;
                 }
             }
-            visit(r,scene,&mut node.children,base,compiler,abi,proof,replacements,path_needed,computed)?;
+            visit(r,scene,&mut node.children,base,compiler,abi,stages,proof,replacements,path_needed,computed)?;
         }
         Ok(())
     }
-    visit(r,scene,&mut nodes,base,&compiler,&abi,&mut proof,&mut replacements,&mut path_needed,computed)?;
+    visit(r,scene,&mut nodes,base,&compiler,&abi,stages,&mut proof,&mut replacements,&mut path_needed,computed)?;
     scene.nodes=nodes;
     for layer in &mut scene.animation {
         if let Some(tracks)=&mut layer.tracks {
@@ -429,8 +432,7 @@ pub(crate) fn mesh_stages(r: &Renderer, scene: &v2::Scene, base: &Path) -> Resul
     };
     Ok(names.into_iter().map(|name| {
         let program=&scene.materials[&name].program;
-        let mut stage=if program=="std/openpbr" {builtin} else {stages[program]};
-        if scene.media_disabled { stage.medium=false; }
+        let stage=if program=="std/openpbr" {builtin} else {stages[program]};
         (name,stage)
     }).collect())
 }
@@ -1378,6 +1380,15 @@ impl InputAnimation {
         Ok(Some(Self { plan }))
     }
     pub(crate) fn identity(&self) -> blake3::Hash { self.plan.input_identity() }
+    pub(crate) fn words_request(&self, request:&vork_time::Request, time:f32, words:&mut [u32])->Result<()> {
+        let mut samples=self.plan.samples();
+        self.plan.sample_material_request(request,time,0.,&mut samples)?;
+        for (binding,value) in self.plan.material_values(&samples,0.) {
+            let value=sample_words(value,binding);
+            words[binding.slot..binding.slot+value.len()].copy_from_slice(&value);
+        }
+        Ok(())
+    }
     pub(crate) fn words(&self, time: f32, words: &mut [u32]) {
         let mut samples = self.plan.samples();
         self.plan.sample_material_offset(time, 0., &mut samples);

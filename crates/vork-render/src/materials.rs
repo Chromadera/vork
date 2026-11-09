@@ -96,7 +96,10 @@ impl Tap {
     /// column-major 2x2 matrix and the offset.
     fn words(&self) -> [u32; constants::MATERIAL_TAP_WORDS] {
         let (s, c) = self.rotation.sin_cos();
-        let basis = self.uv != 0 || self.scale != [1.; 2] || self.rotation != 0.;
+        // Positive repeats and offsets preserve the authored tangent axes.
+        // Rotation, reflection, collapsed axes or a different UV set need the
+        // transformed derivatives instead.
+        let basis = self.uv != 0 || self.scale.iter().any(|s| *s <= 0.) || self.rotation != 0.;
         [
             self.word as u32,
             self.uv | u32::from(basis) * constants::FLAG_UV_BASIS,
@@ -445,6 +448,13 @@ impl PendingMaterial {
                 sets | 1 << (tap[1] & constants::FLAG_UV_SECOND)
             })
     }
+    /// UV-only ray candidates cannot supply these bound attribute taps.
+    pub(crate) fn attribute_coverage(&self) -> bool {
+        self.record.tag[0] == 0 && ["geometry_opacity", "alpha_cutoff"].iter().any(|name| {
+            let tap = self.record.inputs[param(name).0] & constants::MATERIAL_TAP_INDEX_MASK;
+            tap != 0 && self.taps[tap as usize - 1][1] & constants::MATERIAL_ATTRIBUTE_FLAG != 0
+        })
+    }
     pub(crate) fn surface_coverage(&self) -> bool {
         self.record.extra[1] > 0.
     }
@@ -589,7 +599,7 @@ pub(crate) struct TextureInstaller<'a> {
     pub(crate) cache_hits: std::cell::Cell<usize>,
     pub(crate) r: &'a Renderer,
     pub(crate) footage: std::collections::BTreeMap<String, crate::footage::Installed>,
-    pub(crate) fps: f32,
+    pub(crate) fps: vork_time::Time,
     pub(crate) render_images: &'a std::collections::BTreeMap<String, usize>,
     pub(crate) pipeline_ms: std::cell::Cell<f64>,
     resident:
@@ -908,7 +918,7 @@ impl<'a> TextureInstaller<'a> {
             }
             crate::texture_source::TextureSource::Media {name,file,time} => {
                 if !self.footage.contains_key(name) {
-                    self.footage.insert(name.clone(), crate::footage::Installed::new(self.r,name,&base.join(file),*time,image.srgb,self.fps)?);
+                    self.footage.insert(name.clone(), crate::footage::Installed::new(self.r,name,&base.join(file),time.clone(),image.srgb,self.fps)?);
                 }
                 self.footage[name].view.clone().into()
             }

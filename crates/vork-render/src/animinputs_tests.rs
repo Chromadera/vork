@@ -437,3 +437,55 @@ fn animated_compositor_inputs_match_static_and_seek() -> Result<()> {
     assert_eq!(later, pixels(&r, &static_scene, &mut static_slot, 1.)?);
     Ok(())
 }
+
+#[test]
+fn camera_cut_left_limit_keeps_step_emission_and_visibility() -> Result<()> {
+    let Some(r)=test_renderer()? else {return Ok(());};
+    for (program,visibility) in [(false,false),(true,false),(false,true)] {
+        let mut input=scene(program,true)?;
+        input.render.fps=vork_time::Time::integer(24);
+        input.render.motion_blur.as_mut().unwrap().shutter=4.;
+        input.render.camera=Some("a".into());
+        input.nodes[0].name="a".into();
+        input.nodes[1].name="subject".into();
+        let mut camera=input.nodes[0].clone();camera.name="b".into();input.nodes.push(camera);
+        if visibility {
+            input.animation=vork_scene::v2::from_test_value(json!([{"tracks":[{
+                "path":["nodes","subject","visible"],"keys":[[0,true],[0.5,false]]
+            }]}]))?;
+        }
+        input.animation.push(vork_scene::v2::from_test_value(json!({"tracks":[{
+            "path":["render","camera"],"keys":[[0,"a"],[0.5,"b"]]
+        }]}))?);
+        let installed=r.install(input,Path::new("."))?;
+        let mut slot=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
+        slot.submit_outputs(&installed,&r,vork_time::Request::Frame(11,vork_time::Time::integer(24)),ReadbackOutputs {
+            float:FloatOutputs {color:true,..Default::default()},..Default::default()
+        })?;
+        let pixels=slot.collect(&r)?.linear_rgba.context("float colour")?;
+        assert!(pixels.iter().all(|p|p[0]>0.9 && p[1]<0.01 && p[2]<0.01),
+            "next-shot discrete state leaked across the left limit: program={program}, visibility={visibility}, {pixels:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn discrete_pose_reuse_distinguishes_left_limit_from_equal_numeric_point()->Result<()> {
+    let Some(r)=test_renderer()? else {return Ok(());};
+    let mut input=scene(true,false)?;input.render.fps=vork_time::Time::integer(24);
+    let installed=r.install(input,Path::new("."))?;
+    let mut slot=installed.create_frame_slot(&r,Default::default())?;
+    slot.view.sample_index=1;
+    let mut lighting=values::LightingTracker::default();
+    let cut=vork_time::exact::decimal("1/2")?;
+    let before=vork_time::Request::Exact(vork_time::exact::Germ::left(cut.clone()));
+    let after=vork_time::Request::Exact(vork_time::exact::Germ::point(cut));
+    assert_eq!(before.numeric()?,after.numeric()?);
+    for request in [&before,&after,&before] {
+        slot.prepare_values(&installed,&r,request,0.5,&mut lighting)?;
+        assert!(!slot.reuse_values,"discrete ownership change reused the numeric pose");
+        slot.prepare_values(&installed,&r,request,0.5,&mut lighting)?;
+        assert!(slot.reuse_values,"identical discrete and numeric inputs should reuse");
+    }
+    Ok(())
+}

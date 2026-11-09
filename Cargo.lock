@@ -1057,12 +1057,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "bytemuck",
+ "num-traits",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
+ "num-integer",
  "num-traits",
 ]
 
@@ -1799,7 +1829,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vork-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1810,11 +1840,12 @@ dependencies = [
  "vork-scene",
  "vork-slang",
  "vork-std",
+ "vork-time",
 ]
 
 [[package]]
 name = "vork-encode"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1822,12 +1853,13 @@ dependencies = [
  "objc2",
  "objc2-metal",
  "pollster",
+ "vork-time",
  "wgpu",
 ]
 
 [[package]]
 name = "vork-mesh"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "glam",
@@ -1838,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "vork-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1867,23 +1899,25 @@ dependencies = [
  "vork-scene",
  "vork-slang",
  "vork-std",
+ "vork-time",
  "wgpu",
 ]
 
 [[package]]
 name = "vork-scene"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "glam",
  "schemars",
  "serde",
  "serde_json",
+ "vork-time",
 ]
 
 [[package]]
 name = "vork-slang"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1896,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "vork-std"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1909,7 +1943,23 @@ dependencies = [
  "rquickjs",
  "serde",
  "serde_json",
+ "vork-time",
+ "windows-sys",
  "xberg-ttf-parser",
+]
+
+[[package]]
+name = "vork-time"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "num-bigint",
+ "num-integer",
+ "num-rational",
+ "num-traits",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

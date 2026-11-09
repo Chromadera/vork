@@ -5,11 +5,11 @@ Unknown fields are errors; omit anything at its default.
 FIRST IMAGE
 vork init my-shot
 cd my-shot
-vork render scene.json --out shot.png --profile std/draft
+vork render scene.json --out shot.png
 vork help
 Creates an offline scene from sphere, box and grid primitives; no assets to fetch.
 vork init [DIR] [--language json|typescript|python] (default DIR: ., language: json).
-Always writes scene.json and README.md; language adds scene.ts or scene.py.
+Always writes scene.json and README.md; TypeScript adds scene.ts and package.json; Python adds scene.py.
 Existing files are never overwritten. Source authoring requires the matching SDK;
 scene.json renders immediately. Edit the source, regenerate JSON, then render again.
 Inspect framing, scale and shadows. Adjust camera target, light position and material colour.
@@ -27,7 +27,7 @@ vork render SCENE --out PATH [--at SECONDS | --frame-start N --frame-end N] [--p
   [--set KEY=VALUE ...] [--channels LIST] [--exr-codec CODEC] [--diagnostics]
   repeat --out PATH; the extension picks the output: .png one still (t=0 unless --at); a directory
   gets every frame as NNNNNN.png; PATH/%06d.exr frames; .mp4; .mov (keeps alpha).
-  --channels color (default), depth, object_index, view_normal, motion, camera, aov:NAME;
+  --channels color (default), depth, object_index, view_normal, motion, camera, shadow_catcher, aov:NAME;
   all includes render.aovs; applies to every --out.
   --profile: std/previs (blocking), std/draft (quick scene-ray lighting), std/final (delivery, default), std/path (accuracy).
   --set samples=N overrides the profile budget; more samples means cleaner and slower.
@@ -36,8 +36,10 @@ vork render SCENE --out PATH [--at SECONDS | --frame-start N --frame-end N] [--p
 <!-- generated-call-keys:end -->
 Values are JSON; resolution also accepts WxH or W,H.
 vork std FUNCTION JSON                 JSON argument; '-' reads stdin; JSON result
-vork setup                             GPU report and default-profile shader warmup
-vork setup --all                       Warm all bundled programs and profiles
+vork setup                             GPU report and init starter warmup at std/final (10 min shader budget)
+vork setup --all                       Warm bundled program/profile catalog and built-in descriptors (no shader time limit)
+vork setup --skip-warmup               GPU/tools report without shader warmup
+Other scene kinds compile once on first use.
 vork help [TOPIC [--all] | field PATH]  topic details or exact field/object lookup
 
 CONVENTIONS
@@ -129,8 +131,8 @@ Render {
   camera: camera-node-name|null = null; null = the only authored camera, else first imported; a camera cut track may select
   compositor: (material-name|{material,name?,resolution?})[] = []; ordered image graph, last output; material may be inline
   display: material-name|inline material = {"program":"std/agx"}; display program; EXR stays scene-linear
-  duration: number = 10.416667
-  fps: number = 24
+  duration: number|rational string = 125/12; seconds
+  fps: number|rational string = 24; positive output frames/second
   motion_blur: MotionBlur|null = null; non-null enables; shutter in frames
   motion_blur.shutter: number = 0.5; frames
   resolution: uvec2 = [1920,1080]
@@ -181,5 +183,5 @@ limits: supported hardware, lighting approximations and scene-size limits
 build: source prerequisites, pinned toolchains and tests on macOS, Linux and Windows
 
 Scene JSON supports `"$schema": "https://voyager.so/vork/schema/scene.schema.json"` for editor
-completion and validation. `vork init` and SDK scene writers include it; vork
-accepts this metadata without fetching it or changing the render.
+completion and validation. `vork init` includes it; SDK writers preserve an explicit
+$schema but do not insert one. vork never fetches it or changes the render.

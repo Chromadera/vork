@@ -1,8 +1,10 @@
 # Python SDK
 
-Ships in every vork release archive as `python/`; install it with
-`python3 -m pip install "$PREFIX/lib/vork/python"` (see README.md (Install)), or
-`pip install ./packages/python` from the repository. `from vork import Scene, std, write_scene`
+Requires Python 3.11+. Ships in every vork release archive as `python/`;
+create a virtual environment, then install from that directory. See the main
+README Install section for Linux, Mac and Windows commands. From a source
+checkout, use `python -m pip install ./packages/python` in your virtual environment.
+`from vork import Scene, std, write_scene`
 exposes the scene type, the shared CLI engines and scene writing:
 
 ```python
@@ -35,10 +37,12 @@ such as `{"attribute": "COLOR_0", "channel": "rgb", "factor": [1, 0.5, 1]}`.
 `read_attribute(inputs.tint, ctx)` returns value and screen footprints (`dx`, `dy`)
 in raster and ray shading. Installation checks names and types on every bound mesh.
 
-Scene writes publish a complete immutable sidecar before atomically replacing the JSON.
-Readers therefore see a matching pair, including during concurrent saves. Older sidecars
-are retained for readers holding previous JSON snapshots; interrupted saves can also leave
-unreferenced sidecars. Fresh files are private; replacement JSON preserves existing permissions.
+Scene writes complete the sidecar before atomically replacing the JSON, then remove
+obsolete generated sidecars referenced by the replaced JSON. Referenced resources and
+unrelated files are preserved. Serialize saves to the same destination and finish reading
+its buffers before regenerating it; copy the whole scene tree for a lasting snapshot.
+Fresh files use ordinary permissions (0666 masked by umask); replacement JSON preserves
+its existing permissions. Failed publication removes the new sidecar and keeps the old scene.
 
 `render()` prints the CLI exposure lines and returns `{exposure: [{output, exposure}], warnings}`.
 `warnings` contains `{code, requested, dropped}` records for requested effects
@@ -57,6 +61,5 @@ for authored glow that should not become a sampled light.
 Scene JSON may include `"$schema": "https://voyager.so/vork/schema/scene.schema.json"` for editor
 completion and validation. This metadata does not affect rendering and is never
 fetched by vork. `vork init` includes it automatically. SDK writers preserve an explicit `$schema`
-but do not insert one, so 0.1-compatible scenes still load in 0.1. Remove an
-explicit `$schema` before using a 0.1 binary. SDK render helpers accept 0.1
-metadata without warnings and return an empty warnings list in that case.
+but do not insert one. SDK render helpers require the current completion metadata
+contract, including its `warnings` list.

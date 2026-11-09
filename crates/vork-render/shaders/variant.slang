@@ -41,6 +41,7 @@ interface IVariant {
     static const bool has_lit;
     // The scene's light kinds as bits (sun, point, spot, rect); 15 is any.
     static const uint light_types;
+    static const bool has_implicit_geometry;
 }
 // Whether `input` may be textured in this variant.
 bool input_textured<V:IVariant>(uint input) {
@@ -77,4 +78,5 @@ struct Unspecialized : IVariant {
     static const bool has_lobes = true;
     static const bool has_lit = true;
     static const uint light_types = 15u;
+    static const bool has_implicit_geometry = true;
 };

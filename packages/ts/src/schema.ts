@@ -80,6 +80,7 @@ export type Program = FileProgram | SourceProgram;
 export type ComputeDispatch = number | [number, number, number];
 export type ComputeSchedule = ("frame" | "install") | "simulation";
 export type CompositeResolution = [number, number] | number;
+export type Clock = number | string;
 export type Wrap = "repeat" | "clamp_to_edge" | "mirrored_repeat";
 /**
  * Translation, rotation and scale (glTF node TRS), flat on the node. Rotation is
@@ -110,6 +111,10 @@ export type AimTarget = string | [number, number, number];
 export type NameOr5 = string | Geometry;
 export type LightShape = "sun" | "point" | "spot" | "rectangle" | "ellipse" | "environment";
 export type AovType = "value" | "color";
+/**
+ * Output rate: decimal number or reduced rational string (frames per second).
+ */
+export type Time = number | string;
 export type MotionBlurPosition = "start" | "center" | "end";
 
 export interface Scene {
@@ -299,7 +304,7 @@ export interface Image {
    * Seconds into media; omitted follows scene time. EXR sequences honor
    * framesPerSecond metadata; other sequences use render.fps.
    */
-  time?: number | null;
+  time?: Clock | null;
   wrap_s?: Wrap;
   wrap_t?: Wrap;
 }
@@ -652,8 +657,8 @@ export interface Render {
   camera?: string | null;
   compositor?: CompositeEntry[];
   display?: NameOr;
-  duration?: number;
-  fps?: number;
+  duration?: Clock;
+  fps?: Time;
   motion_blur?: MotionBlur | null;
   /**
    * @minItems 2
@@ -677,7 +682,7 @@ export interface Simulation {
   /**
    * Positive fixed tick duration, in seconds; independent of render FPS.
    */
-  dt: number;
+  dt: number | string;
   /**
    * Ordered compute program names establishing S0.
    */
@@ -697,7 +702,7 @@ export interface Simulation {
   /**
    * Time of the initialized state S0, in seconds.
    */
-  t0: number;
+  t0: number | string;
 }
 
 /**

@@ -33,7 +33,7 @@ fn implicit_still_notice_requires_written_output() {
 
 #[test]
 #[ignore = "renders images; requires a real GPU, pinned Slang and OIDN"]
-fn duplicate_environments_warn_render_and_return_authored_requests() {
+fn duplicate_environments_refuse_with_named_alternative() {
     let dir = std::env::temp_dir().join(format!("vork-environment-diagnostics-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let scene = dir.join("scene.json");
@@ -48,17 +48,12 @@ fn duplicate_environments_warn_render_and_return_authored_requests() {
             .arg("render").arg(&scene).args(["--profile", profile, "--set", "samples=1", "--set", "denoise=false", "--out"])
             .arg(&image).output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{stderr}");
-        for expected in ["WARNING: REQUESTED EFFECT DROPPED", "world_a", "world_b", "additional_environment"] {
+        assert!(!output.status.success(), "{stderr}");
+        for expected in ["world_a", "world_b", "additional environment lights are unavailable", "precomposite"] {
             assert!(stderr.contains(expected), "{profile}: {stderr}");
         }
-        assert!(image.exists());
-        let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("still.png.meta.json")).unwrap()).unwrap();
-        let warnings = metadata["warnings"].as_array().unwrap();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0]["code"], "additional_environment");
-        assert_eq!(warnings[0]["requested"]["node"]["name"], "world_b");
-        assert_eq!(warnings[0]["requested"]["node"]["energy"].as_f64(), Some(2.));
+        assert!(!image.exists());
+        assert!(!dir.join("still.png.meta.json").exists());
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

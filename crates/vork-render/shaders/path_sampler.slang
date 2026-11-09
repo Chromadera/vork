@@ -102,8 +102,8 @@ public float4 path_camera_sample(PathSampler s) {return path_sample_group(s,PATH
 // xy the direction pair and z the component pick, the convention transport_sample,
 // strand_sample and phase_direction share; w the material mixture lobe.
 public float4 path_scatter(PathSampler s) {return path_vertex_group(s,PATH_SAMPLE_SCATTER);}
-// xy the point on the light, z the light pick.
-public float3 path_light(PathSampler s) {return path_vertex_group(s,PATH_SAMPLE_LIGHT).xyz;}
+// xy the conditional emitter coordinates; zw independent source/strategy picks.
+public float4 path_light(PathSampler s) {return path_vertex_group(s,PATH_SAMPLE_LIGHT);}
 // emitter_mesh_sample's order: x the triangle pick, yz its barycentrics.
 public float3 path_triangle(PathSampler s) {return path_vertex_group(s,PATH_SAMPLE_MESH).zxy;}
 public float2 path_environment(PathSampler s) {return path_vertex_group(s,PATH_SAMPLE_ENVIRONMENT).xy;}

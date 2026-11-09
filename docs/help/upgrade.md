@@ -1,6 +1,108 @@
 UPGRADE
 Breaking changes, newest release first. Rewrite scenes/scripts; no aliases.
 
+0.3 (from 0.2)
+Scene admission and scripts
+- 0.3 does not support participating media (fog, haze, smoke or volumes).
+  No compatibility aliases are provided. Removed std/fog and Blender volume programs still fail
+  lookup, even in unused definitions. For fog-dependent shots, bake an image
+  plate and composite it, or render the medium externally. For a deliberately
+  dry alternative, remove medium-only nodes, bindings and definitions while
+  preserving shared surface geometry/materials. See vork help limits.
+- glTF node cycles now fail at import, including nodes outside the selected scene.
+  Remove cyclic child references or re-export an acyclic hierarchy; selecting
+  another scene in the same file does not bypass validation.
+- Environment preprocessing now refuses generated EXR frames that alias source
+  frames, including symlink aliases. Choose a separate output directory/stem.
+  `vork std environment` fps accepts a positive number or rational string such as
+  "30000/1001" consistently for stills and footage; fix invalid rates before retrying.
+- Used medium bindings (including imported overrides), volume topology and extra
+  environment lights now fail instead of rendering with those effects dropped.
+  Remove medium-only nodes/bindings to keep the old no-medium result, or composite
+  an externally rendered plate. Combine environments into one program/map.
+- Previously ignored geometry effects now fail: computed-instance displacement,
+  displacement on computed/implicit geometry, normal-dependent point displacement,
+  conflicting displacement materials/shared-vertex attributes, computed geometry
+  with skinning/coverage/transparency, and computed transparent placements.
+  Bake displaced/skinned geometry or placements, compute positions in the producer,
+  split discontinuous vertices, or use opaque geometry. See vork help limits.
+- Named geometry_opacity/alpha_cutoff attributes now affect camera and ray hits;
+  computed instance material attributes now follow GPU updates, shutter samples
+  and seeks. Custom surfaces with named opacity bindings retain their program and
+  material animation instead of being replaced by default OpenPBR. Remove these
+  bindings if you intended the old constant/default look.
+- SDK render at and environmentImage/environment_image fps now take numbers,
+  not rational strings. Rewrite at:"1/24" as at:1/24 (Python at=1/24), and
+  fps:"30000/1001" as fps:30000/1001. Scene clock fields and CLI --at still accept
+  rational strings; render --set fps also retains rational rates.
+- SDK writers no longer insert $schema; explicit $schema is preserved. Add it
+  explicitly if editor schema discovery depends on it. SDK metadata requires a
+  warnings field; older binaries without it fail. Upgrade the binary and SDK
+  together.
+- SDK writeScene/write_scene retires obsolete generated buffer siblings referenced
+  by the destination's previous JSON. Copy JSON AND its buffers for snapshots;
+  serialize saves/reads at one destination. Unrelated files and symlinks are kept.
+  New JSON/buffers use 0666 subject to umask; replacement JSON keeps its mode.
+  Set a restrictive umask when creating private scene files.
+- Numeric scene animation uses numeric seconds; exact clock arithmetic is retained
+  for output frames, media selection, simulation ticks and discrete decisions.
+  Recheck cut/STEP and footage boundaries under reversed/looped layers. Use rational
+  strings for exact clock/rate requests (e.g. fps "30000/1001"); keep transforms,
+  weights, speeds and shutter width numeric. See vork help animation.
+
+Look changes (rerender representative frames)
+- Normal maps now follow glTF/MikkTSpace: B = cross(N,T.xyz)*T.w; derivative
+  frames add no image-V sign flip. Positive UV repeats/offsets preserve authored
+  tangents. Remove compensating green-channel flips or wrong tangent.w signs;
+  check mapped base/coat normals and anisotropy. See vork help geometry.
+- Path indirect clamping now measures mean absolute RGB instead of the largest
+  channel (limit remains 10). Bright saturated indirect light can become brighter;
+  recheck exposure and caustics. Direct light and raster GI are unchanged by this fix.
+- Raster ambient/GI now uses the dielectric diffuse response consistently with
+  direct/path shading. Mixed metals, rough/high-IOR materials, thin subsurface and
+  diffusion can change brightness/colour. Recheck lighting; do not retain material
+  compensation for the old response. Path shading is unchanged by this fix.
+- Compositor file/video samples are premultiplied before filtering, fixing colour
+  fringes at alpha edges. Recheck plates; custom composites must return
+  premultiplied RGBA. Reflected image reads determine dependencies automatically;
+  image.render captures now share each parent shutter sample's pose/time and retain
+  their scene producers even when the final compositor replaces camera beauty.
+- Linked shadows, imported/bound opacity and computed instance attributes now use
+  the intended hit/material data across frames. Recheck linked/transmitting shadows
+  and animated material attributes; remove workarounds for stale/default values.
+
+Outputs, CLI and setup
+- MP4 now checks final composited alpha on every frame. Composite an opaque
+  background or choose .mov for transparency; transparent film may produce MP4
+  when the compositor makes it opaque. Failed overwrites invalidate old completion
+  metadata and remove owned old frames/channels (including native non-UTF-8
+  filenames); copy outputs elsewhere before rerendering if you need them.
+  Serialize writers per destination; concurrent writers now fail "output already
+  in use". Require success and fresh meta.json before consuming a shot.
+- meta.json and diagnostics now use version 3; frame times are numeric evaluation
+  seconds, FPS remains number/rational string, camera.json stays version 2.
+  Update readers that require metadata version 2 or rational frame timestamps.
+- Footage decoders now close after failure so a corrected source can retry.
+  Fix missing/broken footage before retrying; partial output is not completion.
+- init now advertises runnable TS/Python starters; TS adds a module package.json.
+  Regenerate in a new directory (existing output files are refused), install the
+  matching bundled SDK, and follow its README. See vork help init and sdk.
+- setup now warms only the vork init starter at the default std/final profile;
+  the ten-minute shader deadline may end successfully with remaining work deferred.
+  Required GPU/tool checks still fail on errors or their own stage timeouts.
+  Use --skip-warmup for checks only, --all for the bundled program/profile catalog
+  and built-in descriptors without a shader deadline; rerun to continue cached work.
+  Other scene kinds compile once on first use. Progress is native stderr,
+  including SDK-driven calls.
+- Setup tool-validation failures now report setup exit code 4, rather than stdout
+  IO code 5. Update automation to check the documented exit codes (vork help errors).
+- Installers now reject unsupported macOS before download, bound stalled transfers,
+  and preserve/restore existing installs on staging failures. Follow printed recovery
+  commands. Linux NVIDIA discovery also finds mounted drivers; working Vulkan no
+  longer depends on nvidia-smi succeeding. Use setup diagnostics for ICD failures.
+- Linux source builds may set VORK_SHADER_TARGETS=spirv to skip Metal shader
+  compilation. Keep the pinned Slang toolchain; see vork help build.
+
 0.2 (from 0.1)
 Before installing
 - Keep your 0.1 binary/SDK and source scenes. Installing into the same PREFIX
@@ -43,13 +145,9 @@ Scene and script changes
   to your custom program. Use import vignette;, import glare; and import highlight;.
   For post.lens_distortion, copy chromatic-dispersion.slang as lens_distortion.slang
   and use import lens_distortion;. Update any qualified module references too.
-- Fog/volume materials: std/fog, blender/principled_volume and blender.volume
-  are no longer release programs. 0.1 could ignore legacy medium bindings with
-  a warning; 0.2 fails with unknown-program errors. Remove unused definitions
-  too. For a scene that relied on ignored fog, remove the medium-only nodes and
-  their material bindings/definitions to retain the no-fog result. Preserve any
-  surface material on shared geometry. There is no supported volumetric
-  replacement in 0.2; keep 0.1 separately if you need its experimental behavior.
+- Participating media were ignored with warnings in the public 0.2 release.
+  In 0.3 they are refused and the fog/volume library programs are removed;
+  follow the 0.3 media instructions above, including unused definitions.
 - Omitted mesh material: find meshes with omitted or empty materials. Default OpenPBR
   specular_roughness is now 0.3 instead of 0.5. To keep the old look, add
   "materials":[{"program":"std/openpbr","inputs":{"specular_roughness":0.5}}].
@@ -65,17 +163,13 @@ Scene and script changes
   @voyager-so/vork. Install the SDK from the native archive's sdk directory;
   this guide does not imply a registry release. See vork help sdk.
 
-SDK/binary versions and rollback
-- The 0.2 TS/Python render helpers accept 0.1 metadata without warnings and return
-  warnings: []. That does not mean 0.1 rendered every requested effect. Select
-  the intended executable with VORK_BIN; new commands such as init need 0.2.
-- writeScene/write_scene no longer insert $schema; explicit $schema is preserved.
-  0.1 rejects this editor-only root field: remove it from scenes before rollback,
-  including scenes made with vork init. Keep 0.1 source scenes and SDKs when
-  rollback matters; 0.2-only features are not translated to 0.1 automatically.
+SDK/binary versions
+- Use matching SDK and binary versions. Render helpers require the current
+  completion metadata contract, including warnings. VORK_BIN selects the binary.
+- writeScene/write_scene preserve explicit $schema but do not insert one.
 
 Visible changes (recheck representative frames)
-- Default std/final and std/draft denoising now filters in display-exposure units.
+- Default std/final and std/draft denoising filters in renderer-owned scene-linear units, independently of display exposure.
   Dim and high-exposure scenes can change substantially; recheck exposure and
   low-sample spectral detail. Undenoised reconstruction also changed, including
   denoise=false and the fallback on machines without GPU OIDN.

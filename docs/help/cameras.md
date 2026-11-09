@@ -1,5 +1,5 @@
 CAMERAS
-camera.material selects a ray program; omitted selects std/camera. Its numeric Inputs use material tracks. An explicit material must name program:"std/camera"; omission on a material selects std/openpbr.
+camera.material selects a ray program; omitted selects std/camera. Its numeric Inputs use material tracks. For bundled optics, set program:"std/camera" explicitly; a material with no program selects std/openpbr. Custom camera programs are also supported (vork help light-paths).
 std/camera follows Blender physical cameras. Input fields below use material.inputs; lens and sensor sizes are mm, clip/focus/ortho_scale metres, aperture_rotation radians. Exact lookup: vork help field std/camera.lens.
 focus_object supplies sampled camera-axis depth; target and transforms retain node semantics.
 <!-- all -->

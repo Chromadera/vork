@@ -51,7 +51,7 @@ impl Global {
         profiling::scope!("Global::new");
 
         Self {
-            instance: Instance::from_hal_instance::<A>(name.to_owned(), hal_instance),
+            instance: unsafe { Instance::from_hal_instance::<A>(name.to_owned(), hal_instance) },
             surfaces: Registry::new(),
             hub: Hub::new(),
         }

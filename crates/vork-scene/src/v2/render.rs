@@ -19,7 +19,7 @@ pub struct CompositeNode {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-pub enum CompositeResolution { Absolute([u32; 2]), Relative(f64) }
+pub enum CompositeResolution { Absolute([u32; 2]), Relative(#[serde(deserialize_with="super::numeric")] f64) }
 impl CompositeResolution {
     pub fn extent(&self, output: [u32; 2]) -> Result<[u32; 2]> {
         let size = match self {
@@ -56,10 +56,10 @@ pub struct Render {
     pub aovs: Vec<Aov>,
     #[schemars(extend("x-source" = "Blender 5.2.1 RenderSettings.resolution_x/resolution_y", "x-help-path" = "render.resolution", "x-help" = "uvec2"))]
     pub resolution: [u32; 2],
-    #[schemars(extend("x-source" = "Blender 5.2.1 RenderSettings.fps", "x-help-path" = "render.fps", "x-help" = "number"))]
-    pub fps: f32,
-    #[schemars(extend("x-source" = "Blender 5.2.1 (frame range expressed in seconds)", "x-help-path" = "render.duration", "x-help" = "number"))]
-    pub duration: f32,
+    #[schemars(extend("x-source" = "Blender 5.2.1 RenderSettings.fps", "x-help-path" = "render.fps", "x-help" = "number|rational string; positive output frames/second"))]
+    pub fps: crate::Time,
+    #[schemars(extend("x-source" = "Blender 5.2.1 (frame range expressed in seconds)", "x-help-path" = "render.duration", "x-help" = "number|rational string; seconds"))]
+    pub duration: vork_time::Clock,
     #[schemars(extend("x-source" = "Blender 5.2.1 render motion blur", "x-help-path" = "render.motion_blur", "x-help" = "MotionBlur|null; non-null enables; shutter in frames"))]
     pub motion_blur: Option<MotionBlur>,
     #[schemars(extend("x-source" = "vork (Blender RenderSettings.film_transparent plus a constant RGB)", "x-help-path" = "render.background", "x-help" = "environment|transparent|RGB; RGB and transparent apply to camera escapes and opacity passthrough; path glass transmission sees the World"))]
@@ -85,7 +85,7 @@ impl Default for Render {
             aovs: Vec::new(),
             resolution: constants::RESOLUTION,
             fps: constants::FPS,
-            duration: constants::DURATION_SECONDS,
+            duration: constants::DURATION_SECONDS.parse().expect("default duration"),
             motion_blur: None,
             background: Background::Mode(BackgroundMode::Environment),
             display: NameOr::Inline(Material { program: "std/agx".into(), inputs: Table::new(), double_sided: true, opacity: None }),
@@ -188,7 +188,7 @@ impl<'de> Deserialize<'de> for Settings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Background {
-    Color([f32; 3]),
+    Color(#[serde(deserialize_with="super::numeric")] [f32; 3]),
     Mode(BackgroundMode),
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

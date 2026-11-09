@@ -115,7 +115,7 @@ fn bake_animated(
     };
     let animation = animation_source.map(|(scene, base, name)|
         programs::InputAnimation::new(scene, base, name, &program.inputs, &mut words)).transpose()?.flatten();
-    let spatial_fallback=program.spatial && animation_source.is_some_and(|(scene,_,_)|scene.media_disabled);
+    let spatial_fallback=program.spatial && animation_source.is_some_and(|(scene,_,_)|scene.delivery);
     if spatial_fallback { crate::warnings::dropped("spatial_environment", serde_json::json!({"program":origin,"inputs":values}), format!("warning: environment {}: ignored spatial origin dependence; evaluating the directional environment at the origin", origin.display())); }
     if program.spatial && !spatial_fallback {
         ensure!(!program.inputs.fields.iter().any(|f|f.ty==vork_slang::Type::Image),"spatial environments do not yet support image inputs");
@@ -159,7 +159,7 @@ fn bake_animated(
         return Ok((Source {texture:source_texture(r,[1,1]),identity:key,primary:Some(Primary {uses_time:program.animated,modules,include:program.include.clone(),words,layout:program.inputs.clone(),material:material.into()})},None));
     }
     if let Some(animation) = &animation { animation.words(0., &mut words); }
-    let image_words=images.as_ref().map(|i|i.words(0.)).transpose()?.unwrap_or_else(||vec![0]);
+    let image_words=images.as_ref().map(|i|i.words(&vork_time::Request::Numeric(0.))).transpose()?.unwrap_or_else(||vec![0]);
     let size=images.as_ref().and_then(|i|i.size(&image_words)).unwrap_or(constants::ENVIRONMENT_PROGRAM_SIZE);
     let [w,h]=size;
     let mut shader = program.wgsl.clone();
@@ -259,28 +259,33 @@ pub(crate) fn source_texture(r:&Renderer,[width,height]:[u32;2])->wgpu::Texture 
 }
 
 impl Program {
+    pub(super) fn has_media(&self)->bool {self.images.as_ref().is_some_and(|images|images.animated())}
     /// Identity of evaluated inputs, rather than the animation's clock. STEP
     /// holds and clamped tracks share the same bake and upload history.
-    pub(crate) fn sample_key(&self, time: f32) -> Vec<u8> {
+    pub(crate) fn sample_key(&self, request: impl Into<vork_time::Request>) -> Result<Vec<u8>> {
+        let request=request.into();
+        let time=request.numeric()?;
         let mut words = self.inputs.clone();
-        if let Some(animation) = &self.animation { animation.words(time, &mut words); }
+        if let Some(animation) = &self.animation { animation.words_request(&request,time, &mut words)?; }
         let mut key = bytemuck::cast_slice(&words).to_vec();
         if self.uses_time { key.extend_from_slice(&time.to_bits().to_le_bytes()); }
-        if let Some(images)=&self.images {key.extend(images.sample_key(time));}
-        key
+        if let Some(images)=&self.images {key.extend(images.sample_key(&request)?);}
+        Ok(key)
     }
-    pub(crate) fn evaluate_source(&self,r:&Renderer,time:f32)->Result<Source> {
+    pub(crate) fn evaluate_source(&self,r:&Renderer,request:impl Into<vork_time::Request>)->Result<Source> {
+        let request=request.into();
+        let time=request.numeric()?;
         let resources=self.resources.as_ref().context("environment evaluation resources")?;
-        if let Some(images)=&self.images {if images.animated() {images.upload(r,&resources.images,&images.words(time)?)?;}}
+        if let Some(images)=&self.images {if images.animated() {images.upload(r,&resources.images,&images.words(&request)?)?;}}
         if let Some(animation)=&self.animation {
-            let mut words=self.inputs.clone();animation.words(time,&mut words);
+            let mut words=self.inputs.clone();animation.words_request(&request,time,&mut words)?;
             r.queue.write_buffer(&resources.input,0,bytemuck::cast_slice(&words));
         }
         r.queue.write_buffer(&resources.time,0,bytemuck::cast_slice(&[time,0.,self.size[1] as f32,0.]));
         let mut encoder=r.device.create_command_encoder(&Default::default());
         {let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(&resources.pipeline);pass.set_bind_group(0,&resources.bind,&[]);pass.dispatch_workgroups(self.size[0].div_ceil(8),self.size[1].div_ceil(8),1);}
         crate::command_finish::Segments::submit(&r.queue,encoder);
-        let mut hash=blake3::Hasher::new();hash.update(self.key.as_bytes());hash.update(&self.sample_key(time));
+        let mut hash=blake3::Hasher::new();hash.update(self.key.as_bytes());hash.update(&self.sample_key(&request)?);
         Ok(Source {texture:resources.output.clone(),identity:hash.finalize(),primary:None})
     }
 }
@@ -337,13 +342,13 @@ mod tests {
         anyhow::ensure!(encoded.status.success(),"encode VFR fixture: {}",String::from_utf8_lossy(&encoded.stderr));
         let movie=root.join("source.mkv");
         let mut source=crate::footage::Source::open(&movie)?;
-        let times=source.timeline(30.)?;
+        let times=source.timeline(vork_time::Time::integer(30))?;
         assert_eq!(times.len(),presentation.len());
-        assert!(times.windows(3).any(|t|((t[2]-t[1])-(t[1]-t[0])).abs()>0.001));
-        let frames:Vec<_>=times.iter().map(|&time|source.frame(time,30.,u32::MAX).map(|frame|frame.into_rgb32f())).collect::<Result<_>>()?;
+        assert!(times.windows(3).any(|t|((t[2].as_f64()-t[1].as_f64())-(t[1].as_f64()-t[0].as_f64())).abs()>0.001));
+        let frames:Vec<_>=times.iter().map(|time|source.frame(time,vork_time::Time::integer(30),u32::MAX).map(|frame|frame.into_rgb32f())).collect::<Result<_>>()?;
         let argument=serde_json::json!({"file":movie,"output":root.join("weight.exr"),"fps":30,"threshold":0.25,"color_space":"Linear Rec.709"}).to_string();
-        let fragment=vork_std::environment::prepare_frames(&argument,&times,|time| {
-            Ok(image::DynamicImage::ImageRgb32F(frames[times.iter().position(|t|*t==time).unwrap()].clone()))
+        let fragment=vork_std::environment::prepare_frames(&argument,source.files(),&times,|time| {
+            Ok(image::DynamicImage::ImageRgb32F(frames[times.iter().position(|t|t==time).unwrap()].clone()))
         },|_|None,|_,_|{})?;
         let mut value:serde_json::Value=serde_json::from_str(&fragment)?;
         value["version"]=2.into();
@@ -369,7 +374,7 @@ mod tests {
             image::Rgb32FImage::from_pixel(64,32,image::Rgb([1.;3])).save(root.join("one.exr"))?;
             let reference=r.install(v2::from_test_value(reference)?,&root)?;
             let expected=render(&reference,0.)?;
-            slot.submit_outputs(&installed,&r,times[index],ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
+            slot.submit_outputs(&installed,&r,&times[index],ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
             let actual=slot.collect(&r)?.linear_rgba.unwrap();
             for (a,b) in actual.iter().zip(expected) {for c in 0..3 {assert!((a[c]-b[c]).abs()<0.005,"frame {index}: {a:?} != {b:?}");}}
         }
@@ -388,14 +393,14 @@ mod tests {
             "animation":[{"tracks":[{"path":["materials","world","inputs","gain"],"interpolation":"STEP","keys":[[0,1],[1,1.000001]]}]}]}))?;
         let (first,program)=install(&r,&scene,"world",Path::new("."))?;
         let program=program.context("tracked environment")?;
-        assert_eq!(program.sample_key(0.),program.sample_key(0.9));
-        assert_ne!(program.sample_key(0.9),program.sample_key(1.));
+        assert_eq!(program.sample_key(0.)?,program.sample_key(0.9)?);
+        assert_ne!(program.sample_key(0.9)?,program.sample_key(1.)?);
         assert_eq!(program.evaluate(&r,0.9)?.image,first.image);
         assert_ne!(program.evaluate(&r,1.)?.image,first.image);
         // A clock-dependent program must still distinguish these sample times.
         let mut timed=program;
         timed.uses_time=true;
-        assert_ne!(timed.sample_key(0.),timed.sample_key(0.9));
+        assert_ne!(timed.sample_key(0.)?,timed.sample_key(0.9)?);
         Ok(())
     }
 
@@ -512,6 +517,23 @@ float3 environment(EnvironmentContext ctx,Inputs inputs) {
             "nodes":[{"type":"light","name":"world","shape":"environment","material":"world"},
                 {"type":"camera","name":"camera","translation":[0,0,10],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":4}}}]})
     }
+    #[test]
+    #[ignore = "requires pinned Slang and Vulkan"]
+    fn delivery_spatial_environment_warns_and_renders_approximation() -> Result<()> {
+        let r=Renderer::new()?;
+        let scene=vork_scene::v2::from_test_value(spatial_scene())?;
+        let collector=crate::warnings::Collector::default();
+        let _scope=collector.enter();
+        let installed=r.install_with_options(scene,Path::new("."),crate::InstallOptions {test_participating_media:false,..Default::default()})?;
+        assert!(installed.environment.primary.is_none());
+        assert!(collector.snapshot().iter().any(|w|w.code=="spatial_environment"));
+        let mut frame=installed.create_frame_slot(&r,Default::default())?;
+        frame.submit(&installed,&r,0.)?;
+        let pixels=frame.collect(&r)?.rgba;
+        assert!(pixels.chunks_exact(4).all(|p|p[0]>100 && p[2]>50),"directional radiance must survive admission");
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires pinned Slang and Vulkan"]
     fn spatial_primary_uses_orthographic_origins_and_shutter_time() -> Result<()> {

@@ -31,9 +31,12 @@ impl UploadCache {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ChangeKey {
     Buffer(wgpu::Buffer),
+    CameraSelection(wgpu::Buffer),
     LightTree(wgpu::Buffer),
     Subdivision(usize, usize),
     SampleTime(usize),
+    ComputeTime(usize),
+    DiscreteTime(usize),
     /// Inputs of an install-shared published render image, in view-table order.
     Capture(usize),
     ImageClock(String),
@@ -44,6 +47,7 @@ pub(crate) enum ChangeKey {
     DisplacedPositions(usize),
     ComputedGeometry(usize),
     ComputedPositions(usize),
+    MaterialAttributes,
     /// Source publication consumed by an installed shared field index.
     FieldIndex(wgpu::Buffer),
     /// Logical named stream publication, independent of packed GPU page identity.
@@ -135,7 +139,21 @@ impl ChangeTracker {
     pub(crate) fn publish(&mut self, key: ChangeKey) {
         self.history.entry(key).or_default().stamp = self.sample;
     }
-    /// Upload publication and logical changes share one sample generation.
+    /// Record an external GPU replacement at its encoding boundary. Forget both
+    /// the destination CPU byte histories and the derived input key: unchanged
+    /// inputs must recompute, and equal old CPU bytes must be uploaded again.
+    /// Already queued uploads are retained; callers encode them before replacement.
+    pub(crate) fn replace_gpu(&mut self, buffers: &[&wgpu::Buffer], dependent: ChangeKey) {
+        for buffer in buffers {
+            self.history.remove(&ChangeKey::Buffer((*buffer).clone()));
+        }
+        self.history.remove(&dependent);
+    }
+    /// Last sample that published CPU bytes to this buffer. A consumer also
+    /// checks dirty() when it may run again inside that same sample.
+    pub(crate) fn buffer_revision(&self, buffer: &wgpu::Buffer) -> u64 {
+        self.history.get(&ChangeKey::Buffer(buffer.clone())).map_or(0, |history| history.stamp)
+    }
     pub(crate) fn buffer_dirty(&self, buffer: &wgpu::Buffer) -> bool {
         self.dirty(ChangeKey::Buffer(buffer.clone()))
     }
@@ -301,13 +319,15 @@ pub(crate) fn offset_storage(s: &InstalledScene) -> OffsetValues {
 }
 pub(crate) fn sample_frame(
     s: &InstalledScene,
-    time: f32,
+    request: impl Into<vork_time::Request>,
     samples: &mut animation::Samples,
     values: &mut [Option<EvalNode>],
     worlds: &mut [Mat4],
 ) -> Result<()> {
-    sample_pose(&s.nodes, &s.assets, &s.animation, &s.targets, &s.environment, time, samples, values, worlds)?;
-    let active_camera=s.animation.camera_sampled(samples,s.camera);
+    let request=request.into();
+    let time=request.numeric()?;
+    sample_pose(&s.nodes, &s.assets, &s.animation, &s.targets, &s.environment, &request, samples, values, worlds)?;
+    let active_camera=s.animation.camera_at_request(&request,s.camera)?;
     for (index,node) in values.iter_mut().enumerate().filter_map(|(index,node)|node.as_mut().map(|node|(index,node))) {
         if let Some(camera)=&mut node.camera {
             camera.time=time;
@@ -336,12 +356,14 @@ pub(crate) fn sample_pose(
     animation: &animation::Plan,
     targets: &crate::targets::Plan,
     _environment: &environment::Environment,
-    time: f32,
+    request: impl Into<vork_time::Request>,
     samples: &mut animation::Samples,
     values: &mut [Option<EvalNode>],
     worlds: &mut [Mat4],
 ) -> Result<()> {
-    animation.sample_into(time, samples);
+    let request=request.into();
+    let time=request.numeric()?;
+    animation.sample_request_into(time, &request, samples)?;
     animation.apply_nodes(samples, values);
     let nodes = SampledNodes::new(originals, values);
     let mut poses = std::collections::HashMap::new();
@@ -390,10 +412,16 @@ impl FrameSlot {
         &mut self,
         s: &InstalledScene,
         r: &Renderer,
-        time: f32,
+        request: impl Into<vork_time::Request>,
         frame_time: f32,
         shadow_changes: &mut LightingTracker,
     ) -> Result<(Vec<u8>, Vec<Upload>, Mat4, Uniform)> {
+        self.sample_request=request.into();
+        let time=self.sample_request.numeric()?;
+        let exact=!s.footage.is_empty() || s.compute.is_some() || s.animation.has_camera_tracks() || s.environment.has_media() || s.animation.has_discrete_tracks();
+        self.previous_request=if self.exposure_cut {self.sample_request.clone()}
+            else if exact {self.sample_request.previous(s.render.fps)?}
+            else {vork_time::Request::Numeric((time-1./s.render.fps.as_f32()).max(0.))};
         // Queue writes would all execute before a batched submission. Pack each
         // sample's values and copy them immediately before its rendering instead.
         let changes = &mut self.changes;
@@ -401,14 +429,24 @@ impl FrameSlot {
         shadow_changes.sample += 1;
         changes.bytes.clear();
         changes.uploads.clear();
-        let time_changed = changes.changed(ChangeKey::SampleTime(0), &time.to_le_bytes());
+        let camera_index = s.animation.camera_at_request(&self.sample_request,s.camera)?;
+        let sample_key=[time.to_bits(),camera_index as u32];
+        let mut discrete_key=Vec::new();
+        s.animation.append_discrete_key(&self.sample_request,&mut discrete_key)?;
+        if s.animation.has_discrete_tracks() {
+            for offset in s.animation.material_offsets().iter().copied().chain(self.offset_values.groups.iter().map(|group|group.offset)).filter(|&offset|offset!=0.) {
+                s.animation.append_discrete_offset_key(&self.sample_request,offset,&mut discrete_key)?;
+            }
+        }
+        let discrete_changed=!discrete_key.is_empty() && changes.changed(ChangeKey::DiscreteTime(0),&discrete_key);
+        let time_changed = changes.changed(ChangeKey::SampleTime(0), bytemuck::cast_slice(&sample_key)) | discrete_changed;
         // The exposure holds the submission lock for retained lighting and simulation.
         // Nominal controls may use another view.
         self.reuse_values = !time_changed && self.view.sample_index > 0 && !self.view.nominal_sample;
         if time_changed {
             sample_frame(
                 s,
-                time,
+                &self.sample_request,
                 &mut self.animation_values,
                 &mut self.sampled_nodes,
                 &mut self.worlds,
@@ -418,22 +456,33 @@ impl FrameSlot {
         }
         let render = self.animation_values.render.as_ref().unwrap();
         let nodes = SampledNodes::new(&s.nodes, &self.sampled_nodes);
-        let camera_index = s.animation.camera_sampled(&self.animation_values, s.camera);
-        let cut = s.animation.camera_at(frame_time, s.camera)
-            != s.animation
-                .camera_at((frame_time - 1. / render.fps).max(0.), s.camera);
-        let previous_time=if cut {time} else {(time-1./render.fps).max(0.)};
+        let cut=self.exposure_cut;
+        let previous_time=self.previous_request.numeric()?;
         let next_time=time;
-        let next_changed=changes.changed(ChangeKey::SampleTime(2), &next_time.to_le_bytes());
+        let next_changed=changes.changed(ChangeKey::SampleTime(2), bytemuck::cast_slice(&sample_key)) | discrete_changed;
         if next_changed {
-            sample_frame(s,next_time,&mut self.next_animation_values,&mut self.next_nodes,&mut self.next_worlds)?;
+            sample_frame(s,&self.sample_request,&mut self.next_animation_values,&mut self.next_nodes,&mut self.next_worlds)?;
         }
         // Spatial AA/aperture samples at one time reuse the evaluated pose and render values.
-        let previous_key = [previous_time.to_bits(), u32::from(cut)];
+        let previous_key = [previous_time.to_bits(), u32::from(cut),s.animation.camera_at_request(&self.previous_request,s.camera)? as u32];
+        discrete_key.clear();
+        s.animation.append_discrete_key(&self.previous_request,&mut discrete_key)?;
+        if s.animation.has_discrete_tracks() {
+            for offset in s.animation.material_offsets().iter().copied().chain(self.offset_values.groups.iter().map(|group|group.offset)).filter(|&offset|offset!=0.) {
+                s.animation.append_discrete_offset_key(&self.previous_request,offset,&mut discrete_key)?;
+            }
+        }
+        let previous_discrete_changed=!discrete_key.is_empty() && changes.changed(ChangeKey::DiscreteTime(1),&discrete_key);
         let previous_changed=changes.changed(
-            ChangeKey::SampleTime(1), bytemuck::cast_slice(&previous_key));
+            ChangeKey::SampleTime(1), bytemuck::cast_slice(&previous_key)) | previous_discrete_changed;
         // Clamped middle times may repeat while either endpoint still changes.
         self.reuse_values &= !next_changed && !previous_changed;
+        if let Some(compute)=&s.compute {
+            let current=&self.sample_request;
+            for (index,request) in [current,&self.previous_request].into_iter().enumerate() {
+                self.reuse_values &= !changes.changed(ChangeKey::ComputeTime(index),bytemuck::cast_slice(&compute.request_key(request)?));
+            }
+        }
         if previous_changed {
             if cut {
                 self.previous_animation_values
@@ -448,7 +497,7 @@ impl FrameSlot {
             } else {
                 sample_frame(
                     s,
-                    previous_time,
+                    &self.previous_request,
                     &mut self.previous_animation_values,
                     &mut self.previous_nodes,
                     &mut self.previous_worlds,
@@ -597,10 +646,10 @@ impl FrameSlot {
                 physical.as_ref().map_or(0., |p| p.focus_distance),
                 2. / self.view.internal[0] as f32, 2. / self.view.internal[1] as f32],
             temporal: if self.view.nominal_sample {
-                [0., 1., 0., if render.settings.integrator.is_path() {vork_slang::registry::DENOISE_GUIDES_PATH as f32} else {0.}]
+                [0., 1., self.view.sample_count as f32, if render.settings.integrator.is_path() {vork_slang::registry::DENOISE_GUIDES_PATH as f32} else {0.}]
             } else {
                 [self.view.sample_index as f32, self.view.sample_count as f32,
-                    0., if render.settings.integrator.is_path() {vork_slang::registry::DENOISE_GUIDES_PATH as f32} else {0.}]
+                    self.view.sample_count as f32, if render.settings.integrator.is_path() {vork_slang::registry::DENOISE_GUIDES_PATH as f32} else {0.}]
 
             },
             environment: [
@@ -630,7 +679,7 @@ impl FrameSlot {
                 s.environment.initial_mean()[2],
                 0.,
             ],
-            scene: [time, (frame_time * render.fps).round(), f32::from(cut), render.fps],
+            scene: [time, self.nominal_frame as f32, f32::from(cut), render.fps.as_f32()],
             shadow_links: [0, 1, 0, 0],
             sampling: {
                 // Word meanings: Frame in vork_prelude.slang. Outside decoupled colour,
@@ -724,7 +773,7 @@ impl FrameSlot {
             write(&self.animation_values, 0.);
             for &offset in s.animation.material_offsets() {
                 let samples = &mut self.offset_values.samples;
-                s.animation.sample_material_offset(time, offset, samples);
+                s.animation.sample_material_request(&self.sample_request,time,offset,samples)?;
                 write(samples, offset);
             }
         }
@@ -741,12 +790,13 @@ impl FrameSlot {
                 let current=pose==0;
                 let mut poses = std::collections::HashMap::new();
                 if group.offset != 0. && (current || !cut) {
-                    s.animation.sample_nodes_into(
-                        pose_time + group.offset,
+                    s.animation.sample_nodes_request(
+                        if pose==1 {&self.previous_request}else{&self.sample_request},
+                        pose_time, group.offset,
                         offset_samples,
                         &group.nodes,
                         &group.assets,
-                    );
+                    )?;
                     s.animation
                         .apply_nodes_subset(offset_samples, offset_nodes, &group.nodes);
                     let shifted_nodes = SampledNodes::new(&s.nodes, offset_nodes);
@@ -907,7 +957,7 @@ impl FrameSlot {
                 }
             }
         }
-        let computed_bounds = crate::computed_geometry::evaluate(r,s,&self.computed_geometry,&self.geometry_bounds,changes,time,previous_time,&mut self.simulation_checkpoint)?;
+        let computed_bounds = crate::computed_geometry::evaluate(r,s,&self.computed_geometry,&self.geometry_bounds,changes,&self.sample_request,&self.previous_request,&mut self.simulation_checkpoint)?;
         let mut displacement_bounds=displacement::evaluate(r,s,&self.skin,&self.displacements,self.materials.as_ref(),&self.object_values,&displacement_spaces,&self.geometry_bounds,&self.queries,changes,time,previous_time,next_time)?;
         if displacement_bounds.is_empty() { displacement_bounds.resize(s.draws.len(),None); }
         for (i,bounds) in computed_bounds.into_iter().enumerate() { if bounds.is_some() { displacement_bounds[i]=bounds; } }
@@ -1326,6 +1376,42 @@ mod orientation_tests {
 mod upload_cache_tests {
     use super::UploadCache;
     #[test]
+    fn external_gpu_replacement_invalidates_outputs_and_derivation_together() {
+        use super::{ChangeKey, ChangeTracker};
+        let (device, _) = wgpu::Device::noop(&Default::default());
+        let [commands, instances, other] = std::array::from_fn(|_| device.create_buffer(
+            &wgpu::BufferDescriptor { label: None, size: 16,
+                usage: wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        let key = ChangeKey::CameraSelection(commands.clone());
+        let mut changes = ChangeTracker::default();
+        changes.sample = 1;
+        changes.changed(ChangeKey::CameraSelection(other.clone()), b"other camera");
+        changes.upload(&other, 0, &[7; 16]);
+        // A replacement can precede the first CPU publication, occur repeatedly
+        // in one sample, or follow retained values from an earlier sample.
+        for advance in [false, false, true, false] {
+            if advance { changes.sample += 1; }
+            changes.replace_gpu(&[&commands, &instances], key.clone());
+            assert!(changes.changed(key.clone(), b"same camera"));
+            assert!(!changes.changed(key.clone(), b"same camera"));
+            changes.bytes.clear();
+            changes.uploads.clear();
+            changes.upload(&commands, 0, &[0; 16]);
+            changes.upload(&instances, 4, &[2; 8]);
+            assert_eq!(changes.uploads.len(), 2, "equal prior CPU bytes must republish every destination");
+            assert!(changes.buffer_dirty(&commands));
+            assert!(changes.buffer_dirty(&instances));
+            changes.bytes.clear();
+            changes.uploads.clear();
+            changes.upload(&commands, 4, &[0; 4]);
+            changes.upload(&instances, 8, &[2; 4]);
+            changes.upload(&other, 0, &[7; 16]);
+            assert!(changes.uploads.is_empty(), "CPU history resumes and unrelated outputs stay retained");
+            assert!(!changes.changed(ChangeKey::CameraSelection(other.clone()), b"other camera"));
+        }
+    }
+
+    #[test]
     fn upload_publication_survives_merging_and_drain_until_the_next_sample() {
         let (device, _) = wgpu::Device::noop(&Default::default());
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1455,6 +1541,9 @@ pub(crate) fn capture_uniform(
     u.display[1]=w as f32;u.display[2]=h as f32;
     u.vp = projection * view;
     u.previous_vp = previous_projection * previous_view;
+    // The next pose endpoint is the current sample. It belongs to this capture
+    // camera too; inheriting the parent matrix leaks its camera and jitter.
+    u.next_vp = u.vp;
     u.inverse_vp = u.vp.inverse();
     u.view = view;
     u.eye = view
@@ -1477,7 +1566,7 @@ pub(crate) fn capture_uniform(
     u.integrator[1] = 0;
     u.integrator[2] = render.settings.samples;
     u.integrator[3] = s.shadows().ray_sequence_word(render.settings.samples as usize) | u32::from(render.settings.integrator.subsurface_method()==Some(vork_scene::v2::SubsurfaceMethod::Thickness))*vork_slang::registry::INTEGRATOR_SUBSURFACE_THICKNESS;
-    u.temporal = [sample as f32, samples as f32, 0., if render.settings.integrator.is_path() {vork_slang::registry::DENOISE_GUIDES_PATH as f32} else {0.}];
+    u.temporal = [sample as f32, samples as f32, samples as f32, if render.settings.integrator.is_path() {vork_slang::registry::DENOISE_GUIDES_PATH as f32} else {0.}];
 
     let camera_world = u.environment_links[0] & constants::RAY_CAMERA != 0;
     u.environment[3] =
@@ -1624,7 +1713,7 @@ mod aim_tests {
             "animation":[{"tracks":[{"path":["nodes","cam","translation"],
                 "keys":[[0,[0,0,0]],[1,[0,0,3]]]}]}]});
         let installed = renderer.install_with_options(vork_scene::v2::from_test_value(document.clone())?, Path::new("."),
-            InstallOptions { initial_time: 1., ..Default::default() })?;
+            InstallOptions { initial_time: 1_f32.into(), ..Default::default() })?;
         assert!(installed.nodes[installed.camera].world.w_axis.truncate().abs_diff_eq(Vec3::new(0.,0.,3.), 1e-6));
         // Repeated seeking must sample authoring defaults rather than the installed pose.
         let mut values = offset_storage(&installed);
@@ -1743,6 +1832,161 @@ mod aim_tests {
             targets.push((worlds[subject].w_axis.truncate(), worlds[held].w_axis.truncate()));
         }
         assert!(targets.windows(2).all(|pair| pair[0].0.distance(pair[1].0) > 1e-4 && pair[0].1.distance(pair[1].1) > 1e-4), "{targets:?}");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retained_selection_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn scene() -> Result<Scene> {
+        Ok(vork_scene::v2::from_test_value(json!({"version":2,
+            "render":{"resolution":[16,16],"fps":2,"duration":2,"settings":{"integrator":"raster","samples":1},"display":{"program":"std/standard","inputs":{"dither_intensity":0}}},
+            "nodes":[{"type":"camera","name":"cam"},{"type":"mesh","geometry":"g","name":"actors","materials":["m"],"instances":{"attributes":{"TRANSLATION":"positions"}}}],
+            "buffers":{"p":{"type":"vec3","data":[[-1,-1,0],[1,-1,0],[0,1,0]]},"positions":{"type":"vec3","data":[[0,0,-5],[8,0,-5],[30,0,-5],[40,0,-5]]}},
+            "geometry":{"g":{"attributes":{"POSITION":"p"}}},
+            "materials":{"m":{"inputs":{"base_weight":0,"specular_weight":0,"emission_color":[1,0,0],"emission_luminance":1}}},
+            "animation":[{"tracks":[
+                {"path":["nodes","cam","translation"],"interpolation":"STEP","keys":[[0,[0,0,0]],[1,[8,0,0]]]},
+                {"path":["materials","m","inputs","emission_color"],"keys":[[0,[1,0,0]],[0.5,[0,1,0]],[1,[0,0,1]]]}
+            ]}]}))?)
+    }
+
+    #[test]
+    fn static_selection_retains_work_across_shading_slots_repeat_and_seek() -> Result<()> {
+        let Some(r) = crate::test_renderer()? else { return Ok(()); };
+        for blur in [false,true] {
+        let mut input = scene()?;
+        if blur {
+            input.render.motion_blur = Some(vork_scene::v2::from_test_value(json!({"shutter":0.5,"position":"center"}))?);
+            input.render.settings.samples = 4;
+        }
+        let mut s = r.install(input, Path::new("."))?;
+        let mut slots = [s.create_frame_slot(&r, Default::default())?,s.create_frame_slot(&r, Default::default())?];
+        let mut first = [None,None];
+        for (slot,time,changes_camera) in [(0,0.,true),(1,0.5,true),(0,0.5,false),(1,0.,false),(0,1.,true),(1,0.5,false),(0,0.,true)] {
+            let before = slots[slot].view.camera_cull.test_visits();
+            let actual = s.render_frame(&r,&mut slots[slot],time)?;
+            let after = slots[slot].view.camera_cull.test_visits();
+            if !blur && changes_camera { assert!(after > before,"camera must prepare at {time}"); }
+            else if !blur { assert_eq!(after,before,"shading-only time {time} rescanned objects"); }
+            let mut fresh = s.create_frame_slot(&r, Default::default())?;
+            let expected = s.render_frame(&r,&mut fresh,time)?;
+            assert_eq!(actual.rgba,expected.rgba,"slot {slot} at {time}");
+            assert_eq!(actual.ids,expected.ids);
+            assert_eq!(actual.depth_u16,expected.depth_u16);
+            assert!(actual.ids.iter().any(|&id|id!=0),"selected actor must remain visible");
+            if let Some(prior) = first[slot].as_ref() {
+                if time == 0. && slot == 0 { assert_eq!(&actual.rgba,prior); }
+            } else { first[slot] = Some(actual.rgba); }
+        }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preparing_capture_staging_preserves_live_selection() -> Result<()> {
+        let Some(r) = crate::test_renderer()? else { return Ok(()); };
+        let s = r.install(scene()?, Path::new("."))?;
+        let frame = s.create_frame_slot(&r, Default::default())?;
+        let cull = &frame.view.camera_cull;
+        let vp = Mat4::perspective_rh(1., 1., 0.1, 100.);
+        let mut changes = ChangeTracker::default();
+        changes.sample = 1;
+        cull.prepare_exposure(vp, &frame.object_values, &[], &mut changes, false);
+        let samples = cull.sample_values(&r.device, 1).unwrap();
+        cull.prepare_sample(vp * Mat4::from_translation(Vec3::new(-8., 0., 0.)),
+            &frame.object_values, &[], &mut changes, &samples, 0);
+        let before = cull.test_visits();
+        changes.sample += 1;
+        changes.bytes.clear();
+        changes.uploads.clear();
+        cull.prepare_exposure(vp, &frame.object_values, &[], &mut changes, false);
+        assert_eq!(cull.test_visits(), before, "staging did not replace live destinations");
+        assert!(changes.uploads.is_empty(), "staging must not invalidate live CPU byte history");
+        r.errors.check()?;
+        Ok(())
+    }
+
+    #[test]
+    fn selection_observes_publications_bounds_and_capture_buffer_replacement() -> Result<()> {
+        let Some(r) = crate::test_renderer()? else { return Ok(()); };
+        let mut s = r.install(scene()?, Path::new("."))?;
+        let frame = s.create_frame_slot(&r, Default::default())?;
+        // Exercise the CPU receiver contract with a producer-owned local bound.
+        // No modified scene is rendered: ownership is supplied to selection here.
+        s.draws[0].computed = true;
+        let cull = crate::passes::camera_cull::Resources::new(&s,&r,&frame.view.uniform,&frame.objects,s.material_table.records(),None,None);
+        let mut objects = frame.object_values.clone();
+        let vp = Mat4::perspective_rh(1.,1.,0.1,100.);
+        let mut changes = ChangeTracker::default();
+        changes.sample = 1;
+        cull.prepare_exposure(vp,&objects,&[None],&mut changes,false);
+        let count = cull.test_visits();
+        assert_eq!(count,objects.len());
+        let next = |changes: &mut ChangeTracker| { changes.sample+=1;changes.bytes.clear();changes.uploads.clear(); };
+        next(&mut changes);
+        cull.prepare_exposure(vp,&objects,&[None],&mut changes,false);
+        assert_eq!(cull.test_visits(),count);
+        assert!(changes.uploads.is_empty());
+        let outside = Some((Vec3::splat(100.),Vec3::splat(101.)));
+        cull.prepare_exposure(vp,&objects,&[outside],&mut changes,false);
+        assert_eq!(cull.test_visits(),2*count,"new evaluated bounds invalidate");
+        assert!(!changes.uploads.is_empty(),"changed bounds must publish selection");
+        next(&mut changes);
+        cull.prepare_exposure(vp,&objects,&[outside],&mut changes,false);
+        assert_eq!(cull.test_visits(),2*count);
+        objects[0].model = Mat4::from_translation(Vec3::new(1.,0.,-5.));
+        changes.upload(&frame.objects,0,bytemuck::bytes_of(&objects[0].gpu()));
+        cull.prepare_exposure(vp,&objects,&[outside],&mut changes,false);
+        assert_eq!(cull.test_visits(),3*count);
+        // A second publication has the same sample stamp; it must not retain
+        // the first publication's selection.
+        objects[0].metadata[1] = 0;
+        changes.upload(&frame.objects,0,bytemuck::bytes_of(&objects[0].gpu()));
+        cull.prepare_exposure(vp,&objects,&[outside],&mut changes,false);
+        assert_eq!(cull.test_visits(),4*count);
+        next(&mut changes);
+        changes.upload(s.material_table.records(),0,&[1,2,3,4]);
+        cull.prepare_exposure(vp,&objects,&[outside],&mut changes,false);
+        assert_eq!(cull.test_visits(),4*count,"shading publication must retain selection");
+        let samples = cull.sample_values(&r.device,2).unwrap();
+        cull.prepare_sample(vp,&objects,&[None],&mut changes,&samples,0);
+        cull.prepare_sample(vp*Mat4::from_translation(Vec3::new(-8.,0.,0.)),&objects,&[None],&mut changes,&samples,1);
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+        cull.copy_sample(&mut encoder,&mut changes,&samples,0);
+        for (buffer,offset,source,size) in &changes.uploads {
+            r.queue.write_buffer(buffer,*offset,&changes.bytes[*source as usize..(*source+*size) as usize]);
+        }
+        r.queue.submit([encoder.finish()]);
+        let before = cull.test_visits();
+        next(&mut changes);
+        cull.prepare_exposure(vp,&objects,&[outside],&mut changes,false);
+        assert_eq!(cull.test_visits(),before+count,"capture restoration invalidates the live selection");
+        for (buffer,offset,source,size) in &changes.uploads {
+            r.queue.write_buffer(buffer,*offset,&changes.bytes[*source as usize..(*source+*size) as usize]);
+        }
+        let commands = cull.commands().unwrap();
+        let read = r.device.create_buffer(&wgpu::BufferDescriptor { label:None,size:commands.size()+cull.instances.size(),
+            usage:wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,mapped_at_creation:false });
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(commands,0,&read,0,commands.size());
+        encoder.copy_buffer_to_buffer(&cull.instances,0,&read,commands.size(),cull.instances.size());
+        let submission = r.queue.submit([encoder.finish()]);
+        let (tx,rx) = std::sync::mpsc::channel();
+        read.map_async(wgpu::MapMode::Read,..,move |result| {let _=tx.send(result);});
+        r.device.poll(wgpu::PollType::Wait {submission_index:Some(submission),timeout:None})?;
+        rx.recv()??;
+        let mapped = read.get_mapped_range(..);
+        let words: &[u32] = bytemuck::cast_slice(&mapped);
+        assert_eq!(words[1],0,"CPU selection must replace the capture's nonzero GPU count, even when its bytes equal the earlier CPU selection");
+        assert!(words[commands.size() as usize / 4..].iter().all(|&word| word==0),
+            "CPU selection must also replace the capture's instance map");
+        drop(mapped);
+        read.unmap();
+        r.errors.check()?;
         Ok(())
     }
 }

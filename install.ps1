@@ -10,14 +10,18 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $repo = if ($env:VORK_REPO) { $env:VORK_REPO } else { 'voyager-so/vork' }
 # Default version is generated from Cargo.toml by scripts/sync-version.
-$version = if ($env:VERSION) { $env:VERSION } else { '0.2.0' }
+$version = if ($env:VERSION) { $env:VERSION } else { '0.3.0' }
 $prefix = if ($env:PREFIX) { $env:PREFIX } else { Join-Path $env:LOCALAPPDATA 'Programs\vork' }
 if ($version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid VERSION' }
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne 'AMD64') { throw "Supported platforms: Windows x64, Apple Silicon macOS and Linux x64; found $arch" }
 $archive = "vork-$version-windows-x64.zip"
 $base = if ($env:VORK_DOWNLOAD_BASE) { $env:VORK_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/$repo/releases/download/v$version" }
+function Quote-ShellLiteral([string]$value) {
+    "'" + $value.Replace("'", "''") + "'"
+}
 $bin = $prefix
+$quotedBin = Quote-ShellLiteral $bin
 if ($DryRun) {
     "Archive: $base/$archive"
     "Checksums: $base/SHA256SUMS"
@@ -26,11 +30,41 @@ if ($DryRun) {
 }
 function Get-Release([string]$name, [string]$target) {
     $url = "$base/$name"
-    try {
-        if ($url -match '^file:') { Copy-Item -LiteralPath ([Uri]$url).LocalPath -Destination $target }
-        else { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $target }
-    } catch {
-        throw "Could not download $url ($($_.Exception.Message)) Nothing was installed. Check your connection and that vork $version has this file: https://github.com/$repo/releases"
+    if ($url -match '^file:') {
+        try { Copy-Item -LiteralPath ([Uri]$url).LocalPath -Destination $target; return }
+        catch { throw "Could not copy $url to $target ($($_.Exception.Message)). Check free space and permissions; your existing install was not changed." }
+    }
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        $response = $null; $inputStream = $null; $outputStream = $null
+        try {
+            # Header/connect and idle-read deadlines, never a whole-download limit.
+            $request = [Net.HttpWebRequest]::Create($url)
+            $request.Timeout = 30000
+            $request.ReadWriteTimeout = 120000
+            $response = $request.GetResponse()
+            $inputStream = $response.GetResponseStream()
+            $outputStream = [IO.File]::Open($target, [IO.FileMode]::Create)
+            $buffer = New-Object byte[] 65536
+            $received = 0L
+            while (($count = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $outputStream.Write($buffer, 0, $count)
+                $received += $count
+            }
+            if ($response.ContentLength -ge 0 -and $received -ne $response.ContentLength) {
+                throw [Net.WebException]::new("Interrupted download: received $received of $($response.ContentLength) bytes")
+            }
+            return
+        } catch {
+            if ($attempt -eq 3) {
+                throw "Could not download $url to $target ($($_.Exception.Message)). Check connection, free space and permissions. Headers wait at most 30 seconds; idle reads wait at most 120 seconds. Your existing install was not changed. Run this installer again: https://github.com/$repo/releases"
+            }
+            Write-Warning "Download failed ($($_.Exception.Message)); retrying $url"
+        } finally {
+            if ($outputStream) { $outputStream.Dispose() }
+            if ($inputStream) { $inputStream.Dispose() }
+            if ($response) { $response.Dispose() }
+        }
+        Start-Sleep -Seconds ([math]::Pow(2, $attempt))
     }
 }
 # Add a folder to the user PATH, keeping unexpanded entries such as %USERPROFILE%.
@@ -74,34 +108,40 @@ try {
     $running = @(Get-Process -Name vork -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $bin 'vork.exe') })
     if ($running.Count) { throw "vork is still running from $prefix (process $($running[0].Id)). Let it finish or close it, then run this again. Your existing install was not changed." }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $prefix) | Out-Null
-    Expand-Archive -LiteralPath $zip -DestinationPath $stage
+    try { Expand-Archive -LiteralPath $zip -DestinationPath $stage }
+    catch { throw "Could not extract vork into $stage ($($_.Exception.Message)). Check free space and write permissions: the expanded release must fit beside $prefix, and the archive occupies $work. Your existing install was not changed." }
+    $stageExe = Join-Path $stage 'vork.exe'
+    try { & $stageExe --version }
+    catch { throw "Cannot execute $stageExe ($($_.Exception.Message)). Check platform compatibility, runtime libraries and execution permissions. Your existing install was not changed." }
+    if ($LASTEXITCODE -ne 0) { throw "Staged vork --version failed (exit $LASTEXITCODE); your existing install was not changed." }
     if (Test-Path -LiteralPath $prefix) {
         try { Move-Item -LiteralPath $prefix -Destination $retired }
         catch { throw "Could not replace $prefix ($($_.Exception.Message)) Close anything using that folder and run this again. Your existing install was not changed." }
     }
     Move-Item -LiteralPath $stage -Destination $prefix
     $exe = Join-Path $bin 'vork.exe'
+    $quotedExe = Quote-ShellLiteral $exe
     & $exe --version
     if ($LASTEXITCODE -ne 0) { throw 'vork --version failed' }
     # Let a new window find vork. Only the default location touches the user PATH.
     $pathNote = $null
     if ($env:PREFIX -or $env:VORK_NO_MODIFY_PATH -eq '1') {
         if (-not (($env:Path -split ';') -contains $bin)) {
-            $pathNote = "Add it to PATH with:`n  [Environment]::SetEnvironmentVariable('Path', `"$bin;`" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
+            $pathNote = "Add it to PATH with:`n  [Environment]::SetEnvironmentVariable('Path', $quotedBin + ';' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
         }
     } else {
         Add-UserPath $bin
         if (-not (($env:Path -split ';') -contains $bin)) { $env:Path = "$bin;$env:Path" }
-        $pathNote = "New PowerShell windows find vork. In a window that is already open, run:`n  `$env:Path = `"$bin;`$env:Path`""
+        $pathNote = "New PowerShell windows find vork. In a window that is already open, run:`n  `$env:Path = $quotedBin + ';' + `$env:Path"
     }
     if ($env:VORK_SKIP_SETUP -eq '1') {
         'Skipping vork setup (VORK_SKIP_SETUP=1); run vork setup before rendering.'
     } else {
-        'Preparing shaders for this GPU (up to about 3 minutes)...'
+        'Preparing shaders for this GPU; native progress reports the current phase...'
         & $exe setup
         if ($LASTEXITCODE -ne 0) {
             if ($pathNote) { $pathNote }
-            throw "vork is installed at $exe, but setup failed. Follow the report above, then run: $exe setup"
+            throw "vork is installed at $exe, but setup failed. Follow the report above, then run: & $quotedExe setup"
         }
     }
     "Installed to $exe."
@@ -109,5 +149,13 @@ try {
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $retired -Recurse -Force -ErrorAction SilentlyContinue
+    $keepRetired = $false
+    if ((Test-Path -LiteralPath $retired) -and -not (Test-Path -LiteralPath $prefix)) {
+        try { Move-Item -LiteralPath $retired -Destination $prefix }
+        catch {
+            $keepRetired = $true
+            Write-Warning "Could not restore the previous install ($($_.Exception.Message)); it is preserved at $retired"
+        }
+    }
+    if (-not $keepRetired) { Remove-Item -LiteralPath $retired -Recurse -Force -ErrorAction SilentlyContinue }
 }
