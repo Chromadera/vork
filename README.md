@@ -3,19 +3,30 @@
   <img alt="vork by Voyager" src="docs/images/readme-header-light.png" width="800">
 </picture>
 
-vork, the Voyager rendering kernel, is a headless 3D and VFX engine built for agents.
+<p>
+  <a href="https://discord.com/invite/voyagerai"><img alt="Discord" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Fv10%2Finvites%2Fvoyagerai%3Fwith_counts%3Dtrue&query=%24.approximate_presence_count&suffix=%20online&label=Discord&logo=discord&logoColor=white&color=5865F2"></a>
+  <a href="https://www.npmjs.com/package/@voyager-so/vork"><img alt="npm" src="https://img.shields.io/npm/v/@voyager-so/vork?label=npm&color=black"></a>
+  <a href="https://pypi.org/project/vork/"><img alt="PyPI" src="https://img.shields.io/pypi/v/vork?label=PyPI&color=black"></a>
+  <a href="https://x.com/ravisparikh"><img alt="Follow @ravisparikh on X" src="https://img.shields.io/badge/X-@ravisparikh-black?logo=x&logoColor=white"></a>
+</p>
 
-[![A cyber car on a mountain road at sunset — watch the film](https://cdn.moda.app/voyager/blog/vork/cyber-car-poster-2f939652f3e77c3c.webp)](https://voyager.so/vork)
+**vork is a 3D and VFX engine built for AI agents.**
 
-[Watch the film](https://voyager.so/vork): a car drives into the night as the forest
-turns into glowing cyan wireframe, drawn from real triangle edges by a scene shader.
+Agents write the whole scene as code, including their own shaders, materials,
+cameras and physics, and vork renders it on the GPU. The core API fits in about
+2,500 tokens.
 
-Credit: [“Car Concept”](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept)
-by Unity Fan, glTF adaptation by Eric Chadwick / Darmstadt Graphics Group,
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: scaled, animated,
-brighter head and tail lights, wheel pose. Trees, ground and asphalt from Poly Haven
-(CC0). The far mountains and sky are an image-model painting on a curved 3D card;
-everything else that moves is rendered.
+https://github.com/user-attachments/assets/03cfa020-be40-483a-89af-1ef77467b7a0
+
+**One million birds, each on its own path.** 192 frames at 1080p rendered in
+97 seconds on a single NVIDIA L4. Blender EEVEE at the same sample count is
+projected at 13–18 minutes. [How we measured](#million-birds-measured-movies-projected-blender-times) ·
+[how it's made](examples/murmuration/) · [credits](examples/murmuration/CREDITS)
+
+- **Built for agents:** a small API that agents can extend with their own GPU programs.
+- **Fast:** 1.1–2.3× faster than EEVEE on default stills and movies, and about 8–11× on the bird flock.
+  [Speed, with the qualifications](#speed-with-the-qualifications).
+- **Native GPU engine:** written in Rust and Slang, runs on Vulkan and Metal (Linux, Windows, macOS).
 
 ## Paste this to your agent
 
@@ -24,10 +35,6 @@ everything else that moves is rendered.
 > Run `vork init my-shot`, read `vork help`, render a preview and inspect the image.
 > Refine the camera and lighting before rendering at final quality. Read the
 > relevant help topic when you need a feature the first page doesn't explain.
-
-A million birds, each steering itself over a lagoon. A black hole that bends
-light. A glowing seed placed on a real desk, lighting the room around it.
-These are scenes written as code and rendered on a GPU. No video model required.
 
 vork is written in Rust and Slang, with GPU rendering through Vulkan and Metal.
 An agent writes a scene,
@@ -83,6 +90,20 @@ by Alexei Ostapenko, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 Changes: sampled flight pose, reduced distant mesh, rescaled, articulated flight
 wings, extracted wings for the starling body, resized textures.
 [All bird and environment credits](examples/murmuration/CREDITS).
+
+### [Cyber car](https://voyager.so/vork)
+
+[![A cyber car on a mountain road at sunset — watch the film](https://cdn.moda.app/voyager/blog/vork/cyber-car-poster-2f939652f3e77c3c.webp)](https://voyager.so/vork)
+
+[Watch the film](https://voyager.so/vork): a car drives into the night as the forest
+turns into glowing cyan wireframe, drawn from real triangle edges by a scene shader.
+
+Credit: [“Car Concept”](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept)
+by Unity Fan, glTF adaptation by Eric Chadwick / Darmstadt Graphics Group,
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: scaled, animated,
+brighter head and tail lights, wheel pose. Trees, ground and asphalt from Poly Haven
+(CC0). The far mountains and sky are an image-model painting on a curved 3D card;
+everything else that moves is rendered.
 
 ### [VFX on real footage](examples/vfx-artifact/)
 
@@ -166,7 +187,7 @@ machine, you can use the [Docker runtime](docs/REMOTE-GPU.md).
 ## Give it to an agent
 
 Start with `vork init`, then `vork help`. Scene JSON uses the stable
-[editor schema](https://voyager.so/vork/schema/scene.schema.json).
+[editor schema](https://raw.githubusercontent.com/voyager-so/vork/v0.3.0/packages/ts/scene.schema.json).
 Use `vork help` for the starting scene and concepts, `vork help TOPIC --all`
 for topic fields, and `vork help field PATH` for an exact field reference.
 
@@ -440,7 +461,7 @@ current shell, and any shell that reads no startup file, such as plain `bash -c`
 muxes the stream. Native NVENC is attempted on NVIDIA; otherwise encoding uses a
 readback fallback. Older GPUs and software Vulkan adapters are unsupported.
 A100, H100, H200, B200 and B300 lack the required hardware ray tracing; recency
-alone does not make a NVIDIA GPU suitable. Containers also need working NVIDIA
+alone does not make an NVIDIA GPU suitable. Containers also need working NVIDIA
 Vulkan driver discovery; passing through a GPU alone may not be sufficient.
 If `nvidia-smi` works but Vulkan sees only llvmpipe, check the NVIDIA ICD JSON
 in `/etc/vulkan/icd.d` or `/usr/share/vulkan/icd.d`: its library may fail to load
@@ -538,12 +559,25 @@ vork setup
 `vork setup` prints the tools/GPU report and current phase. `Shader setup completed`
 marks success; time depends on the GPU, driver and cache.
 
-### npm and pip installation candidate
+### npm
 
-Registry packaging is being validated privately and has not been published.
-Use the archive installers above and their bundled SDKs. npm and PyPI installation
-will become available only after separate release approval.
-These commands are not yet the default installation instructions.
+Requires Node.js 22.18+ and a supported GPU and driver (above). Linux and Windows video
+output also needs ffmpeg.
+
+```sh
+npm create vork@latest my-shot
+cd my-shot
+npx vork setup
+npx vork render scene.json --out render.png
+```
+
+This installs the engine and TypeScript SDK into the project; no global install is needed.
+In an existing project, `npm install @voyager-so/vork` and use `npx vork` the same way.
+Keep npm's optional dependencies enabled: they carry the platform runtime.
+
+### pip
+
+Coming soon. Use the installers above for the Python SDK in the meantime.
 
 ### First render and SDKs
 
