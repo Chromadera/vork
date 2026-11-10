@@ -86,7 +86,7 @@ pub(crate) fn encode_controls(encoder: &mut wgpu::CommandEncoder, f: &crate::vie
     if f.transparent_order.is_empty() {
         return;
     }
-    let mut pass = super::forward::begin_pass(encoder,f,"nearest transparent controls",wgpu::LoadOp::Load,"transparency");
+    let mut pass = super::forward::begin_pass(encoder,f,"nearest transparent controls",wgpu::LoadOp::Load,Some("transparency"));
     let bundles = f.bundles();
     pass.execute_bundles(
         draw_order(f)

@@ -158,6 +158,27 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('New shells that read', result.stdout)
         self.assertIn(str(home / '.local/bin/vork'), result.stdout)
 
+    def test_custom_prefix_path_opt_in_and_no_modify_precedence(self):
+        home = self.root / 'home'; home.mkdir()
+        self.env.update(SHELL='/bin/zsh', PREFIX=str(self.root / "Zoë O'Neil $(touch injected) `touch injected2`"))
+        rc = home / '.zshenv'
+        for opt_in, opt_out, modifies in [('0', '0', False), ('1', '0', True), ('1', '1', False), ('0', '1', False)]:
+            with self.subTest(opt_in=opt_in, opt_out=opt_out):
+                if rc.exists(): rc.unlink()
+                self.env.update(VORK_MODIFY_PATH=opt_in, VORK_NO_MODIFY_PATH=opt_out)
+                for _ in range(2):
+                    result = self.run_installer()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(rc.exists(), modifies)
+                if modifies:
+                    self.assertEqual(rc.read_text().count('# Added by the vork installer'), 1)
+                    result = subprocess.run(['sh', '-c', '. "$HOME/.zshenv"; command -v vork'],
+                                            env=self.env, cwd=self.root, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), self.env['PREFIX'] + '/bin/vork')
+                self.assertFalse((self.root / 'injected').exists())
+                self.assertFalse((self.root / 'injected2').exists())
+
     @unittest.skipUnless(shutil.which('bash'), 'needs bash')
     def test_bash_login_shell_finds_vork_past_a_stock_early_return(self):
         home = self.root / 'home'; home.mkdir()
@@ -283,6 +304,58 @@ class InstallerTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('pwsh') or (os.name == 'nt' and shutil.which('powershell')), 'needs PowerShell')
 class PowerShellLiteralTests(unittest.TestCase):
+    def test_custom_prefix_path_opt_in_and_no_modify_precedence(self):
+        source = PS_INSTALLER.read_text()
+        block = source[source.index('    # Let a new window'):source.index("    if ($env:VORK_SKIP_SETUP")]
+        quote = source[source.index('function Quote-ShellLiteral'):source.index('$bin = $prefix')]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = str(root / "Zoë O'Neil $(throw 'injected') `x`")
+            script = root / 'test.ps1'
+            script.write_text("$ErrorActionPreference = 'Stop'\n" +
+                "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" + quote +
+                "\n$bin = @'\n" + folder + "\n'@\n$quotedBin = Quote-ShellLiteral $bin\n" +
+                "$global:added = @(); function Add-UserPath([string]$folder) { $global:added += $folder }\n" +
+                "$env:Path = 'existing'; $env:PREFIX = if ($env:TEST_CUSTOM -eq '1') { $bin } else { '' }\n" +
+                block + block +
+                "\n@{added=$global:added; path=$env:Path} | ConvertTo-Json -Compress\n", encoding='utf-8-sig')
+            shell = shutil.which('pwsh') or 'powershell'
+            import json
+            for custom in ['0', '1']:
+                for opt_in in ['0', '1']:
+                    for opt_out in ['0', '1']:
+                        with self.subTest(custom=custom, opt_in=opt_in, opt_out=opt_out):
+                            result = subprocess.run([shell, '-NoProfile', '-File', str(script)], capture_output=True, text=True, encoding='utf-8',
+                                env={**os.environ, 'TEST_CUSTOM':custom, 'VORK_MODIFY_PATH':opt_in, 'VORK_NO_MODIFY_PATH':opt_out})
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            data = json.loads(result.stdout)
+                            modifies = opt_out != '1' and (custom != '1' or opt_in == '1')
+                            self.assertEqual(data['added'], [folder, folder] if modifies else [])
+                            self.assertEqual(data['path'], folder + ';existing' if modifies else 'existing')
+
+    def test_staged_version_is_silent_and_failures_keep_output(self):
+        source = PS_INSTALLER.read_text()
+        staged = source[source.index('    try { $stagedVersionOutput'):source.index('    if (Test-Path -LiteralPath $prefix)')]
+        installed = source[source.index('    & $exe --version'):source.index('    # Let a new window')]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native = root / 'native.ps1'
+            native.write_text("'fixture version'; $global:LASTEXITCODE = [int]$env:PROBE_EXIT\n")
+            script = root / 'test.ps1'
+            script.write_text("$ErrorActionPreference = 'Stop'\n$stageExe = $exe = '" + str(native) + "'\n" + staged + installed)
+            shell = shutil.which('pwsh') or 'powershell'
+            for code in ['0', '7']:
+                result = subprocess.run([shell, '-NoProfile', '-File', str(script)],
+                                        env={**os.environ, 'PROBE_EXIT': code}, capture_output=True, text=True)
+                if code == '0':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), 'fixture version')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Staged vork --version failed', result.stderr)
+                    self.assertIn('fixture version', result.stderr)
+                    self.assertEqual(result.stdout, '')
+
     def test_retry_path_is_not_evaluated_as_shell_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

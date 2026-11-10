@@ -64,7 +64,7 @@ pub const LIBRARIES: &[Library] = &[
         name: "blender",
         help: include_str!("../../../libraries/blender/HELP.txt"),
         modules: modules!("blender":
-            "nodes" false,
+            "nodes" false, "volume" false,
             "texture_coordinate" false, "color" false, "procedurals" false, "filmic" true, "display_lut" false),
         profiles: &[],
         images: &[("blender/filmic", "lut", ProgramImage::File("libraries/blender/filmic.exr"))],
@@ -73,6 +73,13 @@ pub const LIBRARIES: &[Library] = &[
         name: "fluid",
         help: include_str!("../../../libraries/fluid/HELP.txt"),
         modules: modules!("fluid": "config" false, "solver" false, "surface" false, "whitewater" false, "film" false),
+        profiles: &[],
+        images: &[],
+    },
+    Library {
+        name: "cloth",
+        help: include_str!("../../../libraries/cloth/HELP.txt"),
+        modules: modules!("cloth": "solver" false, "body" false, "self" false),
         profiles: &[],
         images: &[],
     },
@@ -134,7 +141,7 @@ fn test_modules() -> impl Iterator<Item = &'static Module> {
     #[cfg(not(feature = "test-support"))]
     let modules: &[Module] = &[];
     #[cfg(feature = "test-support")]
-    let blender = modules!("blender": "principled_volume" true, "volume" false);
+    let blender = modules!("blender": "principled_volume" true);
     #[cfg(not(feature = "test-support"))]
     let blender: &[Module] = &[];
     modules.iter().chain(blender)

@@ -1,7 +1,7 @@
 //! Install-time dependency order for node aiming and object focus.
 use super::{EvalNode, Mat4, NodeKind, Result, Vec3, ensure};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Plan {
     pub order: Vec<usize>,
     pub aims: Vec<Option<Aim>>,

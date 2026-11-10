@@ -96,6 +96,53 @@ pub(crate) fn check_view(limits: &wgpu::Limits, extent: [u32; 2], samples: u32, 
     Ok(sizes)
 }
 
+pub(crate) fn packet_eligible(shape:ViewShape,samples:u32)->bool {
+    samples>1 && shape.table_only && !shape.transparent && !shape.diffusion
+        && !shape.screen_refraction && shape.boundaries==0
+}
+/// Admission checks the smallest reusable packet and the retained whole-frame
+/// guides. View creation subsequently selects and validates its actual extent.
+pub(crate) fn check_packet_minimum(limits:&wgpu::Limits,extent:[u32;2],samples:u32,shape:ViewShape)->Result<()> {
+    let local=[extent[0],extent[1].min(TILE)];
+    let pool=u64::from(local[0])*u64::from(local[1])*u64::from(samples.saturating_sub(VISIBILITY_SLOTS));
+    let fields=view_bindings_with_pool(shape,local,samples,pool);
+    for (label,bytes) in fields {gpu_memory::storage_binding(limits,label,bytes)?;}
+    let (label,bytes)=view_bindings_with_pool(shape,extent,samples,0)[4];
+    gpu_memory::storage_binding(limits,label,bytes)?;
+    ensure!(fields[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size,"camera packet reflection allocation exceeds device limit");
+    Ok(())
+}
+
+/// Reserve at most a quarter of available device memory for camera records,
+/// leaving headroom for retained images, geometry and downstream passes. Frames
+/// whose existing layout fits use the existing dispatch path without packets.
+fn camera_packet_rows(limits:&wgpu::Limits,shape:ViewShape,[w,h]:[u32;2],samples:u32,words:u32,memory:u64)->Result<Option<u32>> {
+    let budget=memory/4;
+    let full=view_bindings(limits,shape,[w,h],samples);
+    let root_bytes=|sizes:[(&str,u64);5],evaluations:u64| {
+        sizes[0].1+sizes[1].1+sizes[2].1+sizes[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)
+            +evaluations*(u64::from(words)*16+16)
+    };
+    let fits_bindings=|sizes:[(&str,u64);5]|sizes.iter().all(|(_,b)|*b<=limits.max_storage_buffer_binding_size.min(limits.max_buffer_size))
+        && sizes[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size;
+    let evaluations=(u64::from(w)*u64::from(h)*u64::from(VISIBILITY_SLOTS)).min(evaluation_budget(limits,memory,words));
+    if fits_bindings(full) && root_bytes(full,evaluations)<=budget {return Ok(None);}
+    let fits=|rows:u32| {
+        let pixels=u64::from(w)*u64::from(rows);
+        let pool=pixels*u64::from(samples.saturating_sub(VISIBILITY_SLOTS));
+        let sizes=view_bindings_with_pool(shape,[w,rows],samples,pool);
+        fits_bindings(sizes) && pixels*u64::from(samples)<=evaluation_limit(limits,2,words)
+            && root_bytes(sizes,pixels*u64::from(samples))<=budget
+    };
+    let minimum=h.min(TILE);
+    // Memory headroom is a scheduling target, never a new scene refusal.
+    // Native limits remain hard and are checked again before allocation.
+    if !fits(minimum) {return Ok(Some(minimum));}
+    let mut lo=1;let mut hi=h.div_ceil(TILE);
+    while lo<hi {let mid=(lo+hi+1)/2;if fits((mid*TILE).min(h)) {lo=mid;} else {hi=mid-1;}}
+    Ok(Some((lo*TILE).min(h)))
+}
+
 /// One key per pixel: (object + 1, primitive).
 pub(crate) const KEY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
 /// Merge and shade workgroup side (REG_COMPUTE_TILE).
@@ -191,13 +238,8 @@ fn merge_batches(passes: u32, batch: u32) -> impl Iterator<Item = (u32, u32)> {
     (0..passes).step_by(batch as usize).map(move |first| (first, batch.min(passes - first)))
 }
 /// decoupled_visibility.slang transparent fragments group 2: the view's fragment list.
-pub(crate) fn fragments_entries(pages:u32) -> Vec<wgpu::BindGroupLayoutEntry> {
-    // Fragment storage, then the volume sample pages as one binding array.
-    (0..=u32::from(pages>0)).map(|binding| {
-        let mut entry=pipelines::buffer_entry(binding,wgpu::ShaderStages::FRAGMENT,wgpu::BufferBindingType::Storage {read_only:false});
-        if binding==1 {entry.count=std::num::NonZeroU32::new(pages);}
-        entry
-    }).collect()
+pub(crate) fn fragments_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    vec![pipelines::buffer_entry(0,wgpu::ShaderStages::FRAGMENT,wgpu::BufferBindingType::Storage {read_only:false})]
 }
 /// The same current-pose geometry and sampling table used by retained shading.
 pub(crate) fn fragments_geometry_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
@@ -301,7 +343,7 @@ fn refraction_levels([w, h]: [u32; 2]) -> u32 {
     widest.min(w.max(h).ilog2() + 1)
 }
 /// One merge batch's parameter block (decoupled_merge.slang MergePass).
-const PARAMETERS: u64 = 16;
+const PARAMETERS: u64 = 32;
 /// Clip offset, sample index and unit-disk lens point (decoupled_visibility.slang).
 const VISIBILITY_PARAMETERS: u64 = 32;
 pub(crate) fn merge_pipeline(p: &crate::pipelines::CachedPipelines, r: &Renderer) -> wgpu::ComputePipeline {
@@ -317,24 +359,22 @@ pub(crate) fn merge_pipeline(p: &crate::pipelines::CachedPipelines, r: &Renderer
     }).clone()
 }
 #[cfg(test)]
-pub(crate) fn camera_geometry_entries()->Vec<wgpu::BindGroupLayoutEntry> {camera_geometry_entries_for(1,1)}
-pub(crate) fn camera_geometry_entries_for(evaluation_pages:u32,medium_pages:u32)->Vec<wgpu::BindGroupLayoutEntry> {
+pub(crate) fn camera_geometry_entries()->Vec<wgpu::BindGroupLayoutEntry> {camera_geometry_entries_for(1)}
+pub(crate) fn camera_geometry_entries_for(evaluation_pages:u32)->Vec<wgpu::BindGroupLayoutEntry> {
     let mut pages=pipelines::buffer_entry(1,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false});
     pages.count=std::num::NonZeroU32::new(evaluation_pages);
-    let mut medium=pipelines::buffer_entry(2,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false});
-    medium.count=std::num::NonZeroU32::new(medium_pages);
-    let mut entries=vec![crate::rt::hit_buffers_entry(0,wgpu::ShaderStages::COMPUTE),pages,medium];
+    let mut entries=vec![crate::rt::hit_buffers_entry(0,wgpu::ShaderStages::COMPUTE),pages];
     for description in &crate::camera_native::TABLES {
         let (binding,count,read_only)=(description.binding,description.resources.len() as u32,description.read_only);
         let mut table=pipelines::buffer_entry(binding,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only});
         table.count=std::num::NonZeroU32::new(count);
         entries.push(table);
     }
-    entries.push(crate::passes::reflections::record_fields_entry(6, false));
+    entries.push(crate::passes::reflections::record_fields_entry(5, false));
     entries
 }
-fn camera_geometry_layout(d:&wgpu::Device,pages:u32,medium_pages:u32)->wgpu::BindGroupLayout {
-    d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("camera geometry and evaluations"),entries:&camera_geometry_entries_for(pages,medium_pages)})
+fn camera_geometry_layout(d:&wgpu::Device,pages:u32)->wgpu::BindGroupLayout {
+    d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("camera geometry and evaluations"),entries:&camera_geometry_entries_for(pages)})
 }
 type EvaluationPipeline = pipelines::Drawn<wgpu::ComputePipeline>;
 /// Setup has no scene registry identity. The containing device-cache namespace
@@ -367,15 +407,11 @@ fn kernel_pipeline(c:&pipelines::Compiler,p:&crate::pipelines::CachedPipelines,l
 /// Every fixed and specialized stage uses the same explicit camera layout.
 fn shade_layout(d:&wgpu::Device,p:&crate::pipelines::CachedPipelines)->wgpu::PipelineLayout {
     let group=d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("decoupled shade"),entries:&camera_entries(p.raster_samples)});
-    d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {label:Some("decoupled shade"),bind_group_layouts:&[Some(&p.global_layout),Some(&p.mat_layout),Some(&p.shadow_layout),Some(&camera_geometry_layout(d,p.camera_pages,p.resolve_native.as_ref().map_or(1,|n|n.sample_pages.max(1)))),Some(&group)],immediate_size:0})
+    d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {label:Some("decoupled shade"),bind_group_layouts:&[Some(&p.global_layout),Some(&p.mat_layout),Some(&p.shadow_layout),Some(&camera_geometry_layout(d,p.camera_pages)),Some(&group)],immediate_size:0})
 }
-fn shade_pipeline(r: &Renderer, p: &crate::pipelines::CachedPipelines, kernel: crate::pipelines::ProgramKernel, transparent:bool) -> Result<(wgpu::ComputePipeline,Option<wgpu::ComputePipeline>,Vec<wgpu::ComputePipeline>)> {
+fn shade_pipeline(r: &Renderer, p: &crate::pipelines::CachedPipelines, kernel: crate::pipelines::ProgramKernel) -> Result<(wgpu::ComputePipeline,Vec<wgpu::ComputePipeline>)> {
     let crate::pipelines::ProgramKernel::Decoupled { stage, .. } = kernel else { unreachable!("decoupled shade kernel") };
     let layout=shade_layout(&r.device,p);
-    let receivers=p.resolve_native.as_ref().filter(|_|stage==ShadeStage::Compose && transparent).map(|_| {
-        let mut k=kernel;if let crate::pipelines::ProgramKernel::Decoupled {stage:s,..}=&mut k {*s=ShadeStage::Receivers;}
-        kernel_pipeline(&r.compiler,p,&layout,k,"volume receivers")
-    }).transpose()?;
     let classification=if matches!(stage,ShadeStage::Index|ShadeStage::Classify) {
         let make_stage=|stage,label| {
             let mut k=kernel;if let crate::pipelines::ProgramKernel::Decoupled {stage:s,..}=&mut k {*s=stage;}
@@ -385,7 +421,7 @@ fn shade_pipeline(r: &Renderer, p: &crate::pipelines::CachedPipelines, kernel: c
         if stage==ShadeStage::Classify {stages.push(make_stage(ShadeStage::Scatter,"camera material scatter")?);}
         stages
     } else {Vec::new()};
-    Ok((kernel_pipeline(&r.compiler,p,&layout,kernel,&kernel.camera_label().expect("camera kernel label"))?,receivers,classification))
+    Ok((kernel_pipeline(&r.compiler,p,&layout,kernel,&kernel.camera_label().expect("camera kernel label"))?,classification))
 }
 fn compute_pipeline(r: &Renderer, label: &str, layout: &wgpu::PipelineLayout, shader: &native::Compiled) -> wgpu::ComputePipeline {
     r.compiler.compute_entry(layout,&native::shader_module(&r.device,shader),shader.entry,label)
@@ -400,7 +436,7 @@ pub(crate) fn warm_shaders(r:&Renderer) {
     let profiles:Vec<_>=[false,true].into_iter().filter(|ray|!*ray || rays).map(|ray| (ray,
         group("material",&pipelines::material_entries(ray)),
         group("shadow read",&pipelines::camera_shadow_entries(ray)))).collect();
-    let geometry=camera_geometry_layout(d,1,1);
+    let geometry=camera_geometry_layout(d,1);
     std::thread::scope(|scope| {
         for (rays,materials,shadows) in &profiles {
             for &(msaa,ray,stage,shader) in native::CAMERAS {
@@ -444,7 +480,6 @@ struct ShadePipelines {
     indirect:Option<wgpu::ComputePipeline>,
     fused:Option<EvaluationPipeline>,
     compose: wgpu::ComputePipeline,
-    receivers: Option<wgpu::ComputePipeline>,
     classification: Option<Vec<wgpu::ComputePipeline>>,
     evaluate: Vec<(u32,EvaluationPipeline)>,
 }
@@ -456,7 +491,7 @@ pub(crate) struct Sampling {
     stride: u32,
 }
 impl Sampling {
-    pub(crate) fn new(d: &wgpu::Device, resolution: [u32; 2], samples: u32, medium_capacity: u32) -> Self {
+    pub(crate) fn new(d: &wgpu::Device, resolution: [u32; 2], samples: u32) -> Self {
         let batch = MERGE_BATCH.min(samples);
         // The same installed table is a constant vertex stream and the shade's
         // lens sequence. Its first record carries the sequence length.
@@ -465,7 +500,7 @@ impl Sampling {
         passes.extend((0..samples).map(|sample| {
             let [x, y] = crate::sampling::clip_offset(resolution, sample as usize, samples as usize);
             let disk = crate::sampling::lens_disk(sample as usize, samples as usize);
-            [x.to_bits(), y.to_bits(), sample, medium_capacity, disk.x.to_bits(), disk.y.to_bits(),
+            [x.to_bits(), y.to_bits(), sample, 0, disk.x.to_bits(), disk.y.to_bits(),
                 (x*resolution[0] as f32*0.5).to_bits(), (y*resolution[1] as f32*0.5).to_bits()]
         }));
         // Whole-slot moments are view invariants, shared by every fully covered
@@ -503,7 +538,7 @@ impl Sampling {
         let stride = d.limits().min_uniform_buffer_offset_alignment.max(PARAMETERS as u32);
         let mut blocks = Vec::new();
         for (first, count) in merge_batches(samples, batch) {
-            blocks.extend_from_slice(bytemuck::cast_slice(&[first, count, samples, 0]));
+            blocks.extend_from_slice(bytemuck::cast_slice(&[first, count, samples, 0, 0, 0, 0, 0]));
             blocks.resize(blocks.len().next_multiple_of(stride as usize), 0);
         }
         let merges = gpu_memory::buffer_init(d, "decoupled merge batches", &blocks, wgpu::BufferUsages::UNIFORM);
@@ -562,7 +597,7 @@ impl Install {
             let boundaries=if matches!(stage,ShadeStage::Evaluate|ShadeStage::EvaluateProgram(_)|ShadeStage::Occupancy) {boundary_capacity} else {0};
             pipelines.drawn_kernel(crate::pipelines::ProgramKernel::Decoupled {stage,features,subsurface:render.settings.integrator.subsurface_method()==Some(vork_scene::v2::SubsurfaceMethod::Thickness),emitter_profiles,boundaries},variants,&r.compiler)
         };
-        let compile=|stage|shade_pipeline(r,pipelines,kernel(stage),plan.transparent);
+        let compile=|stage|shade_pipeline(r,pipelines,kernel(stage));
         let implicit_slots=!per_sample && !plan.transparent;
         // Table-only camera and secondary transport, with no extra composition stages.
         // Solid scene transport requires the occupancy-backed evaluator; the fused
@@ -572,7 +607,7 @@ impl Install {
         let fuse_table=boundary_capacity==0 && !variants.fallback() && !draws.iter().any(|d|d.implicit.is_some())
             && visibility.iter().all(|&n|n==1) && material_count==2 && pipelines.shader.generic_shipped()
             && !plan.effects.probes && !plan.screen_refraction && !plan.effects.subsurface
-            && pipelines.resolve_native.is_none() && render.aovs.is_empty();
+            && render.aovs.is_empty();
         let needs_classification=material_count!=2 || visibility.iter().any(|&samples|!direct_visibility(samples,plan.transparent,plan.effects.subsurface));
         // Each program owns one bin; table slots split by transparency.
         let used:std::collections::BTreeSet<_>=draws.iter().zip(&plan.draws).map(|(draw,flags)| {
@@ -583,7 +618,7 @@ impl Install {
         let shades=std::thread::scope(|scope| {
             let compose=scope.spawn(||compile(ShadeStage::Compose));
             let classify=needs_classification.then(||scope.spawn(|| {
-                let (classify,_,mut stages)=compile(if implicit_slots {ShadeStage::Index} else {ShadeStage::Classify})?;
+                let (classify,mut stages)=compile(if implicit_slots {ShadeStage::Index} else {ShadeStage::Classify})?;
                 stages.insert(0,classify);anyhow::Ok(stages)
             }));
             let jobs:Vec<_>=(0..used.len().min(std::thread::available_parallelism().map_or(1,usize::from))).map(|_|scope.spawn(|| {
@@ -598,7 +633,7 @@ impl Install {
                 anyhow::Ok(results)
             })).collect();
             let evaluate=jobs.into_iter().map(pipelines::join).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect();
-            let (compose,receivers,_)=pipelines::join(compose)?;
+            let (compose,_)=pipelines::join(compose)?;
             let classification=classify.map(pipelines::join).transpose()?;
             let fused=fuse_table.then(|| {
                 let key=kernel(ShadeStage::Fused);let slot=pipelines.camera_slot(key);
@@ -608,7 +643,7 @@ impl Install {
             }).transpose()?;
             let occupancy=(boundary_capacity>0).then(||compile(ShadeStage::Occupancy).map(|p|p.0)).transpose()?;
             let indirect=plan.effects.probes.then(||compile(ShadeStage::Indirect).map(|p|p.0)).transpose()?;
-            anyhow::Ok(ShadePipelines {occupancy,boundaries:boundary_capacity,indirect,fused,compose,receivers,evaluate,classification})
+            anyhow::Ok(ShadePipelines {occupancy,boundaries:boundary_capacity,indirect,fused,compose,evaluate,classification})
         })?;
         let composition_flags= (u32::from(plan.effects.probes)*vork_slang::registry::CAMERA_PROBE_WORK) | (u32::from(features & crate::forward_variant::FEATURE_LIT!=0)*vork_slang::registry::CAMERA_PROBE_LIT) | (u32::from(implicit_slots)*CAMERA_IMPLICIT_SLOTS) | (u32::from(render.settings.integrator.subsurface_method()==Some(vork_scene::v2::SubsurfaceMethod::Thickness))<<5) | (u32::from(ray_refraction)<<4) | u32::from(features & FEATURE_CAMERA_RECEIVERS != 0)
             | (u32::from(features & FEATURE_REFLECTIONS != 0)<<1)
@@ -639,7 +674,7 @@ fn fragment_list_bytes(pixels:u64,samples:u32,transparent:bool,fields:bool)->u64
     if transparent {u64::from(MERGE_BATCH.min(samples))*pixels*if fields {8} else {4}} else {0}
 }
 impl Fragments {
-    pub(crate) fn new(s: &InstalledScene, r: &Renderer, [w, h]: [u32; 2], samples: u32, volume_samples: &[wgpu::Buffer], sampling:&Sampling, deforms:&[Option<EvaluatedGeometry>]) -> Result<Self> {
+    pub(crate) fn new(s: &InstalledScene, r: &Renderer, [w, h]: [u32; 2], samples: u32, sampling:&Sampling, deforms:&[Option<EvaluatedGeometry>]) -> Result<Self> {
         let d = &r.device;
         let pixels = u64::from(w) * u64::from(h);
         let (header, record) = (u64::from(vork_slang::registry::FRAGMENT_HEADER_WORDS) * 4, u64::from(vork_slang::registry::FRAGMENT_RECORD_WORDS) * 4);
@@ -661,11 +696,10 @@ impl Fragments {
             mapped_at_creation: false,
         });
         r.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[0, 0, u32::try_from(capacity)?, w, h]));
-        let pages:Vec<_>=volume_samples.iter().map(|b|wgpu::BufferBinding {buffer:b,offset:0,size:None}).collect();
         let bind = Some(d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("transparent fragments"),
             layout: &s.pipelines.fragments_layout,
-            entries: &std::iter::once(entry(0,buffer.as_entire_binding())).chain((!pages.is_empty()).then(||entry(1,wgpu::BindingResource::BufferArray(&pages)))).collect::<Vec<_>>(),
+            entries: &[entry(0,buffer.as_entire_binding())],
         }));
         let geometry = bind.as_ref().map(|_| {
             let installed=s.decoupled.as_ref().expect("installed decoupled geometry");
@@ -751,8 +785,9 @@ pub(crate) struct View {
     /// band's dispatch data starts at block band * materials.
     pub(crate) bands: u32,
     pub(crate) band_rows: u32,
+    pub(crate) packets: bool,
+    pub(crate) packet_reflections:std::sync::OnceLock<Vec<Vec<crate::graph::Dispatch>>>,
     evaluation_groups:u32,
-    receiver_pipeline: Option<wgpu::ComputePipeline>,
     merge: wgpu::BindGroup,
     /// The forward pass's scene globals, material and shadow groups, the hit buffers, the shade's own group.
     shade: [wgpu::BindGroup; 5],
@@ -774,7 +809,6 @@ impl View {
         extent: [u32; 2],
         sampling: &Sampling,
         targets: &crate::view::Targets,
-        volume_samples: &[wgpu::Buffer],
         [passes, transparent_passes]: [Vec<wgpu::RenderBundle>; 2],
         fragments: Fragments,
         deforms: &[Option<EvaluatedGeometry>],
@@ -787,6 +821,16 @@ impl View {
         let samples = passes.len() as u32;
         let direct_keys=direct_visibility(samples,s.plan.transparent,s.plan.effects.subsurface);
         let [w, h] = extent;
+        let limits = d.limits();
+        let shape = ViewShape {transparent: s.plan.transparent, diffusion: s.plan.effects.subsurface, reflections: s.plan.effects.reflections, screen_refraction: s.plan.screen_refraction, boundaries:installed.shades.boundaries,
+            table_only: installed.materials == 2, reserved: s.reservations.visibility_pool};
+        let eligible=packet_eligible(shape,samples) && !s.has_media;
+        let memory=r.camera_memory;
+        let packet_rows=if eligible {camera_packet_rows(&limits,shape,extent,samples,installed.evaluation_words,memory)?} else {None};
+        let packets=packet_rows.is_some();
+        let packet_rows=packet_rows.unwrap_or(h);
+        let storage_extent=[w,packet_rows];
+        let storage_pixels=u64::from(w)*u64::from(packet_rows);
         let layers = MERGE_BATCH.min(samples);
         let key_array = s.transients.texture(d, &wgpu::TextureDescriptor {
             label: Some("visibility keys"),
@@ -814,22 +858,36 @@ impl View {
         // the pool, bounded by all dependent bindings or the measured reservation.
         let pixels = u64::from(w) * u64::from(h);
         let stride = u64::from(VISIBILITY_KEY_WORDS + samples.div_ceil(32));
-        let listed = pixels * (u64::from(VISIBILITY_SLOTS) * stride + 1) * 4;
-        let limits = d.limits();
-        let shape = ViewShape {transparent: s.plan.transparent, diffusion: s.plan.effects.subsurface, reflections: s.plan.effects.reflections, screen_refraction: s.plan.screen_refraction, boundaries:installed.shades.boundaries,
-            table_only: installed.materials == 2, reserved: s.reservations.visibility_pool};
-        let pool = visibility_pool(&limits, shape, extent, samples);
-        let [bytes, metadata_size, capture_bytes, record_bytes, guide_bytes] = check_view(&limits, extent, samples, shape)?;
+        let listed = storage_pixels * (u64::from(VISIBILITY_SLOTS) * stride + 1) * 4;
+        let pool = if packets {storage_pixels*u64::from(samples.saturating_sub(VISIBILITY_SLOTS))} else {visibility_pool(&limits, shape, extent, samples)};
+        let [bytes, metadata_size, capture_bytes, record_bytes, mut guide_bytes] = if packets {
+            view_bindings_with_pool(shape,storage_extent,samples,pool).map(|(_,bytes)|bytes)
+        } else {check_view(&limits, extent, samples, shape)?};
+        if packets {
+            guide_bytes=view_bindings_with_pool(shape,extent,samples,0)[4].1;
+            for (label,bytes) in view_bindings_with_pool(shape,storage_extent,samples,pool) {gpu_memory::storage_binding(&limits,label,bytes)?;}
+            gpu_memory::storage_binding(&limits,"reflection guides",guide_bytes)?;
+            ensure!(record_bytes*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size,"camera packet reflection allocation exceeds device limit");
+        }
         let occupancy_row=occupancy_row_bytes(w,samples,shape.boundaries);
-        let metadata_size=metadata_size-occupancy_row*u64::from(h.min(TILE));
-        let slots = s.transients.buffer(d, "visibility slots", bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let metadata_size=metadata_size-occupancy_row*u64::from(packet_rows.min(TILE));
+        let slots = s.transients.buffer(d, "visibility slots", bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
         let overflow = gpu_memory::buffer_init(d, "visibility slot overflow", bytemuck::cast_slice(&[0, 0, u32::try_from(pool)?]),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
         let merge_pipeline = merge_pipeline(&s.pipelines, r);
         let shade_pipeline = &installed.shades;
         let evaluation=shade_pipeline.clone();
-        let receiver_pipeline = shade_pipeline.receivers.clone();
         let shade_pipeline = shade_pipeline.compose.clone();
+        let packet_merges=if packets {
+            let mut blocks=Vec::new();
+            for band in 0..h.div_ceil(packet_rows) {
+                for (first,count) in merge_batches(samples,layers) {
+                    blocks.extend_from_slice(bytemuck::cast_slice(&[first,count,samples,storage_pixels as u32,band*packet_rows,0,0,0]));
+                    blocks.resize(blocks.len().next_multiple_of(sampling.stride as usize),0);
+                }
+            }
+            Some(gpu_memory::buffer_init(d,"packet visibility dispatches",&blocks,wgpu::BufferUsages::UNIFORM))
+        } else {None};
         let merge = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("decoupled merge"),
             layout: &merge_pipeline.get_bind_group_layout(0),
@@ -838,7 +896,7 @@ impl View {
                 entry(1, slots.as_entire_binding()),
                 entry(2, overflow.as_entire_binding()),
                 entry(3, fragments.buffer.as_entire_binding()),
-                entry(4, wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &sampling.merges, offset: 0, size: std::num::NonZeroU64::new(PARAMETERS) })),
+                entry(4, wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: packet_merges.as_ref().unwrap_or(&sampling.merges), offset: 0, size: std::num::NonZeroU64::new(PARAMETERS) })),
             ],
         });
         let [aw, ah] = if s.plan.effects.indirect || s.plan.effects.reflections { extent } else { [1, 1] };
@@ -851,7 +909,7 @@ impl View {
             min_filter: wgpu::FilterMode::Linear, mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let slot_records=pixels * u64::from(VISIBILITY_SLOTS) + pool;
+        let slot_records=storage_pixels * u64::from(VISIBILITY_SLOTS) + pool;
         let subsurface_records = s.transients.buffer(d, "subsurface records", capture_bytes, wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
         // Keep each packed word in its own aligned slice of one allocation. Bind
         // slices separately: the complete record array need not fit one binding.
@@ -909,14 +967,14 @@ impl View {
         // Every classified route retains compact band-local results, including
         // opaque centroid slots. Containment can refine these same bands.
         let (_,band_rows)=if !direct_keys {shading_bands(content.max(demand.min(slot_records*u64::from(samples))),budget,h)} else {(1,h)};
-        let (bands,band_rows)=occupancy_bands(&limits,memory,metadata_size,occupancy_row,h,band_rows)?;
+        let (bands,band_rows)=if packets {(h.div_ceil(packet_rows),packet_rows)} else {occupancy_bands(&limits,memory,metadata_size,occupancy_row,h,band_rows)?};
         // A full band's pixels and slots (the whole pool may fall in one band),
         // and its share of whole-frame counts; the last band may be shorter.
         let band_pixels=u64::from(w)*u64::from(band_rows);
         let band_slots=band_pixels*u64::from(VISIBILITY_SLOTS)+pool;
         let in_band=|records:u64|(records*u64::from(band_rows)).div_ceil(u64::from(h));
         // Direct views evaluate one record per pixel; classification never overflows them.
-        let evaluation_capacity=u32::try_from(if direct_keys {pixels} else {
+        let evaluation_capacity=u32::try_from(if packets {storage_pixels*u64::from(samples)} else if direct_keys {pixels} else {
             // The demand is an estimate, possibly another view's: a band reserves at
             // most what its slots and one band's addressing allow; a band that truly
             // needs more stops redo.
@@ -998,15 +1056,14 @@ impl View {
                 diffusion:u32::from(s.plan.effects.subsurface), aovs:s.render.aovs.len() as u32,
                 capacity:page_capacity, words:installed.evaluation_words,
                 ray_shadows:u32::from(s.pipelines.ray_shadows), lit:u32::from(!screen), screen:u32::from(screen),
-                medium:u32::from(s.pipelines.resolve_native.is_some()),
-                medium_capacity:s.pipelines.resolve_native.as_ref().map_or(1,|n|n.froxel_page_elements),
                 flags:installed.composition_flags, transparent:u32::from(s.plan.transparent),
                 transmittance_offset:u32::try_from(slot_records*u64::from(vork_slang::registry::CAMERA_EVALUATION_METADATA_WORDS))?,
                 fibre_light_count:if s.fibre.is_some() {s.light_plan.nodes.len() as u32} else {0},
                 band:band*band_rows,
                 receiver_record_offset:if screen && s.plan.effects.subsurface {u32::try_from(capture_bytes / 8)?} else {0},
                 seed:s.render.settings.seed,
-                transport_parts, transport_part:0, transport_pad0:0, transport_pad1:0,
+                transport_parts, transport_part:0, packet_pixels:if packets {storage_pixels as u32} else {0}, packet_first_pixel:if packets {u32::try_from(u64::from(band)*u64::from(band_rows)*u64::from(w))?} else {0}, packet_pad1:0, packet_pad2:0,
+
             };
             for part in 0..transport_parts {
                 config.transport_part=part;
@@ -1028,7 +1085,7 @@ impl View {
             for band in 0..bands {
                 let first=(band*installed.materials) as usize*config_stride as usize;
                 let template:CameraConfig=bytemuck::pod_read_unaligned(&configs[first..first+config_size]);
-                let ray_batch=if s.pipelines.resolve_native.is_some() {vork_slang::registry::GI_RAY_BATCH} else {32};
+                let ray_batch=32;
                 for word in 0..samples.div_ceil(ray_batch) {
                     let mut blocks=Vec::new();
                     for (sampled,capacity,size) in [(false,centroid_capacity,vork_slang::registry::CAMERA_INDIRECT_BLOCK),(true,sampled_capacity,sampled_block)] {
@@ -1051,15 +1108,13 @@ impl View {
         let page_bindings:Vec<_>=evaluation_pages.iter().map(|buffer|wgpu::BufferBinding {buffer,offset:0,size:None}).collect();
         let geometry=crate::rt::resolve_hit_buffers(&installed.buffers,deforms);
         let geometry_bindings=crate::rt::hit_bindings(&geometry);
-        let empty_sample=s.transients.buffer(d,"unused camera medium page",16,wgpu::BufferUsages::STORAGE);
-        let medium_bindings:Vec<_>=(0..s.pipelines.resolve_native.as_ref().map_or(1,|n|n.sample_pages.max(1))).map(|i|wgpu::BufferBinding {buffer:volume_samples.get(i as usize).unwrap_or(&empty_sample),offset:0,size:None}).collect();
         let read_words=[&slots,&installed.draw_table,&installed.object_draws].map(|buffer|wgpu::BufferBinding {buffer,offset:0,size:None});
         let write_words=[&reflection_guides,&subsurface_records,&evaluation_metadata,&evaluation_bins,&evaluation_allocator].map(|buffer|wgpu::BufferBinding {buffer,offset:0,size:None});
         let reflection_fields=crate::passes::reflections::record_fields(&reflection_records,reflection_field_bytes);
         let write_vectors=[&targets.aov_values,&refraction_receivers].map(|buffer|wgpu::BufferBinding {buffer,offset:0,size:None});
-        let hits=d.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("camera geometry and evaluations"),layout:&camera_geometry_layout(d,s.pipelines.camera_pages,s.pipelines.resolve_native.as_ref().map_or(1,|n|n.sample_pages.max(1))),entries:&[
-            entry(0,wgpu::BindingResource::BufferArray(&geometry_bindings)),entry(1,wgpu::BindingResource::BufferArray(&page_bindings)),entry(2,wgpu::BindingResource::BufferArray(&medium_bindings)),
-            entry(3,wgpu::BindingResource::BufferArray(&read_words)),entry(4,wgpu::BindingResource::BufferArray(&write_words)),entry(5,wgpu::BindingResource::BufferArray(&write_vectors)),entry(6,wgpu::BindingResource::BufferArray(&reflection_fields))]});
+        let hits=d.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("camera geometry and evaluations"),layout:&camera_geometry_layout(d,s.pipelines.camera_pages),entries:&[
+            entry(0,wgpu::BindingResource::BufferArray(&geometry_bindings)),entry(1,wgpu::BindingResource::BufferArray(&page_bindings)),
+            entry(2,wgpu::BindingResource::BufferArray(&read_words)),entry(3,wgpu::BindingResource::BufferArray(&write_words)),entry(4,wgpu::BindingResource::BufferArray(&write_vectors)),entry(5,wgpu::BindingResource::BufferArray(&reflection_fields))]});
         let whole=pyramid.create_view(&Default::default());
         let unused=s.transients.target(d,"unused camera refraction binding",1,1,1,REFRACTION_FORMAT,wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING).create_view(&Default::default());
         let shared = [
@@ -1095,10 +1150,11 @@ impl View {
             Refraction { mips, shade }
         });
         Ok(Self {
+            packets,packet_reflections:Default::default(),
             capacity_feedback: shader_errors.context("camera capacity diagnostics")?.clone(),
             evaluation, evaluation_bins, evaluation_args, evaluation_allocator, indirect_dispatch, indirect_offsets, material_count:installed.materials, config_stride, transport_parts, bands, band_rows,
             evaluation_groups:if direct {w.div_ceil(TILE)*h.div_ceil(TILE)} else {evaluation_capacity.div_ceil(64)},
-            subsurface_records, refraction_source: (screen && s.plan.effects.subsurface).then(||level_zero.clone()), direct_keys, receivers, normals, stride: sampling.stride, keys, depth, slots, reflection_records, reflection_field_bytes, reflection_guides, listed, overflow, fragments, passes, transparent_passes, merge_pipeline, shade_pipeline, receiver_pipeline, merge,
+            subsurface_records, refraction_source: (screen && s.plan.effects.subsurface).then(||level_zero.clone()), direct_keys, receivers, normals, stride: sampling.stride, keys, depth, slots, reflection_records, reflection_field_bytes, reflection_guides, listed, overflow, fragments, passes, transparent_passes, merge_pipeline, shade_pipeline, merge,
             shade: [global, material, shadow, hits, own],
             refraction,
             extent,
@@ -1109,6 +1165,13 @@ impl View {
 /// Each batch's visibility passes into its key layers, then its merge into the slots.
 pub(crate) fn visibility(encoder: &mut wgpu::CommandEncoder, f: &crate::view::ViewState, r: &Renderer, segments: &mut crate::command_finish::Segments) -> Result<()> {
     let v = f.decoupled.as_ref().context("decoupled view resources")?;
+    if v.packets {return Ok(());}
+    visibility_packet(encoder,f,r,segments,0)
+}
+fn visibility_packet(encoder:&mut wgpu::CommandEncoder,f:&crate::view::ViewState,r:&Renderer,segments:&mut crate::command_finish::Segments,packet:u32)->Result<()> {
+    let v=f.decoupled.as_ref().context("packet visibility resources")?;
+    let first_row=if v.packets {packet*v.band_rows} else {0};
+    let rows=if v.packets {v.band_rows.min(v.extent[1]-first_row)} else {v.extent[1]};
     if !v.direct_keys {
         encoder.clear_buffer(&v.slots, 0, Some(v.listed));
         // The pool restarts each exposure; the frame's demand at its first.
@@ -1125,7 +1188,7 @@ pub(crate) fn visibility(encoder: &mut wgpu::CommandEncoder, f: &crate::view::Vi
                 label: Some("decoupled visibility"),
                 color_attachments: &[Some(color_attachment(&v.keys[layer as usize], wgpu::Color::TRANSPARENT))],
                 depth_stencil_attachment: Some(depth_attachment(&v.depth, false, true)),
-                timestamp_writes: (sample == 0).then(|| wgpu::RenderPassTimestampWrites {
+                timestamp_writes: (!v.packets && sample == 0).then(|| wgpu::RenderPassTimestampWrites {
                     query_set: &f.queries,
                     beginning_of_pass_write_index: Some(timing::query("visibility")),
                     end_of_pass_write_index: v.direct_keys.then(|| timing::query("visibility")+1),
@@ -1133,6 +1196,7 @@ pub(crate) fn visibility(encoder: &mut wgpu::CommandEncoder, f: &crate::view::Vi
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if v.packets {pass.set_scissor_rect(0,first_row,v.extent[0],rows);}
             pass.execute_bundles(std::iter::once(&v.passes[sample as usize]));
             if !v.fragments.explicit_depth {
                 if let Some(bundle)=v.transparent_passes.get(sample as usize) {pass.execute_bundles(std::iter::once(bundle));}
@@ -1151,28 +1215,22 @@ pub(crate) fn visibility(encoder: &mut wgpu::CommandEncoder, f: &crate::view::Vi
         if v.direct_keys {continue;}
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("decoupled merge"),
-            timestamp_writes: (first + count == passes && v.receiver_pipeline.is_none()).then(|| wgpu::ComputePassTimestampWrites {
+            timestamp_writes: (!v.packets && first + count == passes).then(|| wgpu::ComputePassTimestampWrites {
+
                 query_set: &f.queries,
                 beginning_of_pass_write_index: None,
                 end_of_pass_write_index: Some(timing::query("visibility") + 1),
             }),
         });
         pass.set_pipeline(&v.merge_pipeline);
-        pass.set_bind_group(0, &v.merge, &[index as u32 * v.stride]);
-        pass.dispatch_workgroups(v.extent[0].div_ceil(TILE), v.extent[1].div_ceil(TILE), 1);
+        pass.set_bind_group(0, &v.merge, &[(packet*v.passes.len().div_ceil(v.keys.len()) as u32+index as u32)*v.stride]);
+        pass.dispatch_workgroups(v.extent[0].div_ceil(TILE), rows.div_ceil(TILE), 1);
         drop(pass);
         if passes > MERGE_BATCH {
             crate::command_finish::submission_boundary(r, encoder, segments);
         }
     }
-    if let Some(pipeline)=&v.receiver_pipeline {
-        let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label:Some("volume visibility receivers"),
-            timestamp_writes:Some(wgpu::ComputePassTimestampWrites {query_set:&f.queries,beginning_of_pass_write_index:None,end_of_pass_write_index:Some(timing::query("visibility")+1)}),
-        });
-        pass.set_pipeline(pipeline);bind_camera(&mut pass,v,&v.shade[4],0);
-        pass.dispatch_workgroups(v.extent[0].div_ceil(TILE),v.extent[1].div_ceil(TILE),1);
-    }
+
     Ok(())
 }
 
@@ -1259,7 +1317,7 @@ fn evaluate(encoder:&mut wgpu::CommandEncoder,v:&View,own:&wgpu::BindGroup,queri
         let classification=p.classification.as_ref().expect("visibility classification");
         for (stage,pipeline) in classification.iter().enumerate() {
             let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("classify camera material slots"),
-                timestamp_writes:if v.bands>1 {span(queries,"shade",first && stage==0 && classification.len()==1,false)}
+                timestamp_writes:if v.bands>1 {span(queries,"shade",first && stage==0 && (classification.len()==1 || v.packets),false)}
                     else {span(queries,"material classify",stage==0,stage==classification.len()-1)}});
             pass.set_pipeline(pipeline);bind_camera(&mut pass,v,own,base);
             if stage==1 {pass.dispatch_workgroups(1,1,1);} else {pass.dispatch_workgroups(v.extent[0].div_ceil(TILE),tile_rows,1);}
@@ -1341,21 +1399,38 @@ fn capacity_feedback(encoder: &mut wgpu::CommandEncoder, v: &View) {
 }
 
 /// One evaluation per slot into the resolved colour, background included, band by band.
-pub(crate) fn shade(encoder: &mut wgpu::CommandEncoder, f: &crate::view::ViewState, r: &Renderer) -> Result<()> {
+pub(crate) fn shade(encoder: &mut wgpu::CommandEncoder, f: &crate::view::ViewState, r: &Renderer,segments:&mut crate::command_finish::Segments) -> Result<()> {
     let v = f.decoupled.as_ref().context("decoupled view resources")?;
     capacity_feedback(encoder, v);
-    if let Some(pipeline)=v.evaluation.fused.as_ref().filter(|_|fused_active(f)) {
+    if let Some(pipeline)=v.evaluation.fused.as_ref().filter(|_|fused_active(f) && !v.packets) {
         let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("fused camera shade"),timestamp_writes:span(Some(&f.queries),"shade",true,true)});
         pass.set_pipeline(pipeline.current(true));bind_camera(&mut pass,v,&v.shade[4],0);
         // Fused shading retains no evaluations, so its dispatch spans every band.
         pass.dispatch_workgroups(v.extent[0].div_ceil(TILE),v.extent[1].div_ceil(TILE),1);
         return Ok(());
     }
-    preflight_evaluations(encoder,v,&v.shade[4],Some(&f.queries));
+    if v.packets {
+        r.timestamp_marker.get_or_init(||timing::Marker::new(&r.device)).encode_timestamps(encoder,span(Some(&f.queries),"shade",true,false).unwrap());
+    } else {preflight_evaluations(encoder,v,&v.shade[4],Some(&f.queries));}
     for index in 0..v.bands {
-        evaluate(encoder,v,&v.shade[4],Some(&f.queries),false,index,!f.variants_pending(),r);
-        let timestamps=if v.bands>1 {span(Some(&f.queries),"shade",false,index+1==v.bands)} else {span(Some(&f.queries),"material compose",true,true)};
+        if v.packets {visibility_packet(encoder,f,r,segments,index)?;}
+        let queries=if v.packets {None} else {Some(&f.queries)};
+        evaluate(encoder,v,&v.shade[4],queries,false,index,!f.variants_pending(),r);
+        let timestamps=if v.bands>1 {span(queries,"shade",false,index+1==v.bands)} else {span(queries,"material compose",true,true)};
         compose(encoder,v,&v.shade[4],timestamps,"decoupled shade",index);
+        if v.packets {
+            if let Some(reflections)=v.packet_reflections.get() {
+                for chunk in reflections[index as usize].chunks(constants::REFLECTION_SEGMENT_DISPATCHES) {
+                    crate::command_finish::submission_boundary(r,encoder,segments);
+                    for dispatch in chunk {dispatch.encode_packet(encoder,!f.variants_pending());}
+                }
+                crate::command_finish::submission_boundary(r,encoder,segments);
+            }
+            capacity_feedback(encoder,v);
+        }
+    }
+    if v.packets {
+        r.timestamp_marker.get_or_init(||timing::Marker::new(&r.device)).encode_timestamps(encoder,span(Some(&f.queries),"shade",false,true).unwrap());
     }
     Ok(())
 }
@@ -1378,6 +1453,45 @@ pub(crate) fn refraction(encoder: &mut wgpu::CommandEncoder, f: &crate::view::Vi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn camera_packets_follow_memory_and_native_limits() -> Result<()> {
+        let limits=wgpu::Limits {max_storage_buffer_binding_size:2<<30,max_buffer_size:16<<30,..Default::default()};
+        let shape=ViewShape {transparent:false,diffusion:false,reflections:true,screen_refraction:false,table_only:true,boundaries:0,reserved:0};
+        assert_eq!(camera_packet_rows(&limits,shape,[1920,1080],8,8,23<<30)?,None);
+        let rows=camera_packet_rows(&limits,shape,[3840,2160],8,8,23<<30)?.unwrap();
+        assert!(rows<2160 && rows%TILE==0,"{rows}");
+        assert!(camera_packet_rows(&limits,shape,[1920,1080],8,8,4<<30)?.unwrap()<1080);
+        assert_eq!(camera_packet_rows(&limits,shape,[3840,64],64,8,23<<30)?,None);
+        let reserved=ViewShape {reserved:u32::MAX,..shape};
+        assert_eq!(camera_packet_rows(&limits,reserved,[96,64],8,19,128<<20)?,Some(64),"a proven full-height packet supersedes another view's pool high-water");
+        Ok(())
+    }
+
+    #[test]
+    fn one_full_height_packet_consumes_records_and_completes_queries() -> Result<()> {
+        let Some(mut r)=crate::test_renderer()? else {return Ok(());};
+        r.camera_memory=128<<20;
+        let scene:Scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,
+            "buffers":{"p":{"type":"vec3","data":[[-1,-1,0],[1,-1,0],[1,1,0],[-1,1,0]]},"i":{"type":"u32","data":[0,1,2,0,2,3]}},
+            "geometry":{"quad":{"topology":"triangles","attributes":{"POSITION":"p"},"indices":"i"}},
+            "materials":{"glow":{"inputs":{"base_weight":0.,"specular_weight":0.2,"emission_luminance":1.,"emission_color":[0.25,0.5,0.75]}}},
+            "nodes":[{"type":"camera","translation":[0,0,5],"material":{"program":"std/camera","inputs":{"projection":"ortho","fit":"horizontal","ortho_scale":2.}}},{"type":"mesh","geometry":"quad","materials":["glow"]}],
+            "render":{"resolution":[96,64],"settings":{"integrator":"raster","samples":8,"reflections":"ray","denoiser":null,"fast_gi":null},"display":{"program":"std/standard","inputs":{"dither_intensity":0.}}}
+        }))?;
+        let render=|reserved:u32|->Result<Vec<u8>> {
+            let options=crate::InstallOptions {reservations:crate::Reservations {visibility_pool:reserved,..Default::default()},..Default::default()};
+            let mut installed=r.install_with_options(scene.clone(),std::path::Path::new("."),options)?;
+            let mut frame=installed.create_frame_slot(&r,Default::default())?;
+            let view=frame.view.decoupled.as_ref().unwrap();
+            assert_eq!(view.packets,reserved!=0);assert_eq!(view.bands,1);
+            let first=installed.render_frame(&r,&mut frame,0.)?.rgba;
+            assert_eq!(first,installed.render_frame(&r,&mut frame,0.)?.rgba);
+            Ok(first)
+        };
+        assert_eq!(render(0)?,render(u32::MAX)?);
+        Ok(())
+    }
+
     #[test]
     fn glass_transport_parts_bound_samples_per_invocation_on_metal() {
         use wgpu::Backend::{Metal,Vulkan};
@@ -2051,7 +2165,7 @@ mod tests {
         let mut fragment_words=vec![0u32;(header+record+layers*w*h) as usize];
         fragment_words[..header as usize].copy_from_slice(&[0,0,1,w,h]);
         let fragments = gpu_memory::buffer_init(d,"empty fragments",bytemuck::cast_slice(&fragment_words),wgpu::BufferUsages::STORAGE);
-        let sampling = Sampling::new(d,[w,h],samples,0);
+        let sampling = Sampling::new(d,[w,h],samples);
         let group = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:None,entries:&merge_entries()});
         let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {label:None,bind_group_layouts:&[Some(&group)],immediate_size:0});
         let pipeline = compute_pipeline(&r,"test merge",&layout,&native::DECOUPLED_MERGE_MERGE);
@@ -2104,7 +2218,7 @@ mod warm_key_tests {
     fn direct_camera_constructors_remember_their_complete_kernel() -> Result<()> {
         let Some(r)=crate::test_renderer()? else {return Ok(());};
         if !r.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {return Ok(());}
-        let p=r.program_pipelines("",RESOLVE,None,1,true,crate::slang_forward::SlangScene {
+        let p=r.program_pipelines("",RESOLVE,1,true,crate::slang_forward::SlangScene {
             probes:true,ray_refraction:true,..Default::default()
         })?;
         let root=std::env::temp_dir().join(format!("vork-camera-known-{}",std::process::id()));

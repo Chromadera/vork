@@ -1,0 +1,591 @@
+{
+  "version": 2,
+  "render": {
+    "resolution": [
+      64,
+      64
+    ],
+    "duration": 1,
+    "fps": 24,
+    "background": [
+      0,
+      0,
+      0
+    ]
+  },
+  "buffers": {
+    "unit-box_position": {
+      "type": "vec3",
+      "data": [
+        [
+          0.5,
+          -0.5,
+          0.5
+        ],
+        [
+          0.5,
+          -0.5,
+          -0.5
+        ],
+        [
+          0.5,
+          0.5,
+          0.5
+        ],
+        [
+          0.5,
+          0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          -0.5,
+          0.5
+        ],
+        [
+          -0.5,
+          0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          0.5,
+          0.5
+        ],
+        [
+          -0.5,
+          0.5,
+          0.5
+        ],
+        [
+          0.5,
+          0.5,
+          0.5
+        ],
+        [
+          -0.5,
+          0.5,
+          -0.5
+        ],
+        [
+          0.5,
+          0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        [
+          0.5,
+          -0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          -0.5,
+          0.5
+        ],
+        [
+          0.5,
+          -0.5,
+          0.5
+        ],
+        [
+          -0.5,
+          -0.5,
+          0.5
+        ],
+        [
+          0.5,
+          -0.5,
+          0.5
+        ],
+        [
+          -0.5,
+          0.5,
+          0.5
+        ],
+        [
+          0.5,
+          0.5,
+          0.5
+        ],
+        [
+          0.5,
+          -0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        [
+          0.5,
+          0.5,
+          -0.5
+        ],
+        [
+          -0.5,
+          0.5,
+          -0.5
+        ]
+      ]
+    },
+    "unit-box_normal": {
+      "type": "vec3",
+      "data": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          -1,
+          0,
+          0
+        ],
+        [
+          -1,
+          0,
+          0
+        ],
+        [
+          -1,
+          0,
+          0
+        ],
+        [
+          -1,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          -1,
+          0
+        ],
+        [
+          0,
+          -1,
+          0
+        ],
+        [
+          0,
+          -1,
+          0
+        ],
+        [
+          0,
+          -1,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          -1
+        ],
+        [
+          0,
+          0,
+          -1
+        ],
+        [
+          0,
+          0,
+          -1
+        ],
+        [
+          0,
+          0,
+          -1
+        ]
+      ]
+    },
+    "unit-box_uv0": {
+      "type": "vec2",
+      "data": [
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ]
+      ]
+    },
+    "unit-box_indices": {
+      "type": "u32",
+      "data": [
+        0,
+        1,
+        3,
+        0,
+        3,
+        2,
+        4,
+        5,
+        7,
+        4,
+        7,
+        6,
+        8,
+        9,
+        11,
+        8,
+        11,
+        10,
+        12,
+        13,
+        15,
+        12,
+        15,
+        14,
+        16,
+        17,
+        19,
+        16,
+        19,
+        18,
+        20,
+        21,
+        23,
+        20,
+        23,
+        22
+      ]
+    },
+    "screen_position": {
+      "type": "vec3",
+      "data": [
+        [
+          -1,
+          -1,
+          0
+        ],
+        [
+          1,
+          -1,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ],
+        [
+          -1,
+          1,
+          0
+        ]
+      ]
+    },
+    "screen_normal": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ]
+    },
+    "screen_color": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "screen_indices": {
+      "type": "u32",
+      "data": [
+        0,
+        1,
+        2,
+        0,
+        2,
+        3
+      ]
+    }
+  },
+  "geometry": {
+    "unit-box": {
+      "topology": "triangles",
+      "attributes": {
+        "POSITION": "unit-box_position",
+        "NORMAL": "unit-box_normal",
+        "TEXCOORD_0": "unit-box_uv0"
+      },
+      "indices": "unit-box_indices"
+    },
+    "screen": {
+      "attributes": {
+        "POSITION": "screen_position",
+        "NORMAL": "screen_normal",
+        "COLOR_0": "screen_color"
+      },
+      "indices": "screen_indices"
+    }
+  },
+  "nodes": [
+    {
+      "name": "floor",
+      "type": "mesh",
+      "geometry": "unit-box",
+      "materials": [
+        "invisible"
+      ],
+      "pass_index": 1,
+      "translation": [
+        0,
+        -0.15,
+        0
+      ],
+      "scale": [
+        6,
+        0.2,
+        6
+      ]
+    },
+    {
+      "name": "display",
+      "type": "mesh",
+      "geometry": "screen",
+      "materials": [
+        "show"
+      ],
+      "pass_index": 2,
+      "translation": [
+        0,
+        0.75,
+        1
+      ]
+    },
+    {
+      "name": "camera",
+      "type": "camera",
+      "translation": [
+        0,
+        0.75,
+        5
+      ],
+      "material": {
+        "program": "std/camera",
+        "inputs": {
+          "lens": 42,
+          "clip_start": 0.01,
+          "clip_end": 100
+        }
+      }
+    }
+  ],
+  "materials": {
+    "invisible": {
+      "program": "invisible"
+    },
+    "show": {
+      "program": "show"
+    }
+  },
+  "programs": {
+    "invisible": {
+      "source": "import vork; struct Inputs {}; Closure surface(ShadingContext ctx,Inputs i) {Closure c={};c.geometry_opacity=0.;return c;}"
+    },
+    "show": {
+      "source": "import vork;struct Inputs {};Closure surface(ShadingContext ctx,Inputs i){return unlit(ctx.COLOR_0.rgb);}"
+    },
+    "bake": {
+      "source": "struct Inputs {}; void compute(ComputeContext ctx,Inputs i) {\n    bool good=true;\n#if 1\n    let o=float3(2.,2.,0.);let d=float3(0.,-2.,0.);\n    let h=trace(o,d,0.,3.,255u,1u);\n    good=h.hit && abs(h.distance-2.05)<.0001 && length(h.position-float3(2.,-.05,0.))<.0001;\n    good=good && length(h.geometric_normal-float3(0.,1.,0.))<.0001 && length(h.shading_normal-float3(0.,1.,0.))<.0001;\n    good=good && h.object_id==1u && h.instance_index==0u && h.primitive_id==4u && h.front_facing;\n    good=good && length(h.barycentrics-float3(1./6.,1./3.,.5))<.0001 && length(h.uv-float2(5./6.,.5))<.0001;\n    let back=trace(o,d,2.1,3.,255u,1u);\n    good=good && back.hit && abs(back.distance-2.25)<.0001 && !back.front_facing && back.primitive_id==6u && back.object_id==h.object_id;\n    good=good && length(back.geometric_normal-float3(0.,-1.,0.))<.0001;\n    let miss=trace(o,d,0.,1.,255u,1u);\n    good=good && !miss.hit && miss.distance==-1. && miss.object_id==0xffffffffu && miss.instance_index==0xffffffffu && miss.primitive_id==0xffffffffu;\n    good=good && all(miss.position==float3(0.)) && all(miss.geometric_normal==float3(0.)) && all(miss.shading_normal==float3(0.)) && all(miss.barycentrics==float3(0.)) && all(miss.uv==float2(0.)) && !miss.front_facing;\n    good=good && !trace(o,d,0.,3.,0u).hit && !trace(o,d,0.,3.,255u,0xfffffffeu).hit;\n    let selected=trace(o,d,0.,3.,255u,1u);\n    good=good && selected.hit && selected.object_id==h.object_id && selected.primitive_id==h.primitive_id;\n    good=good && !trace(o,float3(0.),0.,3.,255u,1u).hit && !trace(o,d,-1.,3.,255u,1u).hit && !trace(o,d,3.,1.,255u,1u).hit;\n#endif\ncolor_store(ctx.id.x,good ? float3(0.,1.,0.) : float3(1.,0.,0.));\n}",
+      "schedule": "frame",
+      "dispatch": 4,
+      "bindings": {
+        "color": "screen_color"
+      }
+    }
+  }
+}

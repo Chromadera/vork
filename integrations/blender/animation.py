@@ -162,7 +162,15 @@ def sample_controls(scene, bindings, *, frames=None):
                                 findings.append(finding)
                             if incompatible:
                                 continue
-                        put(name,['color'],light_color(data))
+                        if data.use_nodes:
+                            from .light_graph import translate
+                            def substitution(reason, replacement):
+                                finding = dict(object=source.name, feature=reason, replacement=replacement)
+                                if finding not in findings: findings.append(finding)
+                            lowered = translate(data, on_substitution=substitution)
+                            put(name,['color'],lowered['color'])
+                        else:
+                            put(name,['color'],light_color(data))
                         if data.use_temperature:
                             put(name,['temperature'],light_temperature(data))
                         put(name,['energy'],light_energy(data))

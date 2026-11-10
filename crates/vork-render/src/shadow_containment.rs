@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn empty_and_unbounded_domains_allocate_no_index() {
         assert!(topology(&[],&Default::default(),&[]).is_empty());
-        let solids=[passes::path::PathSolid {lo:Vec3::splat(f32::NEG_INFINITY),hi:Vec3::splat(f32::INFINITY),row:0,shadow_bounds:None}];
+        let solids=[passes::path::PathSolid {lo:Vec3::splat(f32::NEG_INFINITY),hi:Vec3::splat(f32::INFINITY),row:0,contact_bounds:(Vec3::splat(f32::NEG_INFINITY),Vec3::splat(f32::INFINITY)),shadow_bounds:None}];
         assert!(topology(&solids,&[0].into(),&[Object::new(Mat4::IDENTITY)]).is_empty());
     }
     #[test]
@@ -153,7 +153,7 @@ mod tests {
     fn bounds_refit_prunes_off_ray_solids_and_tracks_moving_placements() -> Result<()> {
         let r=Renderer::new()?;
         for far in [0u32,64,1024] {
-            let solids:Vec<_>=(0..=far).map(|row|passes::path::PathSolid {lo:Vec3::splat(-1.),hi:Vec3::splat(1.),row,shadow_bounds:Some((Vec3::splat(-1.),Vec3::splat(1.)))}).collect();
+            let solids:Vec<_>=(0..=far).map(|row|passes::path::PathSolid {lo:Vec3::splat(-1.),hi:Vec3::splat(1.),row,contact_bounds:(Vec3::splat(f32::NEG_INFINITY),Vec3::splat(f32::INFINITY)),shadow_bounds:Some((Vec3::splat(-1.),Vec3::splat(1.)))}).collect();
             let mut objects:Vec<_>=(0..=far).map(|i|Object::new(Mat4::from_translation(if i==0 {Vec3::ZERO} else {Vec3::new(10.+i as f32*4.,0.,0.)}))).collect();
             let plan=Plan::new(&r,&solids,&(0..=far).collect(),&objects,&[],&[])?.unwrap();
             let object_buffer=init(&r.device,"bounds test objects",bytemuck::cast_slice(&gpu_objects(&objects)),wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST);

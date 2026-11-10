@@ -84,7 +84,7 @@ float3 finalized_hit_radiance<V:IVariant,S:IShadows,P:IProgram>(HitSurface h,uin
 #if defined(VORK_SURFACE_SLANG_OUTLINE)
 [noinline]
 #endif
-float3 finalized_hit_radiance<V:IVariant,S:IShadows,P:IProgram>(HitSurface h,uint2 pixel,uint index,uint lobes,out float3 emission,bool indirect_only=false,bool capture_endpoint=false) {
+float3 finalized_hit_radiance<V:IVariant,S:IShadows,P:IProgram>(HitSurface h,uint2 pixel,uint index,uint lobes,out float3 emission,bool indirect_only=false,bool capture_endpoint=false,float2 analytic_source=float2(-1.,1.)) {
     emission=float3(0.);
     if(!indirect_only && !h.s.discarded) {emission=emitter_mesh_radiance<V,P>(h);}
     // Lit may encode reflected response; keep physical source radiance separate.
@@ -111,7 +111,9 @@ float3 finalized_hit_radiance<V:IVariant,S:IShadows,P:IProgram>(HitSurface h,uin
         }
         float3 scattering;float3 indirect_scattering;
         let mask=select(final,select(surface.is_hair,REG_RAY_SPECULAR,lobes),REG_RAY_DIFFUSE|REG_RAY_SPECULAR);
-        let response=analytic_radiance_at<V,S>(h.v,surface,site,AnalyticRadiance(mask,!final,indirect_only && final,capture_endpoint),scattering,indirect_scattering);
+        var policy=AnalyticRadiance(mask,!final,indirect_only && final,capture_endpoint);
+        policy.selected_source=int(analytic_source.x);policy.source_probability=analytic_source.y;
+        let response=analytic_radiance_at<V,S>(h.v,surface,site,policy,scattering,indirect_scattering);
         if(final) {return response.color*(P.lobes ? surface.weight : 1.)+emission;}
         let color=response.color*surface.weight;let source=response.direct*surface.weight;
         if(i==0u) {lighting=color;direct=source;}

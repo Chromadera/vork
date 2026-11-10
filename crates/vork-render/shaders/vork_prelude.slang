@@ -260,7 +260,9 @@ float3 environment_radiance(Texture2DArray<uint4> image, float2 uv, uint mode=0u
     if ((mode&3u)==2u) {u=1.-abs(2.*frac(uv.x*.5)-1.);}
     let size=int2(width,height);let p=float2(u,clamp(uv.y,0.,1.))*float2(size)-.5;
     let cell=int2(floor(p));let f=frac(p);
-    var x0=(cell.x%size.x+size.x)%size.x;var x1=(x0+1)%size.x;
+    // u is in [0,1], so cell.x is in [-1,width-1]. Keep both % operands
+    // nonnegative: MSL (and C++) leave a negative remainder's result undefined.
+    var x0=(cell.x+size.x)%size.x;var x1=(x0+1)%size.x;
     if ((mode&3u)==1u) {x0=clamp(cell.x,0,size.x-1);x1=clamp(cell.x+1,0,size.x-1);}
     if ((mode&3u)==2u) {x0=clamp(cell.x,0,size.x-1);x1=clamp(cell.x+1,0,size.x-1);}
     let y0=clamp(cell.y,0,size.y-1);let y1=clamp(cell.y+1,0,size.y-1);

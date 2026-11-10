@@ -39,6 +39,9 @@ PoseVertex evaluate_vertex(uint i, uint pose, float4 header) {
     uint sets=asuint(header.y);
     uint targets=asuint(header.w);
     uint src = i * REG_VERTEX_VECTORS;
+#ifdef VORK_CHAINED_SOURCE
+    src += pose * count * REG_VERTEX_VECTORS;
+#endif
     float4 pn = source[src];
     float4 nuv = source[src+1];
     float4 bind_tangent = source[src+REG_VERTEX_VECTORS-1];
@@ -92,7 +95,11 @@ void evaluate(uint3 id : SV_DispatchThreadID) {
     // Split omitted-normal triangles are consecutive corners. Evaluate the
     // whole face at this pose before any NORMAL consumer (including displacement).
     // Reading immutable inputs avoids an inter-workgroup output dependency.
+#ifdef VORK_CHAINED_SOURCE
+    if (source[(pose*asuint(header.x)+i)*REG_VERTEX_VECTORS+2].z!=0.) {
+#else
     if (source[i*REG_VERTEX_VECTORS+2].z!=0.) {
+#endif
         uint face=(i/3u)*3u;
         float3 a=i==face ? vertex.position : evaluate_vertex(face,pose,header).position;
         float3 b=i==face+1u ? vertex.position : evaluate_vertex(face+1u,pose,header).position;

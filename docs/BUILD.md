@@ -163,3 +163,18 @@ then warms its own driver cache from those portable assets.
 `check-release --skip-setup --skip-render` verifies installation, compiler and
 portable assets on GPU-free hosted runners. Installed rendering, video and
 denoising still require the real-device acceptance check.
+
+## Opt-in CPU rendering
+
+On Linux, install recent Mesa Vulkan drivers (`mesa-vulkan-drivers` on
+Debian/Ubuntu; `mesa-vulkan-drivers` or `vulkan-swrast` elsewhere), then run
+`vork setup --gpu cpu` (or `VORK_GPU=cpu vork setup`) and `VORK_GPU=cpu vork render scene.json --out frame.png`.
+The driver must expose ray queries and storage buffer arrays. CPU rendering is
+slow and never selected automatically. Setup warms the default starter. CPU shader
+warm-up has no time limit. First-run shader compilation can take several minutes. vork's driver
+pipeline cache is disabled because it can trigger a lavapipe compiler crash.
+Portable shader artifacts and Mesa's own shader disk cache can still speed later runs.
+
+macOS requires Apple Silicon; CPU mode is unavailable through Metal. Windows
+requires a Vulkan loader and a recent Mesa lavapipe driver with its ICD manifest;
+CPU rendering there has not been qualified.

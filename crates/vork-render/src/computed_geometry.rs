@@ -25,6 +25,7 @@ pub(crate) struct Mesh {
     id_pipeline: Option<wgpu::ComputePipeline>,
     identity_words: u64,
     id_count: u32,
+    historical_attributes: bool,
 }
 pub(crate) struct Frame {
     pub geometry: EvaluatedGeometry,
@@ -36,12 +37,14 @@ pub(crate) struct Frame {
     history: std::sync::Mutex<std::collections::BTreeMap<[u32;2], Vec<wgpu::Buffer>>>,
 }
 impl Mesh {
+    pub(crate) fn source_names(&self) -> &[String] { &self.sources }
     pub fn new(
         r: &Renderer,
         g: &v2::Geometry,
         draw: &install::Draw,
         names: &[String],
         buffers: &buffers::ProgramBuffers,
+        historical_attributes: bool,
     ) -> Result<Self> {
         let points = matches!(g.topology, v2::Topology::Points);
         let identities=points && g.ids.is_some();
@@ -75,7 +78,7 @@ impl Mesh {
             .map(|&i| buffers.storage[i as usize].clone())
             .collect();
         let history_sources: BTreeSet<_> = g.attributes.iter()
-            .filter(|(name,_)| name.as_str()=="POSITION" || (!points && matches!(name.as_str(),"NORMAL"|"TANGENT")))
+            .filter(|(name,_)| historical_attributes || name.as_str()=="POSITION" || (!points && matches!(name.as_str(),"NORMAL"|"TANGENT")))
             .map(|(_,buffer)|buffer.clone())
             .chain(g.widths.iter().cloned()).chain(g.count.iter().cloned()).chain(g.ids.iter().cloned()).collect();
         let history_ranges: Vec<Vec<(u64,u64,u64)>> = pages.iter().map(|page| {
@@ -137,7 +140,7 @@ impl Mesh {
         let count = draw.vertex_count;
         let limits = r.device.limits();
         let bytes = u64::from(count) * 80;
-        let attributes = u64::from(count) * draw.layout.attribute_stride();
+        let attributes = u64::from(count) * draw.layout.attribute_stride() * if historical_attributes {2} else {1};
         let limit = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
         ensure!(
             bytes <= limit && attributes <= limit,
@@ -197,6 +200,9 @@ impl Mesh {
             ),
         ]);
         let base = pages.len();
+        if historical_attributes {
+            writeln!(code,"@group(0) @binding({}) var<storage,read_write> attribute_history:array<u32>;",base+7+usize::from(identities))?;
+        }
         if identities {
             writeln!(code,"@group(0) @binding({}) var<storage,read_write> identity:array<atomic<u32>>;",base+7)?;
             code.push_str("fn point_identity_hash(value:u32)->u32 {var x=value;x^=x>>16u;x*=0x7feb352du;x^=x>>15u;x*=0x846ca68bu;return x^(x>>16u); }\n");
@@ -221,9 +227,9 @@ impl Mesh {
             )?;
         }
         ensure!(
-            base + 7 <= r.device.limits().max_storage_buffers_per_shader_stage as usize,
+            base + 7 + usize::from(identities) + usize::from(historical_attributes) <= r.device.limits().max_storage_buffers_per_shader_stage as usize,
             "computed geometry needs {} storage bindings; adapter supports {}",
-            base + 7,
+            base + 7 + usize::from(identities) + usize::from(historical_attributes),
             r.device.limits().max_storage_buffers_per_shader_stage
         );
         code.push_str("fn ordered(v:f32)->u32 {let b=bitcast<u32>(v);return select(b^0x80000000u,~b,(b&0x80000000u)!=0u);}\n");
@@ -312,10 +318,11 @@ impl Mesh {
             }
             code.push_str("}\n");
         }
-        writeln!(
-            code,
-            "if(previous) {{return;}} for(var c=0u;c<{stride}u;c++) {{attributes[i*{stride}u+c]=source_attributes[i*{stride}u+c];}}"
-        )?;
+        if historical_attributes {
+            writeln!(code,"let attribute_at=i*{stride}u*2u+select({stride}u,0u,previous); for(var c=0u;c<{stride}u;c++) {{let value=source_attributes[i*{stride}u+c];attribute_history[attribute_at+c]=value;if(!previous) {{attributes[i*{stride}u+c]=value;}}}}")?;
+        } else {
+            writeln!(code,"if(previous) {{return;}} for(var c=0u;c<{stride}u;c++) {{attributes[i*{stride}u+c]=source_attributes[i*{stride}u+c];}}")?;
+        }
         let mut columns = vec![
             ("TEXCOORD_0".to_owned(), 3u64, 2u32),
             ("TEXCOORD_1".to_owned(), 5, 2),
@@ -338,11 +345,14 @@ impl Mesh {
                     } else {
                         "0u".into()
                     };
-                    writeln!(
+                    if historical_attributes {
+                        let at=offset+u64::from(c);
+                        writeln!(code,"if(row<live) {{let value={value};if(!finite_f32(bitcast<f32>(value))) {{atomicOr(&bounds[6],2u);}} attribute_history[attribute_at+{at}u]=value;if(!previous) {{attributes[i*{stride}u+{at}u]=value;}}}}")?;
+                    } else { writeln!(
                         code,
                         "if(row<live) {{ let value={value}; if(!finite_f32(bitcast<f32>(value))) {{atomicOr(&bounds[6],2u);}} attributes[i*{stride}u+{}u]=value; }}",
                         offset + u64::from(c)
-                    )?;
+                    )?; }
                 }
             }
         }
@@ -383,7 +393,7 @@ impl Mesh {
             source: wgpu::ShaderSource::Wgsl(code.into()),
         });
         // Both entries use the same explicit layout, including otherwise unused streams.
-        let entries: Vec<_> = (0..base + 7 + usize::from(identities))
+        let entries: Vec<_> = (0..base + 7 + usize::from(identities) + usize::from(historical_attributes))
             .map(|i| {
                 pipelines::buffer_entry(
                     i as u32,
@@ -429,6 +439,7 @@ impl Mesh {
             .cloned()
             .collect();
         Ok(Self {
+            historical_attributes,
             pipeline,
             inputs,
             count,
@@ -475,6 +486,7 @@ pub(crate) fn resources(r: &Renderer, s: &InstalledScene) -> Result<Vec<Option<F
                 u64::from(mesh.count) * s.draws[i].layout.attribute_stride(),
                 usage,
             );
+            let previous_attributes=mesh.historical_attributes.then(||make("computed historical attributes",attributes.size()*2,usage));
             let bounds = make(
                 "computed bounds",
                 32,
@@ -499,6 +511,7 @@ pub(crate) fn resources(r: &Renderer, s: &InstalledScene) -> Result<Vec<Option<F
                 .iter()
                 .chain([&output, &previous, &attributes, &bounds])
                 .chain(identity.iter())
+                .chain(previous_attributes.iter())
                 .collect();
             let entries: Vec<_> = buffers
                 .iter()
@@ -523,6 +536,7 @@ pub(crate) fn resources(r: &Renderer, s: &InstalledScene) -> Result<Vec<Option<F
                         offset: 0,
                     },
                     attributes: Some(attributes),
+                    previous_attributes,
                 },
                 bind,
                 bounds,
@@ -557,7 +571,6 @@ pub(crate) fn prepare_history(r: &Renderer, s: &InstalledScene, frames: &[Option
     if !frames.iter().any(Option::is_some) { return Ok(()); }
     let compute = s.compute.as_ref().context("computed geometry schedule")?;
     let mut cursor = compute.cursor.lock().unwrap();
-    compute.plan_requests(&mut cursor,std::iter::empty())?;
     for (i,frame) in frames.iter().enumerate() {
         let Some(frame) = frame else {continue};
         let mesh = s.computed_geometry[i].as_ref().unwrap();
@@ -627,7 +640,7 @@ pub(crate) fn evaluate(
                 let next = r.device.create_command_encoder(&Default::default());
                 let old = std::mem::replace(encoder, next);
                 crate::command_finish::Segments::submit(&r.queue, old);
-            }, |encoder,tick| {
+            }, None, |encoder,tick| {
                 if !wanted.contains(&tick) {return;}
                 for (i,frame) in frames.iter().enumerate() {
                     let Some(frame)=frame else {continue};
@@ -687,7 +700,7 @@ pub(crate) fn evaluate(
                 let selected = if pose == 1 {
                     let buffers = history.get(&compute.geometry_time_key(&mesh.sources,previous)?).context("missing planned geometry pose")?;
                     let inputs: Vec<_> = buffers.iter().chain(mesh.inputs[mesh.history_ranges.len()..].iter())
-                        .chain([&frame.geometry.output.buffer,&frame.geometry.previous_output.buffer,frame.geometry.attributes.as_ref().unwrap(),&frame.bounds]).chain(frame.identity.iter()).collect();
+                        .chain([&frame.geometry.output.buffer,&frame.geometry.previous_output.buffer,frame.geometry.attributes.as_ref().unwrap(),&frame.bounds]).chain(frame.identity.iter()).chain(frame.geometry.previous_attributes.iter()).collect();
                     let entries: Vec<_> = inputs.iter().enumerate().map(|(i,b)| entry(i as u32,b.as_entire_binding())).collect();
                     bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("historical geometry source"), layout: &mesh.pipeline[1].get_bind_group_layout(0), entries: &entries,
@@ -878,6 +891,9 @@ mod tests {
                 let installed =
                     r.install(serde_json::from_value(value.clone())?, Path::new("."))?;
                 let mut slot = installed.create_frame_slot(&r, Default::default())?;
+                // Computed-only geometry must complete with diagnostic query
+                // resolves enabled, including retained and backward requests.
+                slot.profile = true;
                 for time in [0., 0.5, 1., 0.25, 0.] {
                     let expected = r.install(
                         serde_json::from_value(oracle(value.clone(), points, time))?,
@@ -1043,7 +1059,7 @@ void compute(ComputeContext ctx,Inputs inputs) {
         Ok(())
     }
     #[test]
-    fn rejected_geometry_does_not_retain_unsubmitted_values() -> Result<()> {
+    fn rejected_geometry_requires_reinstall_before_recovery() -> Result<()> {
         let Some(r) = crate::test_renderer()? else {
             return Ok(());
         };
@@ -1058,21 +1074,30 @@ void compute(ComputeContext ctx,Inputs inputs) {
             &mut value,
             json!({"integrator":"raster","samples":1,"fast_gi":null,"reflections":"environment"}),
         );
-        let s = r.install(serde_json::from_value(value)?, Path::new("."))?;
+        let s = r.install(serde_json::from_value(value.clone())?, Path::new("."))?;
         let mut reused = s.create_frame_slot(&r, Default::default())?;
-        ensure!(
-            reused.submit(&s, &r, 0.25).is_err(),
-            "invalid geometry was admitted"
-        );
-        reused.submit(&s, &r, 0.75)?;
-        let actual = reused.collect(&r)?;
-        let mut fresh = s.create_frame_slot(&r, Default::default())?;
-        fresh.submit(&s, &r, 0.75)?;
-        let expected = fresh.collect(&r)?;
-        ensure!(
-            actual.rgba == expected.rgba,
-            "rejected preparation retained values never uploaded to the GPU"
-        );
+        let error = reused.submit(&s, &r, 0.25).unwrap_err();
+        ensure!(format!("{error:#}").contains("nonfinite"), "invalid geometry was admitted: {error:#}");
+        // Recording may already have submitted canonical state or shared view
+        // prefixes. Recovery belongs to the installation, not one slot.
+        for slot in [&mut reused, &mut s.create_frame_slot(&r, Default::default())?] {
+            let error = slot.submit(&s, &r, 0.75).unwrap_err();
+            ensure!(format!("{error:#}").contains("reinstall"), "{error:#}");
+        }
+        let recovered = r.install(serde_json::from_value(value.clone())?, Path::new("."))?;
+        let mut fresh = recovered.create_frame_slot(&r, Default::default())?;
+        fresh.submit(&recovered, &r, 0.75)?;
+        let actual = fresh.collect(&r)?;
+        let mut authored = oracle(value, true, 0.75);
+        // This producer keeps all three points live throughout the witness.
+        authored["buffers"]["width"]["data"] = json!([0.5, 0.5, 0.5]);
+        let expected = r.install(serde_json::from_value(authored)?, Path::new("."))?;
+        let mut reference = expected.create_frame_slot(&r, Default::default())?;
+        reference.submit(&expected, &r, 0.75)?;
+        let expected = reference.collect(&r)?;
+        let error = actual.rgba.iter().zip(&expected.rgba)
+            .map(|(a,b)| a.abs_diff(*b) as u64).sum::<u64>() as f64 / actual.rgba.len() as f64;
+        ensure!(error < 1.5, "reinstalled geometry differs from authored reference: mean byte error {error}");
         Ok(())
     }
     #[test]

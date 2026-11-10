@@ -4,22 +4,37 @@
 #else
 #define RASTER_REGISTER(slot) : register(slot)
 #endif
+// Masked visibility owns fragment storage in group 2. Its query-only
+// specialization binds these same retained ray tables in group 4 instead.
+#ifndef VORK_RAY_BINDING_GROUP
+#define VORK_RAY_BINDING_GROUP 2
+#endif
+#ifndef VORK_RAY_SEQUENCE_REGISTER
+#define VORK_RAY_SEQUENCE_REGISTER t10
+#define VORK_RAY_SCENE_REGISTER t11
+#define VORK_RAY_ALPHA_REGISTER t12
+#ifdef VORK_METAL
+#define VORK_RAY_HITS_REGISTER b13
+#else
+#define VORK_RAY_HITS_REGISTER t13
+#endif
+#endif
 import vork_constants;
 import light_connection;
 #ifdef VORK_CAMERA_SPLIT
-[[vk::binding(14,4)]] public StructuredBuffer<float> receiver_emitter_weights : register(t29);
+[[vk::binding(14,4)]] public StructuredBuffer<float> receiver_emitter_weights : register(t28);
 #endif
 import vork_sampling;
-[[vk::binding(0,2)]] public StructuredBuffer<uint> shadow_sequence RASTER_REGISTER(t10);
+[[vk::binding(0,VORK_RAY_BINDING_GROUP)]] public StructuredBuffer<uint> shadow_sequence RASTER_REGISTER(VORK_RAY_SEQUENCE_REGISTER);
 import frame;
 import vork_ray_sampling;
 import vork_ray_alpha;
 #ifdef VORK_RAY_BINDINGS
-[[vk::binding(1,2)]] public RaytracingAccelerationStructure ray_scene RASTER_REGISTER(t11);
-[[vk::binding(2,2)]] public StructuredBuffer<uint> ray_alpha RASTER_REGISTER(t12);
+[[vk::binding(1,VORK_RAY_BINDING_GROUP)]] public RaytracingAccelerationStructure ray_scene RASTER_REGISTER(VORK_RAY_SCENE_REGISTER);
+[[vk::binding(2,VORK_RAY_BINDING_GROUP)]] public StructuredBuffer<uint> ray_alpha RASTER_REGISTER(VORK_RAY_ALPHA_REGISTER);
 #else
-[[vk::binding(1,2)]] public RaytracingAccelerationStructure ray_scene;
-[[vk::binding(2,2)]] public StructuredBuffer<uint> ray_alpha;
+[[vk::binding(1,VORK_RAY_BINDING_GROUP)]] public RaytracingAccelerationStructure ray_scene;
+[[vk::binding(2,VORK_RAY_BINDING_GROUP)]] public StructuredBuffer<uint> ray_alpha;
 #endif
 export float3 ray_eye() {return frame.eye.xyz;}
 import vork_shadow_ray;
@@ -48,18 +63,18 @@ public float3 ray_visibility(float3 world,float3 normal,LightValues light,uint l
     return ray_transmission(world,normal,light,light_index,pixel,position_error,false,sample_override);
 }
 
-#if defined(VORK_PROGRAM_COVERAGE) || defined(VORK_PROBES) || defined(VORK_RAY_REFRACTION)
+#if defined(VORK_PROGRAM_COVERAGE) || defined(VORK_PROBES) || defined(VORK_RAY_REFRACTION) || defined(VORK_PROGRAM_TRACE)
 import hit;
 // Like the TLAS: a fixed raster register only where the shadow group binds it
 // (ray shadows), so a kernel without it numbers its own resources unshifted.
 #if defined(VORK_METAL) && defined(VORK_RAY_BINDINGS)
-[[vk::binding(3,2)]] ParameterBlock<RayHitBuffersTable> ray_hit_buffers RASTER_REGISTER(b13);
+[[vk::binding(3,VORK_RAY_BINDING_GROUP)]] ParameterBlock<RayHitBuffersTable> ray_hit_buffers RASTER_REGISTER(VORK_RAY_HITS_REGISTER);
 #elif defined(VORK_METAL)
-[[vk::binding(3,2)]] ParameterBlock<RayHitBuffersTable> ray_hit_buffers;
+[[vk::binding(3,VORK_RAY_BINDING_GROUP)]] ParameterBlock<RayHitBuffersTable> ray_hit_buffers;
 #elif defined(VORK_RAY_BINDINGS)
-[[vk::binding(3,2)]] StructuredBuffer<uint> ray_hit_buffers[REG_RAY_HIT_BUFFERS] RASTER_REGISTER(t13);
+[[vk::binding(3,VORK_RAY_BINDING_GROUP)]] StructuredBuffer<uint> ray_hit_buffers[REG_RAY_HIT_BUFFERS] RASTER_REGISTER(VORK_RAY_HITS_REGISTER);
 #else
-[[vk::binding(3,2)]] StructuredBuffer<uint> ray_hit_buffers[REG_RAY_HIT_BUFFERS];
+[[vk::binding(3,VORK_RAY_BINDING_GROUP)]] StructuredBuffer<uint> ray_hit_buffers[REG_RAY_HIT_BUFFERS];
 #endif
 uint ray_hit_buffers_load(uint buffer,uint index) {
 #ifdef VORK_METAL
@@ -73,6 +88,13 @@ public struct ReceiverGeometry : IHitGeometry {
     static uint load(uint buffer,uint index) {return ray_hit_buffers_load(buffer,index);}
 };
 #endif
+#if defined(VORK_PROGRAM_TRACE) && !defined(VORK_HIT_KERNEL)
+import geometric_trace;
+export TraceHit native_geometric_trace(float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
+    return geometric_trace<ReceiverGeometry>(ray_scene,origin,direction,minimum,maximum,mask,object);
+}
+#endif
+
 #ifdef VORK_PROGRAM_COVERAGE
 import variant;
 import scene_programs;

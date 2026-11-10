@@ -1,6 +1,12 @@
 UPGRADE
 Breaking changes, newest release first. Rewrite scenes/scripts; no aliases.
 
+0.4 (from 0.3)
+- std/medium_constant and std/medium_height are removed. Author a medium program
+  returning physical coefficients; see vork help fog for its contract and limits.
+  World fog binds to light.medium on the single environment; homogeneous finite fog
+  binds to closed convex carriers. Fog selects complete-camera path transport.
+
 0.3 (from 0.2)
 Scene admission and scripts
 - 0.3 does not support participating media (fog, haze, smoke or volumes).
@@ -21,10 +27,10 @@ Scene admission and scripts
   Remove medium-only nodes/bindings to keep the old no-medium result, or composite
   an externally rendered plate. Combine environments into one program/map.
 - Previously ignored geometry effects now fail: computed-instance displacement,
-  displacement on computed/implicit geometry, normal-dependent point displacement,
+  displacement on computed points/implicit geometry, normal-dependent point displacement,
   conflicting displacement materials/shared-vertex attributes, computed geometry
-  with skinning/coverage/transparency, and computed transparent placements.
-  Bake displaced/skinned geometry or placements, compute positions in the producer,
+  with coverage/transparency, and computed transparent placements.
+  Bake displaced geometry or placements, compute positions in the producer,
   split discontinuous vertices, or use opaque geometry. See vork help limits.
 - Named geometry_opacity/alpha_cutoff attributes now affect camera and ray hits;
   computed instance material attributes now follow GPU updates, shutter samples
@@ -51,6 +57,13 @@ Scene admission and scripts
   weights, speeds and shutter width numeric. See vork help animation.
 
 Look changes (rerender representative frames)
+- Overlapping solid dielectrics gain material.priority (integer, default 0), on
+  the material beside inputs. Higher priority owns IOR and absorption; equal
+  priorities keep last-entered ownership (simultaneous entries use solid order).
+  Set priorities explicitly for overlapping glass/liquid. Touching faces now cross
+  directly between the two media, fixing spurious air interfaces and attenuation;
+  remove artificial air gaps used as workarounds and recheck glass. Thin sheets
+  have no interior. See vork help materials --all and field material.priority.
 - Normal maps now follow glTF/MikkTSpace: B = cross(N,T.xyz)*T.w; derivative
   frames add no image-V sign flip. Positive UV repeats/offsets preserve authored
   tangents. Remove compensating green-channel flips or wrong tangent.w signs;
@@ -126,25 +139,11 @@ Scene and script changes
   If managing the process yourself, write explicit arguments instead:
   ["render","shot.json","--out","shot.png","--set","samples=16"].
   Keep existing render options; see vork help render and vork help sdk.
-- Removed compositor programs: find program values post/vignette,
-  post/lens_distortion, post/glare in materials/render.compositor.
-  Replace each with a local Slang composite program, e.g.
-  {"program":"post/vignette","inputs":{"factor":0.5}} becomes
-  {"program":{"file":"vignette.slang"},"inputs":{"factor":0.5}}.
-  Copy the entire shipped examples/compositor-effects directory into your
-  project (installed at PREFIX/lib/vork/examples/compositor-effects). It contains
-  vignette.slang, chromatic-dispersion.slang, glare.slang and highlight.slang,
-  plus complete glare-*.json merge graphs. Keep highlight.slang beside glare.slang;
-  glare imports it. Program paths are relative to the scene; preserve inputs.
+- Removed compositor programs/imports post/vignette, post/lens_distortion,
+  post/glare and std/highlight require authored composite programs.
   The old lens effect was RGB chromatic dispersion, not geometric distortion.
-  Glare produces an additive image: retain the original and merge it afterward,
-  as examples/compositor-effects/glare-streaks.json demonstrates. std/bloom is
-  still supported for bloom; it is not an exact replacement for these effects.
-- Custom Slang imports also break: post.vignette, post.lens_distortion,
-  post.glare and std.highlight were removed. Copy the same example modules next
-  to your custom program. Use import vignette;, import glare; and import highlight;.
-  For post.lens_distortion, copy chromatic-dispersion.slang as lens_distortion.slang
-  and use import lens_distortion;. Update any qualified module references too.
+  Additive glare needs an explicit merge with the original; std/bloom remains
+  supported with its own stage contract (vork help compositor).
 - Participating media were ignored with warnings in the public 0.2 release.
   In 0.3 they are refused and the fog/volume library programs are removed;
   follow the 0.3 media instructions above, including unused definitions.

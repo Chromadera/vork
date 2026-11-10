@@ -1,7 +1,9 @@
 """Small physical fixtures for the renderer's real-GPU fluid contracts."""
 import json
 import sys
-from libraries.fluid import build
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'packages' / 'python'))
+from vork.fluid import build
 
 kind=sys.argv[1]
 n=int(sys.argv[2])
@@ -54,7 +56,6 @@ scene.update(version=2,nodes=[
 scene['materials']['water']=dict(inputs=dict(base_weight=0,specular_weight=0,emission_luminance=1,emission_color=[1,0,0]))
 # Inline the selected checkout's library sources so the same GPU test binary
 # can compare the audited and repaired numerics without changing renderer code.
-from pathlib import Path
 for program in scene['programs'].values():
     for module in ('config','solver','surface','film','whitewater'):
         program['source']=program['source'].replace('#include "fluid/'+module+'.slang"',Path(__file__).with_name(module+'.slang').read_text())

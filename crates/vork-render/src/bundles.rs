@@ -24,6 +24,7 @@ pub(crate) struct Recorder<'a> {
     pub deforms: &'a [Option<EvaluatedGeometry>],
     pub fibre_capture: Option<&'a wgpu::BindGroup>,
     /// The scene material table, or this frame's animated copy of it.
+    pub shadow_bind: &'a wgpu::BindGroup,
     pub material_bind: &'a wgpu::BindGroup,
     /// The view's transparent fragment list (passes/decoupled.rs Fragments).
     pub visibility: Option<&'a crate::passes::decoupled::Sampling>,
@@ -81,9 +82,13 @@ impl Recorder<'_> {
         b.set_bind_group(0, global, &[]);
         // Every material reads the one scene material table.
         b.set_bind_group(1, self.material_bind, &[]);
+        if s.pipelines.program_trace && matches!(kind,Kind::Depth|Kind::Controls|Kind::TransparentControls) {
+            b.set_bind_group(2,self.shadow_bind,&[]);
+        }
         if matches!(kind, Kind::TransparentFragments(_) | Kind::Visibility(_)) || (s.pipelines.field_controls && matches!(kind,Kind::Controls|Kind::TransparentControls)) {
             b.set_bind_group(2, self.fragments.expect("transparent fragment list"), &[]);
             b.set_bind_group(3, self.fragments_geometry.expect("transparent opacity geometry"), &[]);
+            if s.pipelines.program_trace {b.set_bind_group(4,self.shadow_bind,&[]); }
         }
         if matches!(kind,Kind::Fibre(crate::fibre_transport::Stage::Accumulate,_)) {
             b.set_bind_group(2,self.fibre_capture.expect("fibre capture resources installed"),&[]);

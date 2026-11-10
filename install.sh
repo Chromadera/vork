@@ -1,11 +1,11 @@
 #!/bin/sh
 # Download, verify, and install without gh or sudo. curl ... | sh
 # Environment: VERSION, PREFIX, VORK_REPO, VORK_DOWNLOAD_BASE; VORK_SKIP_SETUP=1 skips `vork setup` (GPU-free CI);
-# VORK_NO_MODIFY_PATH=1 leaves shell startup files alone. A custom PREFIX never edits them.
+# VORK_MODIFY_PATH=1 opts a custom PREFIX into startup-file edits; VORK_NO_MODIFY_PATH=1 always disables edits.
 set -eu
 repo=${VORK_REPO:-voyager-so/vork}
 # Default version is generated from Cargo.toml by scripts/sync-version.
-version=${VERSION:-0.3.0}
+version=${VERSION:-0.4.0}
 default_prefix=$HOME/.local
 prefix=${PREFIX:-"$default_prefix"}
 # POSIX shell literals for copy/paste, including embedded quotes and $/backticks.
@@ -133,19 +133,19 @@ stage=''
 ln -sf "$prefix/lib/vork/vork" "$prefix/bin/vork"
 "$prefix/bin/vork" --version
 
-# Let new shells find vork. Only the default location touches startup files.
+# Let new shells find vork. Custom prefixes require explicit opt-in.
 quoted_exe=$(shell_quote "$prefix/bin/vork")
 quoted_bin=$(shell_quote "$prefix/bin")
 path_line="export PATH=$quoted_bin:\"\$PATH\""
 path_note=''
-if [ -n "${PREFIX:-}" ] || [ "${VORK_NO_MODIFY_PATH:-}" = 1 ]; then
+if [ "${VORK_NO_MODIFY_PATH:-}" = 1 ] || { [ -n "${PREFIX:-}" ] && [ "${VORK_MODIFY_PATH:-}" != 1 ]; }; then
     case ":$PATH:" in
         *":$prefix/bin:"*) ;;
         *) path_note="Add vork to PATH by putting this in your shell startup file:
   $path_line" ;;
     esac
 else
-    path_line='export PATH="$HOME/.local/bin:$PATH"'
+    if [ -z "${PREFIX:-}" ]; then path_line='export PATH="$HOME/.local/bin:$PATH"'; fi
     case "${SHELL:-}" in
         # Every zsh reads .zshenv; .zshrc is interactive only.
         */zsh) rc_files="${ZDOTDIR:-$HOME}/.zshenv" ;;
@@ -160,7 +160,8 @@ else
 $login_rc" ;;
         */fish)
             rc_files="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/vork.fish"
-            path_line='fish_add_path -g "$HOME/.local/bin"'
+            if [ -n "${PREFIX:-}" ]; then path_line="fish_add_path -g $quoted_bin"
+            else path_line='fish_add_path -g "$HOME/.local/bin"'; fi
             mkdir -p "$(dirname "$rc_files")" 2>/dev/null || true ;;
         *) rc_files="$HOME/.profile" ;;
     esac

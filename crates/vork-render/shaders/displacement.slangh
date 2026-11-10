@@ -34,7 +34,12 @@ uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
     evaluation=evaluations[id.z];if(evaluation.object_header.y==0u)return;
     let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation_count() || pose>=3u)return;
 #if VORK_ATTRIBUTES > 0
+#ifdef VORK_ATTRIBUTE_POSES
+    let attribute_at=vertex*attribute_stride()+pose*evaluation.object_header.z;
+    for(uint slot=0u;slot<VORK_ATTRIBUTES;slot++) material_attributes[slot]=vertex_attributes[attribute_at+1u+slot];
+#else
     for(uint slot=0u;slot<VORK_ATTRIBUTES;slot++) material_attributes[slot]=vertex_attributes[vertex*attribute_stride()+1u+slot];
+#endif
 #endif
     material_instance_attributes(evaluation.object_header.x);
     let p=evaluation.point_vertices!=0u ? asfloat(uint3(topology[vertex*3u],topology[vertex*3u+1u],topology[vertex*3u+2u])) : source_vector(vertex*10u,pose);

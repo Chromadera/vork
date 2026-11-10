@@ -10,13 +10,18 @@ import variant;
 import hit;
 import camera_ray;
 #ifdef VORK_METAL
-[[vk::binding(0,3)]] ParameterBlock<RayHitBuffersTable> fragment_hit_buffers;
+// These resources share the fragments pipeline layout with field controls.
+// Imported ray helpers must not change their Metal slots.
+[[vk::binding(0,3)]] ParameterBlock<RayHitBuffersTable> fragment_hit_buffers : register(b11);
+[[vk::binding(1,3)]] StructuredBuffer<uint> fragment_draw_table : register(t12);
+[[vk::binding(2,3)]] StructuredBuffer<uint> fragment_object_draws : register(t13);
+[[vk::binding(3,3)]] StructuredBuffer<uint4> fragment_camera_samples : register(t14);
 #else
 [[vk::binding(0,3)]] StructuredBuffer<uint> fragment_hit_buffers[REG_RAY_HIT_BUFFERS];
-#endif
 [[vk::binding(1,3)]] StructuredBuffer<uint> fragment_draw_table;
 [[vk::binding(2,3)]] StructuredBuffer<uint> fragment_object_draws;
 [[vk::binding(3,3)]] StructuredBuffer<uint4> fragment_camera_samples;
+#endif
 struct FragmentGeometry : IHitGeometry {
     static uint word(uint index) {return fragment_draw_table[index];}
     static uint load(uint buffer, uint index) {

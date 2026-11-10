@@ -26,7 +26,7 @@ impl Compiler {
     fn compile_composite_internal(&self,abi:&Abi,source:&str,origin:&Path,tag:&str,values:Option<&BTreeMap<String,Value>>)->Result<CompositeProgram> {
         let compiled = self.compile_with_capacity(abi, source, origin, tag, None, false, true, false, |inputs, declarations| {
             ensure!(declarations.contains("composite"), "program requires float4 composite(CompositeContext ctx, Inputs inputs)");
-            ensure!(inputs.fields.iter().all(|f| !matches!(f.ty, Type::Attribute(_) | Type::Aov | Type::FloatGrid | Type::VectorGrid)), "compositor inputs must be numeric or Image");
+            ensure!(inputs.fields.iter().all(|f| !matches!(f.ty, Type::Geometry | Type::Attribute(_) | Type::Aov | Type::FloatGrid | Type::VectorGrid)), "compositor inputs must be numeric or Image");
             let mut images=BTreeMap::new();
             let mut channels=Vec::<String>::new();
             if let Some(values)=values {

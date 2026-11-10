@@ -187,7 +187,7 @@ machine, you can use the [Docker runtime](docs/REMOTE-GPU.md).
 ## Give it to an agent
 
 Start with `vork init`, then `vork help`. Scene JSON uses the stable
-[editor schema](https://raw.githubusercontent.com/voyager-so/vork/v0.3.0/packages/ts/scene.schema.json).
+[editor schema](packages/ts/scene.schema.json).
 Use `vork help` for the starting scene and concepts, `vork help TOPIC --all`
 for topic fields, and `vork help field PATH` for an exact field reference.
 
@@ -457,7 +457,10 @@ The installer verifies SHA256SUMS, installs under `$HOME/.local/lib/vork`, links
 `$HOME/.local/bin/vork`, runs `vork setup`, and adds the PATH line to your shell's
 startup files, including the one login shells read. The `export` above covers the
 current shell, and any shell that reads no startup file, such as plain `bash -c`.
-`VORK_NO_MODIFY_PATH=1` or a custom `PREFIX` leaves startup files alone. Linux MP4 needs ffmpeg even when NVENC encodes frames, because ffmpeg
+A custom `PREFIX` leaves startup files alone unless you also set `VORK_MODIFY_PATH=1`,
+which adds `PREFIX/bin` using the same shell startup files as the default install.
+For example: `PREFIX="$HOME/tools/vork" VORK_MODIFY_PATH=1 sh install.sh`.
+`VORK_NO_MODIFY_PATH=1` always prevents PATH edits, including when opt-in is set. Linux MP4 needs ffmpeg even when NVENC encodes frames, because ffmpeg
 muxes the stream. Native NVENC is attempted on NVIDIA; otherwise encoding uses a
 readback fallback. Older GPUs and software Vulkan adapters are unsupported.
 A100, H100, H200, B200 and B300 lack the required hardware ray tracing; recency
@@ -510,8 +513,11 @@ The installer itself runs in your user account without administrator rights.
 
 The installer verifies SHA256SUMS, installs under `%LOCALAPPDATA%\Programs\vork`,
 runs `vork setup`, and adds that folder to your user PATH so new windows find `vork`;
-the `$env:Path` line above covers the current one. `VORK_NO_MODIFY_PATH=1` or a custom
-`PREFIX` leaves it alone.
+the `$env:Path` line above covers the current one. A custom `PREFIX` leaves PATH
+alone unless `$env:VORK_MODIFY_PATH='1'` is also set; opt-in adds that folder to
+both the user PATH and the installer process's PATH. For example, set
+`$env:PREFIX='D:\Tools\vork'` and `$env:VORK_MODIFY_PATH='1'` before running the installer.
+`VORK_NO_MODIFY_PATH=1` always prevents PATH edits, including when opt-in is set.
 Windows MP4/MOV needs ffmpeg; MP4 uses its NVENC encoder when compatible, otherwise
 libx264. FFmpeg 9.0.2 requires NVENC API 13.1 (NVIDIA driver 610+) for
 hardware encoding; older drivers fall back to libx264. The cache is under `%LOCALAPPDATA%\vork`.
@@ -616,7 +622,7 @@ Adjust the camera and light for your model's scale. glTF files can refer to
 textures and buffers beside them; keep those files together.
 
 Setup warms the `vork init` starter at the default `std/final` profile on your GPU, with a
-ten-minute limit. Use `vork setup --skip-warmup` to check tools only. You can
+ten-minute limit. Use `vork setup --skip-warmup` to check tools only; add `--verbose` for raw encoder probe diagnostics. You can
 interrupt setup safely: completed cache entries survive and remaining pipelines
 compile when needed. Run setup again to continue, or use `vork setup --all` for
 the exhaustive catalogue without the time limit. Device cache blobs are never
@@ -657,6 +663,19 @@ For a custom install, replace the default SDK paths above with your install fold
 Import as `vork` in Python or
 `@voyager-so/vork` in TypeScript; keep the native executable on PATH.
 For source builds, see [`vork help build`](docs/help/build.md).
+
+
+### CPU rendering on Linux
+
+Install recent Mesa Vulkan drivers (`mesa-vulkan-drivers` on Debian/Ubuntu;
+`mesa-vulkan-drivers` or `vulkan-swrast` elsewhere), then use
+`vork setup --gpu cpu`, then `vork render scene.json --gpu cpu --out frame.png`.
+Alternatively, set `VORK_GPU=cpu` for both commands. This requires
+ray queries and storage buffer arrays and is slow. CPU rendering is never chosen
+automatically. First-use compilation can take several minutes. vork's pipeline
+cache is disabled to avoid a lavapipe crash; portable shader artifacts and Mesa's
+own shader disk cache can still speed later runs.
+See [build instructions](docs/BUILD.md#opt-in-cpu-rendering) for platform details.
 
 ## Licence
 

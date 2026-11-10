@@ -49,26 +49,31 @@ def export_gltf(*, bake_sources=False, **options):
     import bpy
     deps = bpy.context.evaluated_depsgraph_get()
     tagged = []
+    from .visibility import METADATA as ray_metadata, flags
     try:
         for obj in bpy.data.objects:
-            if obj.type != 'MESH':
+            if obj.type not in ('MESH', 'CURVE', 'SURFACE', 'META', 'FONT'):
                 continue
-            if _METADATA in obj:
-                raise ValueError(f'object {obj.name!r}: reserved UV metadata property already exists')
-            mesh = obj.evaluated_get(deps).data if options.get('export_apply', False) else obj.data
-            layers = mesh.uv_layers
-            active = next((i for i, layer in enumerate(layers) if layer.active_render), None)
+            if _METADATA in obj or ray_metadata in obj:
+                raise ValueError(f'object {obj.name!r}: reserved bridge metadata property already exists')
             if bake_sources and _BAKE_SOURCE in obj:
                 raise ValueError(f'object {obj.name!r}: reserved bake metadata property already exists')
-            obj[_METADATA] = json.dumps([[layer.name for layer in layers], active, obj.name if bake_sources else None])
             tagged.append(obj)
+            obj[ray_metadata] = json.dumps(dict(object=obj.name, flags=flags(obj),
+                                                 visible_volume_scatter=bool(obj.visible_volume_scatter)))
+            if obj.type == 'MESH':
+                mesh = obj.evaluated_get(deps).data if options.get('export_apply', False) else obj.data
+                layers = mesh.uv_layers
+                active = next((i for i, layer in enumerate(layers) if layer.active_render), None)
+                obj[_METADATA] = json.dumps([[layer.name for layer in layers], active, obj.name if bake_sources else None])
         options['export_extras'] = True
         result = bpy.ops.export_scene.gltf(**options)
         if 'FINISHED' not in result:
             raise ValueError(f'glTF export did not finish: {result}')
     finally:
         for obj in tagged:
-            del obj[_METADATA]
+            for key in (_METADATA, ray_metadata):
+                if key in obj: del obj[key]
     path = Path(options['filepath'])
     data = path.read_bytes()
     if data[:4] == b'glTF':

@@ -1,5 +1,5 @@
 std: "program":"std/<m>"; import std.<m>;
-Procedural textures: import std.procedurals; signatures/examples: vork help std --all.
+Procedural textures: import std.procedurals; signatures: vork help std --all.
 Programs: std/hair (curves), std/sky
 (environment), std/bloom (compositor). Depth of field: std/camera use_dof; motion blur: render.motion_blur.
 std/agx (default) and std/standard: Blender 5.2.1 display programs.
@@ -15,6 +15,7 @@ caps; torus radius is to the tube centre. Radii and bevels clamp to fit without 
 (rounded up to an even count), preserving exact planar faces at every count. Box faces each span 0..1 UV; round shapes: u from +X toward
 -Z around Y, v top to bottom.
 <!-- generated-shapes:start -->
+Scene geometry: {std: NAME, ...options}; omit name: the table key or inline position owns identity.
 cylinder: {name?:string="cylinder",radius?:number=1,height?:number=2,segments?:number=32} → GeometryFragment
 cone: {name?:string="cone",radius?:number=1,height?:number=2,segments?:number=32} → GeometryFragment
 torus: {name?:string="torus",radius?:number=1,tube?:number=0.25,segments?:number=48,rings?:number=12} → GeometryFragment
@@ -34,7 +35,7 @@ Typed sky inputs/defaults/ranges: vork help field std/sky (also below).
 Text defaults and units: vork help field std/text (also below).
 vork std sky: atmosphere plus declared solar light; sun_size is full angle, sun_intensity scales solar emission.
 vork std environment: {file,output,name?,threshold?,color_space?,fps?}; weight EXR plus environment program and declared sun; threshold defaults to 10.
-std/bloom: add prepare(original={channel:color}), named highlights, then combine(original={channel:color},source={node:highlights}) to render.compositor. stage is an input; adjust prepare threshold=1 and combine strength=1. Full JSON: vork help compositor.
+std/bloom: add prepare(original={channel:color}), named highlights, then combine(original={channel:color},source={node:highlights}) to render.compositor. stage is an input; adjust prepare threshold=1 and combine strength=1. Stage contracts: vork help compositor.
 Modules (import std.<m>):
 std.texture: texture_footprint(uv,dx,dy,ctx); texture_sample(image,footprint,ctx).
 texture_normal(image,footprint,ctx,factors,derived,out variance) and texture_tangent(image,footprint,ctx,factors,derived) return world-space vectors.
@@ -61,14 +62,6 @@ white_noise(p, dimensions=3, w=0) → {value:float, color:float3} in [0,1]; hash
 gabor(p, scale=5, frequency=2, anisotropy=1, dimensions=2, orientation=.7853981634,
   direction=float3(1.41421356237,1.41421356237,0)) → {value:float, phase:float, intensity:float}, [0,1].
 Gabor uses 2D XY/orientation radians, otherwise 3D/direction; anisotropy 0=random, 1=aligned.
-Example (inline surface program, no texture assets):
-  import vork; import std.procedurals;
-  struct Inputs {};
-  Closure surface(ShadingContext ctx, Inputs inputs) {
-    Closure c={}; c.base_color=lerp(float3(.65,.6,.5),float3(.05),noise(ctx.rest_position));
-    c.specular_roughness=.25; return c;
-  }
-For soft bands use smoothstep(.45,.65,noise(p,3,4)); scale/rotate p to stretch bands.
 std.color: color_ramp<N>(factor, RampStop[N], constant|linear|ease|cardinal|b_spline, rgb|hsv|hsl,
   near|far|cw|ccw); blackbody(kelvin); wavelength(nm)
 std.grid: sample_grid(FloatGrid|VectorGrid, position)

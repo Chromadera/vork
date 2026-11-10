@@ -1138,8 +1138,67 @@ impl crate::DynCommandBuffer for CommandBuffer {}
 unsafe impl Send for CommandBuffer {}
 unsafe impl Sync for CommandBuffer {}
 
+/// A persistent Metal binary archive. Apple's shared per-user function cache has a
+/// fixed size and evicts large pipeline binaries, so callers that persist this
+/// archive get a warm path that does not depend on what else ran on the machine.
 #[derive(Debug)]
-pub struct PipelineCache;
+pub struct PipelineCache {
+    archive: Retained<ProtocolObject<dyn objc2_metal::MTLBinaryArchive>>,
+    /// Files backing the archive: the staged input and every serialization.
+    /// Metal reads entries lazily from its current backing file and moves
+    /// them on the next serialization, so these live as long as the archive.
+    /// The lock also serializes additions and serialization. Shared with the
+    /// process registry so an exit that skips destructors can still remove them.
+    files: Arc<Mutex<Vec<std::path::PathBuf>>>,
+}
+
+impl Drop for PipelineCache {
+    fn drop(&mut self) {
+        for path in self.files.lock().drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Set once the process has released its archive files for exit: no new
+/// backing file may be created afterwards.
+static ARCHIVE_EXITING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Backing-file lists of every live binary-archive pipeline cache.
+static ARCHIVE_FILES: Mutex<Vec<alloc::sync::Weak<Mutex<Vec<std::path::PathBuf>>>>> =
+    parking_lot::const_mutex(Vec::new());
+
+fn register_archive_files(files: &Arc<Mutex<Vec<std::path::PathBuf>>>) {
+    let mut registry = ARCHIVE_FILES.lock();
+    registry.retain(|weak| weak.strong_count() > 0);
+    registry.push(Arc::downgrade(files));
+}
+
+/// Whether binary-archive backing files may still be created.
+fn archive_files_open() -> bool {
+    !ARCHIVE_EXITING.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+/// Remove every live pipeline cache's backing files for a process exit that
+/// skips destructors (for example `libc::_exit`). Each cache's lock is taken in
+/// turn, so an in-progress serialization finishes first; afterwards no cache
+/// stages or serializes new files, and `get_data` returns `None`. Archives
+/// remain usable in memory: any thread still running until the exit can look
+/// up or add pipelines. Call only immediately before ending the process.
+pub fn release_archive_files_for_exit() -> usize {
+    ARCHIVE_EXITING.store(true, core::sync::atomic::Ordering::SeqCst);
+    let caches: Vec<_> = ARCHIVE_FILES.lock().iter().filter_map(alloc::sync::Weak::upgrade).collect();
+    let mut removed = 0;
+    for files in caches {
+        for path in files.lock().drain(..) {
+            removed += usize::from(std::fs::remove_file(path).is_ok());
+        }
+    }
+    removed
+}
+
+// MTLBinaryArchive is a thread-safe Metal object; mutation is serialized by `lock`.
+unsafe impl Send for PipelineCache {}
+unsafe impl Sync for PipelineCache {}
 
 impl crate::DynPipelineCache for PipelineCache {}
 

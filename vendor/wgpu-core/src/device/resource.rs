@@ -4825,6 +4825,9 @@ impl Device {
             Ok(raw) => raw,
             Err(e) => match e {
                 hal::PipelineCacheError::Device(e) => return Err(self.handle_hal_error(e).into()),
+                hal::PipelineCacheError::Rejected(reason) => {
+                    return Err(pipeline::CreatePipelineCacheError::Rejected(reason))
+                }
             },
         };
         let cache = pipeline::PipelineCache {

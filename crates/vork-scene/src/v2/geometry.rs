@@ -33,7 +33,7 @@ pub struct Buffer {
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.type", "x-help" = "f32|i32|u32|vec2|vec3|vec4|uvec4|mat4"))]
     pub element_type: BufferType,
     #[schemars(with = "Option<InlineDataSchema>")]
-    #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.data", "x-help" = "number[]|number[][]; XOR file; mat4 column-major"))]
+    #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.data", "x-help" = "number[]|number[][]; XOR file; one typed element per outer entry; vector/matrix entries contain 2/3/4/16 scalar components, not a flat scalar stream; mat4 column-major"))]
     pub data: Option<Vec<serde_json::Value>>,
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.file", "x-help" = "file-path; little-endian, or .vdb/.nvdb with grid; XOR data"))]
     pub file: Option<String>,
@@ -230,4 +230,16 @@ mod semantic_tests {
             assert!(error.contains(semantic) && error.contains("wrong type"), "{error}");
         }
     }
+}
+
+/// Authoring shorthand expanded by vork-std before kernel scene decoding.
+/// Builder-specific options are validated by the selected standard-library builder.
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct StdGeometry {
+    pub std: String,
+    /// Text font path, resolved relative to the scene.
+    pub font: Option<String>,
+    #[serde(flatten)]
+    pub options: Table<serde_json::Value>,
 }

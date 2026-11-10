@@ -463,7 +463,7 @@ pub(crate) fn geometry_v2(
     Ok(geometry)
 }
 
-fn apply_point_attributes(
+pub(crate) fn apply_point_attributes(
     attributes: &SceneBuffers,
     source: &::vork_scene::v2::Geometry,
     names: &[String],

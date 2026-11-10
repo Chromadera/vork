@@ -26,7 +26,7 @@ def export(binary, caches, output):
             if not ENTRY.fullmatch(entry.name):
                 continue
             data = entry.read_bytes()
-            if len(data) <= 32 or data[:32] != blake3(data[32:]).digest():
+            if len(data) <= 32 or data[:32] != blake3(b'vork-cache-entry-v2\0' + entry.name.encode() + b'\0' + data[32:]).digest():
                 corrupt[entry.name] = entry
                 continue
             entries[entry.name] = data

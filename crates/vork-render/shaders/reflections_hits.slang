@@ -39,7 +39,9 @@ struct ReflectionFields {StructuredBuffer<uint> buffers[REG_VISIBILITY_REFLECTIO
 [[vk::binding(1,3)]] StructuredBuffer<uint> reflection_fields[REG_VISIBILITY_REFLECTION_WORDS];
 #define reflection_records reflection_fields
 #endif
-[[vk::binding(20,0)]] ConstantBuffer<uint4> reflection_range : register(b10);
+struct ReflectionDispatch {uint4 work;uint4 packet;};
+[[vk::binding(20,0)]] ConstantBuffer<ReflectionDispatch> reflection_dispatch : register(b10);
+#define reflection_range reflection_dispatch.work
 [[vk::binding(21,0)]] RWStructuredBuffer<float4> reflection_accumulation : register(u11);
 [[vk::binding(22,0)]] StructuredBuffer<float> reflection_emitter_weights : register(t12);
 // Raster geometry buffers ray hits read in place (rt::hit_record, rt::hits_layout).
@@ -60,6 +62,13 @@ struct ReflectionGeometry : IHitGeometry {
     static uint word(uint index) {return ray_alpha[index];}
     static uint load(uint buffer, uint index) {return ray_hit_buffers_load(buffer,index);}
 };
+#ifdef VORK_PROGRAM_TRACE
+import geometric_trace;
+export TraceHit native_geometric_trace(float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
+    return geometric_trace<ReflectionGeometry>(ray_scene,origin,direction,minimum,maximum,mask,object);
+}
+#endif
+
 // Sample the physical emitter and its visibility together at reflection hits.
 struct ReflectionShadows<P:IProgram> : IShadows {
     static const bool probe_rays=true;
@@ -71,49 +80,6 @@ struct ReflectionShadows<P:IProgram> : IShadows {
     static const bool subsurface=true;
     static float thickness(uint object,float3 world,float3 direction) {return subsurface_exit(ray_scene,object,world,direction);}
 };
-#ifdef VORK_REFLECTION_MEDIUM
-import vork_medium;
-import reflection_medium_scene;
-import vork_medium_bounds;
-import vork_medium_visibility_direct;
-#ifdef VORK_REFLECTION_MEDIUM_GRID
-import vork_medium_visibility_grid;
-#ifdef VORK_METAL
-struct ReflectionMediumPages {StructuredBuffer<float4> buffers[];};
-[[vk::binding(2,3)]] ParameterBlock<ReflectionMediumPages> reflection_medium : register(VORK_REFLECTION_MEDIUM_REGISTER);
-#define reflection_medium_page(page) reflection_medium.buffers[page]
-#else
-[[vk::binding(2,3)]] StructuredBuffer<float4> reflection_medium[];
-#define reflection_medium_page(page) reflection_medium[NonUniformResourceIndex(page)]
-#endif
-export float4 medium_visibility_read(uint index) {
-    return reflection_medium_page(index/VORK_REFLECTION_MEDIUM_CAPACITY)[index%VORK_REFLECTION_MEDIUM_CAPACITY];
-}
-export Frame medium_visibility_frame() {return frame;}
-export uint medium_visibility_sample() {return 0u;}
-export uint2 medium_size() {return vork_dimensions(receivers);}
-#else
-export float3 medium_cached_visibility(float3 position,uint light) {return float3(0.);}
-#endif
-static uint medium_sample_index;
-export Frame medium_frame() {Frame f=frame;f.temporal.x=float(medium_sample_index);f.temporal.y*=float(max(frame.sampling.w,1u));return f;}
-#ifdef VORK_MEDIUM_MESH_SOURCES
-import vork_medium_mesh;
-import vork_medium_shadow;
-public float3 reflection_medium_mesh<P:IProgram>(float3 position,float3 ray,float g) {
-    let f=medium_frame();
-    return medium_mesh_incident<P,ReflectionGeometry>(ray_scene,ray_alpha,reflection_emitter_weights,f.medium.y,position,ray,g,medium_shadow_pixel(position),uint(f.temporal.x),uint(f.temporal.y));
-}
-#endif
-export uint medium_word(uint index) {return material_words[index];}
-export Light medium_light(uint index) {return lights[index];}
-export float3 medium_environment_radiance(float3 direction) {return reflection_fallback(direction,0.,frame,env_specular,env_sampler);}
-export uint medium_light_list(float3 position,out uint base) {base=0u;return uint(frame_light_count(frame));}
-export uint medium_light_index(uint base,uint next) {return next;}
-public float3 reflection_medium_visibility<P:IProgram>(float3 position,uint index) {
-    return hit_shadow<P,ReflectionGeometry>(ray_scene,ray_alpha,index,position,float3(0.),float3(0.),uint(medium_frame().temporal.x),uint(medium_frame().temporal.y));
-}
-#endif
 struct SurfaceHits<V:IVariant,P:IProgram> : IReflectionTrace {
     static float connection_probability() {return ray_alpha[reflection_range.z+1u]>0u ? .5 : 0.;}
     static float emitter_pdf(RayIntersection hit,float3x4 inverse,float3 from) {
@@ -178,21 +144,6 @@ struct SurfaceHits<V:IVariant,P:IProgram> : IReflectionTrace {
         }
         closest=merge_field_hits<P,ReflectionGeometry>(closest,ray_fields(ray_alpha),origin,ray,desc.TMax,REG_RAY_SPECULAR);
         var transmission=float3(1.);var source=float3(0.);
-#ifdef VORK_REFLECTION_MEDIUM
-        let fraction=sample_2d_installed(sampling,frame.sampling.x,cell,index,sampling[frame.sampling.x],REG_SAMPLING_STREAM_VOLUME).x;
-        let endpoint=closest.t<0. ? medium_infinity() : medium_receiver(closest.t);
-        medium_sample_index=index;
-        // Endpoint-emitter connections consume extinction only. Distributed fog
-        // radiance belongs solely to the direction strategy and keeps its weight.
-        let transport=connection
-            ? volume_finite<VORK_MEDIUM_STEPS,false>(origin,ray,endpoint,fraction,0xffffffffu,false)
-            : volume_finite<VORK_MEDIUM_STEPS,true,true>(origin,ray,endpoint,fraction,0xffffffffu,false);
-        transmission=transport.transmission;
-        // Only the BSDF strategy estimates distributed source radiance. The
-        // mesh-source strategy competes only for endpoint emission, so medium
-        // source must not receive its endpoint MIS weight or be counted twice.
-        if(!connection) {source=transport.source;}
-#endif
         let world_specular=site.world_specular;
         if (closest.t<0.) {
             // An escaped hardware ray sees the World rather than a local probe.
@@ -250,9 +201,9 @@ public void reflections_pixel<V:IVariant,P:IProgram>(uint3 gid) {
     let size=vork_dimensions(receivers);
     if(gid.x>=REG_REFLECTION_DISPATCH_PIXELS) {return;}
     let pixel=(reflection_range.w&~REG_REFLECTION_MERGED_SLOTS)+gid.x;
-    if(pixel>=size.x*size.y) {return;}
+    if(pixel>=size.x*size.y || (reflection_dispatch.packet.x!=0u && pixel>=reflection_dispatch.packet.y)) {return;}
     gid.xy=uint2(pixel%size.x,pixel/size.x);
-    reflection_integrate<SurfaceHits<V,P>>(gid,frame,vork_dimensions(receivers),reflection_slots,reflection_records,reflection_guides,sampling,reflection_range.xy,reflection_accumulation,output,(reflection_range.w&REG_REFLECTION_MERGED_SLOTS)!=0u);
+    reflection_integrate<SurfaceHits<V,P>>(gid,frame,vork_dimensions(receivers),reflection_slots,reflection_records,reflection_guides,sampling,reflection_range.xy,reflection_accumulation,output,(reflection_range.w&REG_REFLECTION_MERGED_SLOTS)!=0u,reflection_dispatch.packet.x,reflection_dispatch.packet.z);
 }
 [shader("compute")]
 [numthreads(REG_COMPUTE_TILE*REG_COMPUTE_TILE,1,1)]

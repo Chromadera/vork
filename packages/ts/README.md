@@ -2,6 +2,10 @@
 
 Rust-generated scene types, JSON Schema and serialization. Node 22.18+; no runtime npm dependencies.
 
+Install the published SDK and renderer with `npm install @voyager-so/vork`, then
+run `npx vork init my-shot` and follow its next steps. Older Node versions emit
+EBADENGINE warnings; upgrade before installing.
+
 Requires Node 22.18+ and npm. On older Node, upgrade (recommended), or run `node --experimental-strip-types scene.ts` instead of `node scene.ts`.
 Run `npm ci && npm run build`.
 

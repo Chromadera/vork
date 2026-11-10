@@ -44,11 +44,30 @@ test('creator initializes every language without overwriting init files', async 
       const project = path.join(root, `${language} starter project`);
       const output = await run([path.join(creator, 'cli.cjs'), project, '--language', language], root);
       assert.equal(output.match(/vork render scene.json --out render.png/g)?.length, 1);
-      assert.ok(output.includes('  npm exec --no --package=@voyager-so/vork -- vork render'));
+      assert.ok(output.includes('  npx vork render'));
+      const readme = readFileSync(path.join(project, 'README.md'), 'utf8');
+      assert.ok(readme.includes('npx vork render'));
+      assert.ok(!readme.includes('\nvork render'));
+      if (language === 'typescript') {
+        assert.ok(readme.includes('npm install @voyager-so/vork'));
+        assert.ok(!readme.includes('.local/lib/vork/sdk'));
+        assert.ok(readme.includes('--experimental-strip-types'));
+        assert.ok(readme.includes('EBADENGINE'));
+      }
+      if (language === 'python') {
+        assert.ok(readme.includes('python -m pip install "/path/to/extracted-vork/python"'));
+        assert.ok(readme.includes('packages/python'));
+        assert.ok(readme.includes('export VORK_BIN='));
+        assert.ok(readme.includes('$env:VORK_BIN = node -p'));
+        assert.ok(!readme.includes('pip install vork=='));
+        assert.ok(readme.includes('npx vork help sdk'));
+        assert.ok(!readme.includes('.local/lib/vork/python'));
+        assert.ok(!readme.includes('Programs\\vork\\python'));
+      }
       assert.ok(!output.includes('--profile std/draft'));
       const baseline = path.join(root, `${language} baseline`);
       await promisify(execFile)(engine, ['init', baseline, '--language', language], {env});
-      for (const file of readdirSync(baseline).filter(name => name !== 'package.json')) {
+      for (const file of readdirSync(baseline).filter(name => !['package.json', 'README.md'].includes(name))) {
         assert.deepEqual(readFileSync(path.join(project, file)), readFileSync(path.join(baseline, file)));
       }
       const manifest = JSON.parse(readFileSync(path.join(project, 'package.json')));

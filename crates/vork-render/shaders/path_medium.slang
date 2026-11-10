@@ -1,6 +1,7 @@
 // Free-flight estimator over the shared point/domain service. Majorants and
 // real/null-event weights are estimator state; all distances are world metres.
 import vork_constants;
+import vork_medium_point;
 // Outward addition for nonnegative extinction bounds. Promote subnormals
 // before arithmetic so optional GPU flush-to-zero cannot erase a bound.
 float medium_majorant_normalize(float value) {
@@ -22,12 +23,14 @@ struct PathFreeFlight {
     float3 weight; // RGB transmittance divided by the sampled distance measure.
     bool event;
 };
-PathFreeFlight medium_free_flight(float3 extinction,float limit,float2 u) {
+PathFreeFlight medium_free_flight(float3 extinction,float limit,float2 u,bool infinite=false) {
     let channel=min(uint(u.x*3.),2u);
     let sigma=extinction[channel];
     let distance=sigma>0. ? -log(1.-u.y)/sigma : REG_FP32_MAX;
-    PathFreeFlight result;result.distance=min(distance,limit);result.event=distance<limit;
-    let transmission=exp(-extinction*result.distance);
+    PathFreeFlight result;result.event=infinite ? sigma>0. : distance<limit;
+    result.distance=result.event ? distance : limit;
+    if(result.event && !isfinite(distance)) {result.weight=float3(0.);return result;}
+    let transmission=infinite && !result.event ? medium_infinite_transmittance(extinction) : exp(-extinction*result.distance);
     // Uniform spectral-channel mixture, including zero-extinction channels.
     // Collision density and boundary survival are different measures.
     let density=result.event ? extinction*transmission : transmission;
@@ -36,7 +39,6 @@ PathFreeFlight medium_free_flight(float3 extinction,float limit,float2 u) {
     return result;
 }
 
-import vork_medium_point;
 // Inverse integrated exponential extinction, in world metres. The small-ratio
 // expansion uses a precision-derived switch, not a transport distance cutoff.
 float medium_exponential_distance(float amplitude,float log_density,float slope,float optical) {

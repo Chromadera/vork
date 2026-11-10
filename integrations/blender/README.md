@@ -55,10 +55,33 @@ through Mapping rotations (including Texture inverse rotation and positive
 uniform scale); and binary Mix/MixRGB branches driven by Is Camera Ray. Mapping
 lookup rotations become inverse light transforms after Z-up to Y-up conversion.
 An authored constant camera branch stays separate from World illumination.
-An active constant Volume Scatter with Henyey–Greenstein phase becomes an
-`std/fog` world medium with its density, its colour as `scattering`, zero `absorption`
-and its anisotropy. Material Volume Scatter/Emission and Principled Volume convert
-through `blender.volume` (Blender's Principled Volume formulas, including blackbody). No node interpreter is added to the renderer.
+
+### Fog and volumes
+
+Vork 0.4 stage 1 admits finite homogeneous fog in closed convex carriers and
+constant or exponential-height world fog through complete-camera path transport,
+including shadows and independent fog overlapping OpenPBR glass. See
+[`vork help fog`](../../docs/help/fog.md) and the complete
+[`examples/fog.json`](../../examples/fog.json). This is a 0.4 source feature;
+released 0.2/0.3 binaries do not gain it by selecting a different profile.
+
+The bridge's existing World Volume Scatter lowering still emits the removed
+`std/fog` program. Rewrite that output to an authored `medium` program, with physical
+RGB `scattering = density * colour`, zero `absorption` and the original
+anisotropy strictly between -1 and 1. Attach it as `medium` on the environment
+light. This is an explicit scene rewrite, not a compatibility alias. For height
+haze multiply absorption and scattering by `exp(-falloff * (ctx.world_position.y - base_height))`, with coefficients at `base_height` and inverse-metre `falloff`; preserve zero channels explicitly when the exponential overflows. See the authored program in `examples/fog-height.slang`. Do not substitute height fog for arbitrary linked density graphs.
+
+Volume-only Scatter/Emission translation uses numeric `blender.volume` helper
+functions. Only homogeneous coefficients with bounded callback work and closed
+convex carriers (at most eight, each at most 32 triangles) fit stage 1. Combined
+surface/volume programs, subsurface surfaces (including animated/textured
+subsurface activation), general procedural density, grids and arbitrary
+Principled Volume graphs remain unsupported. Use a separate constant fog carrier
+overlapping `std/openpbr` glass with subsurface_weight zero, or render unsupported volumes externally and
+composite an image plate. `std/fog` and `blender/principled_volume` remain removed.
+Importing `blender.volume` alone is not an admission guarantee. The bridge's
+translation paths have not been newly qualified against Blender by this change.
 
 `UnsupportedWorld` identifies the node/socket when the graph cannot be represented.
 Procedural colours, fractional mixtures, linked mapping parameters/strength,
@@ -132,8 +155,9 @@ translated. Each returned material ID has a `writer.reports[id]` record with its
 status and material/node/socket/reason/replacement substitutions. Persist these
 records with the scene; a partial status does not certify visual fidelity.
 Linked displacement and volume on surface materials are reported and omitted.
-Supported volume-only Emission and Volume Scatter graphs produce numeric medium
-programs. Other volume-only graphs receive a transparent surface with an explicit
+The volume-only Emission and Volume Scatter lowering produces numeric
+medium programs subject to the [fog and volume limitations](#fog-and-volumes). Other volume-only graphs receive a transparent
+surface with an explicit
 missing transport report so they do not become opaque black occluders.
 Strict translation remains the default. No source graph is modified.
 
@@ -216,8 +240,10 @@ normalization changes retain initial numeric data across the clip; shape and
 shadow toggles retain their initial configuration and report it. Animated material
 values remain source-frame snapshots and are explicitly reported.
 
-Volume-only Emission and Volume Scatter graphs export native numeric medium
-programs, leaving no opaque fallback shell. Surface-dependent fields remain
+Volume-only Emission and Volume Scatter translations export numeric
+medium programs, leaving no opaque fallback shell. Stage 1 admission still requires
+the homogeneous coefficients, convex carriers and explicit scene rewrites described
+in [fog and volumes](#fog-and-volumes). Surface-dependent fields remain
 reported defaults because medium inputs have no surface UV/frame context.
 Unsupported scattering phases use a reported Henyey-Greenstein approximation.
 In best effort mode, Light Path uses reported primary-camera values; shadow and
@@ -248,3 +274,36 @@ fields keep the other Principled responses and report omitted subsurface.
 Bounded media also omit diffusion with a report while retaining the medium.
 
 Denoising settings map to guides, prefilter and quality.
+
+The comparison bridge lowers constant/evaluable Cycles light emission graphs,
+including Blackbody, scalar Math/Map Range and shader mixtures. Ray-dependent
+factors that cannot be represented by vork light controls produce a prominent
+`BRIDGE SUBSTITUTION` on stderr and a named `export-report.json` omission;
+the whole unsupported graph falls back to datablock energy, exposure, colour
+and temperature. A linked factor never uses its unlinked socket default: that
+proxy overlit Monster and measured worse than the datablock fallback. Constant
+light graphs multiply datablock power/colour, as in Cycles.
+
+
+
+Mixed directional Worlds can be evaluated by Cycles into a 2048×1024 float32
+scene-linear environment map during export. This needs a configured Cycles
+device. The bake isolates its scene and leaves the source settings intact;
+`world_bakes` records the finite directional resampling. Observer-dependent
+coordinates and unrepresentable ray contexts are rejected with a named
+substitution, including the replacement lighting/background contract.
+
+Object camera, shadow, diffuse, glossy and transmission visibility is attached
+to exact exported glTF node indices through asset overrides. Volume-scatter
+visibility has no independent vork equivalent: every nondefault source value
+is reported explicitly, while the five supported controls remain independent.
+
+View curves and white balance belong to the generated display program together
+with AgX/Filmic/Standard, exposure and gamma. PNG/video use that program; EXR and
+float outputs bypass it. Exported display LUTs are bound explicitly. Unsupported
+curve shapes remain reported substitutions rather than scene-linear compositors.
+
+On transparent film, the display ABI supplies unassociated RGB without alpha.
+Curves therefore cannot reproduce Blender's premultiplied-curve RGB for partial
+coverage; export records that display-only substitution explicitly. Alpha and
+raw scene-linear outputs remain intact.

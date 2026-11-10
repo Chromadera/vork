@@ -5,6 +5,8 @@ use crate::*;
 use ::vork_scene::v2::{self, ComputeSchedule};
 use std::{collections::BTreeSet, fmt::Write as _, sync::Mutex};
 
+pub(crate) type InputSampler<'a> = dyn FnMut(&mut wgpu::CommandEncoder, ComputeSchedule, &vork_time::Request) -> Result<()> + 'a;
+
 pub(crate) const CONTEXT_BINDINGS: &str = "struct VorkTick { uint frame; float time; float dt; uint reserved; };\n[[vk::binding(0,0)]] ConstantBuffer<VorkTick> vork_tick;\nstruct VorkOffset { uint4 value; };\n[[vk::binding(1,0)]] ConstantBuffer<VorkOffset> vork_offset;\n";
 
 // Integer exponent checks remain valid under native fast-math compilation.
@@ -15,8 +17,197 @@ fn finite4(v:vec4<f32>)->bool {return all((bitcast<vec4<u32>>(v) & vec4<u32>(0x7
 "#;
 
 /// Declared compute bindings conservatively publish writes to their named source.
+pub(crate) struct PreparedProgram {
+    pub artifact:vork_slang::ComputeProgram,
+    pub header:String,
+    pub origin:std::path::PathBuf,
+    pub identity:vork_slang::InputIdentity,
+    pub input_binding:u32,
+    key:blake3::Hash,
+    used:BTreeSet<u32>,
+    implicit:Vec<GeometryInputBinding>,
+}
+pub(crate) type Prepared=std::collections::BTreeMap<(String,Option<String>),PreparedProgram>;
+pub(crate) fn prepare(r:&Renderer,source:&v2::Scene,base:&std::path::Path,attributes:Option<&ProgramBuffers>,sources:&[Option<&v2::Node>])->Result<Prepared> {
+    prepare_with_packed(r,source,base,attributes,sources,&BTreeSet::new())
+}
+pub(crate) fn prepare_with_packed(r:&Renderer,source:&v2::Scene,base:&std::path::Path,attributes:Option<&ProgramBuffers>,sources:&[Option<&v2::Node>],packed:&BTreeSet<String>)->Result<Prepared> {
+    if !source.programs.values().any(|program|program.is_compute()) {return Ok(Default::default());}
+    let named=attributes.context("compute requires named buffers")?;
+    let mut geometry=std::collections::BTreeMap::new();
+    for node in sources.iter().flatten() {
+        if let v2::NodeKind::Mesh {geometry:name,..}=&node.kind {
+            let Some(shape)=source.geometry.get(name).filter(|shape|crate::computed_geometry::dynamic(source,shape)) else {continue;};
+            if geometry.contains_key(name) {continue;}
+            let names:BTreeSet<String>=shape.attributes.values().chain(shape.widths.iter()).chain(shape.count.iter()).chain(shape.ids.iter()).cloned().collect();
+            let (programs,state)=geometry_solver_dependencies(source,names.clone());
+            let plan=private_geometry_plan(named,&state,&names)?;
+            geometry.insert(name.clone(),(programs,plan.buffers));
+        }
+    }
+    let global=global_solver_consumers(source,sources);
+    let mut prepared=Prepared::new();
+    for (name,program) in source.programs.iter().filter(|(_,program)|program.is_compute()) {
+        if global.contains(name) || !geometry.values().any(|(programs,_)|programs.contains(name)) {
+            prepared.insert((name.clone(),None),prepare_program(r,source,base,named,named,None,false,name,program)?);
+        }
+    }
+    for (geometry,(programs,buffers)) in &geometry {
+        // Global consumers compile without a geometry header: they cannot read
+        // predecessor pages or per-object constants. Share only whole closures.
+        if programs.is_subset(&global) { continue; }
+        for name in programs {
+            prepared.insert((name.clone(),Some(geometry.clone())),prepare_program(r,source,base,named,buffers,Some(&source.geometry[geometry]),packed.contains(geometry),name,&source.programs[name])?);
+        }
+    }
+    Ok(prepared)
+}
+fn prepare_program(r:&Renderer,source:&v2::Scene,base:&std::path::Path,named:&ProgramBuffers,attributes:&ProgramBuffers,geometry:Option<&v2::Geometry>,packed:bool,name:&str,program:&v2::Program)->Result<PreparedProgram> {
+    let threads=program.dispatch.context("compute dispatch required")?.threads();
+            let used: BTreeSet<_> = program
+                .bindings
+                .values()
+                .flat_map(|b| attributes.bindings[b].spans.iter().map(|s| s.page))
+                .collect();
+            ensure!(
+                used.len() as u32 <= r.device.limits().max_storage_buffers_per_shader_stage,
+                "compute {name}: too many buffer pages"
+            );
+            let atomic_pages: BTreeSet<_> = program.bindings.values()
+                .filter(|name| matches!(source.buffers[*name].element_type, v2::BufferType::U32))
+                .flat_map(|name| attributes.bindings[name].spans.iter().map(|span| span.page)).collect();
+            let mut header = String::from(CONTEXT_BINDINGS);
+            for (i, page) in used.iter().enumerate() {
+                writeln!(
+                    header,
+                    "[[vk::binding({},0)]] RWStructuredBuffer<{}> vork_page_{page};",
+                    i + 2, if atomic_pages.contains(page) { "Atomic<uint>" } else { "uint" }
+                )?;
+            }
+            for (binding, buffer) in &program.bindings {
+                let layout = &attributes.bindings[buffer];
+                if let Some([x,y,z]) = source.buffers[buffer].dims {
+                    writeln!(header, "static const uint3 {binding}_dims = uint3({x}u,{y}u,{z}u);")?;
+                }
+                layout
+                    .count
+                    .checked_mul(layout.width)
+                    .context("compute binding exceeds u32 word addressing")?;
+                writeln!(
+                    header,
+                    "static const uint {binding}_count = {};\nstatic const uint _vork_{binding}_width = {};",
+                    layout.count, layout.width
+                )?;
+                writeln!(header, "uint _vork_{binding}_load(uint word) {{")?;
+                for span in &layout.spans {
+                    let first = span.first * layout.width;
+                    let end = (span.first + span.count) * layout.width;
+                    writeln!(
+                        header,
+                        "if(word >= {first} && word < {end}) return vork_page_{}[{} + word - {first}]{};",
+                        span.page, span.offset, if atomic_pages.contains(&span.page) { ".load()" } else { "" }
+                    )?;
+                }
+                writeln!(
+                    header,
+                    "return 0; }}\nvoid _vork_{binding}_store(uint word, uint value) {{"
+                )?;
+                for span in &layout.spans {
+                    let first = span.first * layout.width;
+                    let end = (span.first + span.count) * layout.width;
+                    writeln!(
+                        header,
+                        "if(word >= {first} && word < {end}) {{ vork_page_{}[{} + word - {first}]{}; return; }}",
+                        span.page, span.offset, if atomic_pages.contains(&span.page) { ".store(value)" } else { " = value" }
+                    )?;
+                }
+                header.push_str("}\n");
+                if matches!(source.buffers[buffer].element_type, v2::BufferType::U32) {
+                    writeln!(header, "uint {binding}_atomic_min(uint i, uint value) {{")?;
+                    for span in &layout.spans {
+                        let end = span.first + span.count;
+                        writeln!(header, "if(i >= {}u && i < {end}u) {{ return vork_page_{}[{}u + i - {}u].min(value); }}", span.first, span.page, span.offset, span.first)?;
+                    }
+                    header.push_str("return 0xffffffffu; }\n");
+                }
+                typed_accessors(&mut header, binding, source.buffers[buffer].element_type)?;
+            }
+            let implicit = geometry_input_header(&mut header, source,
+                geometry, packed, named, attributes, program, &used, used.len() as u32 + 2)?;
+            let input_binding = used.len() as u32 + 2 + implicit.len() as u32;
+            let (text, origin) = programs::program_source(base, name, program)?;
+            let key = blake3::hash(
+                format!(
+                    "compute-tiled:{threads:?}:{}:{}:{}:{}:{}:{header}:{text}",
+                    vork_slang::VERSION,
+                    vork_slang::ABI_VERSION,
+                    constants::PROGRAM_WORKGROUP,
+                    origin.display(),
+                    name
+                )
+                .as_bytes(),
+            );
+            let abi=programs::abi();
+            let compiler=vork_slang::Compiler::discover();
+            let inputs=programs::bound_program_identity(&r.disk_cache,&compiler,&abi,&text,&origin,&header)?;
+            let compiler=compiler.with_identity(&inputs);
+            let artifact = programs::cached(
+                r,
+                key,
+                &compiler,
+                &abi, &text, &origin,
+                |compiler| {
+                    compiler.compile_compute(
+                        &text,
+                        &origin,
+                        &header,
+                        constants::PROGRAM_WORKGROUP,
+                        threads,
+                    )
+                },
+            )?;
+    Ok(PreparedProgram {artifact,header,origin,identity:inputs,key,used,implicit,input_binding})
+}
+
 pub(crate) fn writes_buffer(scene: &v2::Scene, name: &str) -> bool {
     scene.programs.values().any(|p|p.is_compute() && p.bindings.values().any(|b|b==name))
+}
+
+/// Allocate evaluated inputs only for entries that actually read them.
+pub(crate) fn predecessor_geometries(prepared: &Prepared) -> Result<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for ((_, geometry), program) in prepared {
+        let Some(geometry) = geometry else { continue; };
+        let mut shader = program.artifact.wgsl.clone();
+        if !program.artifact.inputs.fields.is_empty() {
+            writeln!(shader, "@group(0) @binding({}) var<storage,read> vork_compute_inputs:array<u32>; fn vork_material_word(i:u32)->u32{{return vork_compute_inputs[i];}}", program.input_binding)?;
+        }
+        let used = used_compute_bindings(&shader)?;
+        if program.implicit.iter().any(|binding| used.contains(&binding.binding)
+            && matches!(binding.input, GeometryInput::Predecessor(_))) {
+            names.insert(geometry.clone());
+        }
+    }
+    Ok(names)
+}
+/// Named tables use the same reflected entry bindings as predecessor columns.
+pub(crate) fn reference_geometries(scene: &v2::Scene, prepared: &Prepared) -> Result<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for ((program_name, _), program) in prepared {
+        let mut shader = program.artifact.wgsl.clone();
+        if !program.artifact.inputs.fields.is_empty() {
+            writeln!(shader, "@group(0) @binding({}) var<storage,read> vork_compute_inputs:array<u32>; fn vork_material_word(i:u32)->u32{{return vork_compute_inputs[i];}}", program.input_binding)?;
+        }
+        let used = used_compute_bindings(&shader)?;
+        if program.implicit.iter().any(|binding| used.contains(&binding.binding)
+            && matches!(binding.input, GeometryInput::Reference)) {
+            names.extend(scene.materials.values().filter(|material| material.program == *program_name)
+                .flat_map(|material| material.inputs.values()).filter_map(|input| match input {
+                    v2::Input::Geometry(binding) => Some(binding.geometry.clone()), _ => None,
+                }));
+        }
+    }
+    Ok(names)
 }
 pub(crate) fn writes_instance_attributes(scene: &v2::Scene, node: &v2::Node, columns: &[&str]) -> bool {
     matches!(&node.kind,v2::NodeKind::Mesh {instances:Some(inst),..} if inst.attributes.iter()
@@ -33,7 +224,24 @@ pub(crate) fn places_instances(scene: &v2::Scene, node: &v2::Node) -> bool {
         || spatial_instances(scene,node)
 }
 
+// State is canonical as a whole: scratch and private ping-pong buffers can
+// contain geometry even when only one column is published to a mesh. Never
+// split that state into a GPU geometry tier and a partial disk checkpoint.
+// Placement-only simulations retain whole-state disk snapshots: those opaque
+// bytes are never consumed as CPU geometry or used to construct a draw.
+// Named collider inputs are sampled geometry too; their full input history is
+// not part of the disk lineage, so those consumers must retain GPU-only state.
+fn geometry_checkpoints(scene: &v2::Scene) -> bool {
+    scene.simulation.is_some()
+        && (scene.geometry.values().any(|g| crate::computed_geometry::dynamic(scene, g))
+            || !crate::geometry_reference::names(scene).is_empty())
+}
+
+include!("geometry_solver.rs");
+include!("geometry_inputs.rs");
+
 struct Dispatch {
+    queries: bool,
     pipeline: wgpu::ComputePipeline,
     tiles: Vec<(wgpu::BindGroup, [u32; 3])>,
     schedule: ComputeSchedule,
@@ -49,10 +257,17 @@ impl Dispatch {
     }
 }
 pub(crate) struct Compute {
+    geometry_inputs: Option<crate::geometry_sampling::Inputs>,
+    trace: Option<crate::compute_trace::Queries>,
     dispatches: Vec<Dispatch>,
+    geometry_scopes: Vec<GeometryScope>,
+    previous_state: PreviousState,
     pages: Vec<wgpu::Buffer>,
+    /// Placement readers bind the original named namespace, not solver pages.
+    named_pages: usize,
     initial: Vec<wgpu::Buffer>,
     previous: Vec<wgpu::Buffer>,
+    placement_ranges: Vec<(usize, u64, u64)>,
     device: wgpu::Device,
     timestamp_period: f32,
     simulation: Option<v2::Simulation>,
@@ -60,6 +275,7 @@ pub(crate) struct Compute {
     frame_ranges: Vec<(usize, u64, u64)>,
     frame_sources: Vec<String>,
     checkpoint_store: disk_cache::Store,
+    gpu_only_checkpoints: bool,
     identity: blake3::Hash,
     tick: wgpu::Buffer,
     fps: f32,
@@ -103,6 +319,7 @@ pub(crate) struct Cursor {
     simulation: Option<u32>,
     resident: std::collections::VecDeque<(u32, crate::residency::Cache<wgpu::Buffer>)>,
     pub(crate) requested: std::collections::BTreeMap<u32,usize>,
+    placement_history: std::collections::BTreeMap<[u32;2], crate::residency::Cache<wgpu::Buffer>>,
     retention_stride: Option<u32>,
     pub(crate) placement_revision: u64,
     pub(crate) publications: std::collections::BTreeMap<String, u64>,
@@ -266,23 +483,88 @@ pub(crate) struct Slot {
     objects: Vec<std::ops::Range<u32>>,
 }
 impl Compute {
+    #[cfg(test)]
+    pub(crate) fn test_install(r:&Renderer,source:&v2::Scene,base:&std::path::Path,attributes:Option<&ProgramBuffers>,sources:&[Option<&v2::Node>],roots:&[install::MeshRoot],draws:&[install::Draw],rate:vork_time::Time,duration:impl Into<vork_time::Clock>)->Result<Option<Self>> {
+        let prepared=prepare(r,source,base,attributes,sources)?;
+        Self::install(r,source,base,attributes,&prepared,None,sources,roots,draws,rate,duration,None,None)
+    }
     pub(crate) fn install(
         r: &Renderer,
         source: &v2::Scene,
         base: &std::path::Path,
         attributes: Option<&ProgramBuffers>,
+        prepared: &Prepared,
+        query_scene: Option<crate::compute_trace::Scene<'_>>,
         sources: &[Option<&v2::Node>],
         roots: &[install::MeshRoot],
         draws: &[install::Draw],
         rate: vork_time::Time,
         duration: impl Into<vork_time::Clock>,
+        geometry_inputs: Option<crate::geometry_sampling::Inputs>,
+        mut sample: Option<&mut InputSampler<'_>>,
     ) -> Result<Option<Self>> {
         if !source.programs.values().any(|p| p.is_compute()) && !draws.iter().any(|draw|draw.computed) {
             return Ok(None);
         }
         let fps=rate.as_f32();
         let attributes = attributes.context("compute requires named buffers")?;
-        let pages = attributes.storage.clone();
+        let mut pages = attributes.storage.clone();
+        let global_programs = global_solver_consumers(source, sources);
+        let mut geometry_scopes = Vec::new();
+        let mut copy = r.device.create_command_encoder(&Default::default());
+        for draw in draws.iter().filter(|draw| draw.computed) {
+            let root = &roots[draw.object as usize];
+            if let Some(scope) = geometry_scopes.iter_mut().find(|scope: &&mut GeometryScope|
+                scope.node == root.node && scope.instance == root.instance_index) {
+                scope.objects.insert(draw.object);
+                continue;
+            }
+            let Some(v2::Node { kind: v2::NodeKind::Mesh { geometry, .. }, .. }) = sources[root.node] else { continue; };
+            let geometry_name = geometry.clone();
+            let geometry = &source.geometry[&geometry_name];
+            let names: BTreeSet<String> = geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.count.iter()).chain(geometry.ids.iter()).cloned().collect();
+            let (programs, state) = geometry_solver_dependencies(source, names.clone());
+            if !programs.is_empty() && programs.is_subset(&global_programs) {
+                // Keep the geometry view, but alias its geometry-independent named
+                // state and schedule the connected programs only once globally.
+                geometry_scopes.push(GeometryScope {objects:BTreeSet::from([draw.object]),node:root.node,
+                    instance:root.instance_index,geometry:geometry_name,programs:BTreeSet::new(),
+                    buffers:ProgramBuffers {storage:attributes.storage.clone(),bindings:attributes.bindings.clone(),initial_identity:attributes.initial_identity.clone()},
+                    pages:(0..attributes.storage.len()).collect()});
+                continue;
+            }
+            let (buffers, scope_pages) = private_geometry_buffers(r, attributes, &state, &names, &mut pages, &mut copy)?;
+            geometry_scopes.push(GeometryScope { objects: BTreeSet::from([draw.object]), node: root.node,
+                instance: root.instance_index, geometry: geometry_name, programs, buffers, pages: scope_pages });
+        }
+        if !geometry_scopes.is_empty() { crate::command_finish::Segments::submit(&r.queue, copy); }
+        let mut initial = Vec::new();
+        let mut previous = Vec::new();
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+        for (index, page) in pages.iter().enumerate() {
+            let buffer = crate::gpu_memory::buffer(
+                &r.device,
+                &wgpu::BufferDescriptor {
+                    label: Some("compute initial page"),
+                    size: page.size(),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                },
+            );
+            encoder.copy_buffer_to_buffer(page, 0, &buffer, 0, page.size());
+            initial.push(buffer);
+            if index < attributes.storage.len() { previous.push(crate::gpu_memory::buffer(
+                &r.device,
+                &wgpu::BufferDescriptor {
+                    label: Some("requested previous placement pose"),
+                    size: page.size(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+                        | if cfg!(test) { wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::empty() },
+                    mapped_at_creation: false,
+                },
+            )); }
+        }
+        let mut previous_state = PreviousState::default();
         let mut dispatches = Vec::new();
         let mut identity = blake3::Hasher::new();
         identity.update(&serde_json::to_vec(&source.simulation)?);
@@ -314,7 +596,20 @@ impl Compute {
                 placement_sources.extend(inst.count.iter().cloned());
             }
         }
+        let filters:Vec<_>=prepared.values().flat_map(|p|p.artifact.queries.iter().copied()).collect();
+        let trace=if filters.is_empty() {None} else {Some(crate::compute_trace::Queries::new(r,&filters,source,query_scene.context("compute trace requires an installed geometry snapshot")?,roots,draws)?)};
+        if let Some(trace)=&trace {identity.update(trace.identity.as_bytes());}
+        // Global named readers retain their original namespace. Geometry
+        // consumers bind only their object's dependency slice.
+        let mut programs = Vec::new();
         for (name, program) in source.programs.iter().filter(|(_, p)| p.is_compute()) {
+            if global_programs.contains(name) || !geometry_scopes.iter().any(|scope| scope.programs.contains(name)) {
+                programs.push((name, program, attributes, None));
+            }
+            programs.extend(geometry_scopes.iter().enumerate().filter(|(_, scope)| scope.programs.contains(name))
+                .map(|(index, scope)| (name, program, &scope.buffers, Some(index))));
+        }
+        for (name, program, attributes, scope_index) in programs {
             let threads = program
                 .dispatch
                 .context("compute dispatch required")?
@@ -328,132 +623,65 @@ impl Compute {
                 groups,
                 r.device.limits().max_compute_workgroups_per_dimension,
             );
-            let used: BTreeSet<_> = program
-                .bindings
-                .values()
-                .flat_map(|b| attributes.bindings[b].spans.iter().map(|s| s.page))
-                .collect();
-            ensure!(
-                used.len() as u32 <= r.device.limits().max_storage_buffers_per_shader_stage,
-                "compute {name}: too many buffer pages"
-            );
-            let atomic_pages: BTreeSet<_> = program.bindings.values()
-                .filter(|name| matches!(source.buffers[*name].element_type, v2::BufferType::U32))
-                .flat_map(|name| attributes.bindings[name].spans.iter().map(|span| span.page)).collect();
-            let mut header = String::from(CONTEXT_BINDINGS);
-            for (i, page) in used.iter().enumerate() {
-                writeln!(
-                    header,
-                    "[[vk::binding({},0)]] RWStructuredBuffer<{}> vork_page_{page};",
-                    i + 2, if atomic_pages.contains(page) { "Atomic<uint>" } else { "uint" }
-                )?;
-            }
-            for (binding, buffer) in &program.bindings {
-                let layout = &attributes.bindings[buffer];
-                if let Some([x,y,z]) = source.buffers[buffer].dims {
-                    writeln!(header, "static const uint3 {binding}_dims = uint3({x}u,{y}u,{z}u);")?;
-                }
-                layout
-                    .count
-                    .checked_mul(layout.width)
-                    .context("compute binding exceeds u32 word addressing")?;
-                writeln!(
-                    header,
-                    "static const uint {binding}_count = {};\nstatic const uint _vork_{binding}_width = {};",
-                    layout.count, layout.width
-                )?;
-                writeln!(header, "uint _vork_{binding}_load(uint word) {{")?;
-                for span in &layout.spans {
-                    let first = span.first * layout.width;
-                    let end = (span.first + span.count) * layout.width;
-                    writeln!(
-                        header,
-                        "if(word >= {first} && word < {end}) return vork_page_{}[{} + word - {first}]{};",
-                        span.page, span.offset, if atomic_pages.contains(&span.page) { ".load()" } else { "" }
-                    )?;
-                }
-                writeln!(
-                    header,
-                    "return 0; }}\nvoid _vork_{binding}_store(uint word, uint value) {{"
-                )?;
-                for span in &layout.spans {
-                    let first = span.first * layout.width;
-                    let end = (span.first + span.count) * layout.width;
-                    writeln!(
-                        header,
-                        "if(word >= {first} && word < {end}) {{ vork_page_{}[{} + word - {first}]{}; return; }}",
-                        span.page, span.offset, if atomic_pages.contains(&span.page) { ".store(value)" } else { " = value" }
-                    )?;
-                }
-                header.push_str("}\n");
-                if matches!(source.buffers[buffer].element_type, v2::BufferType::U32) {
-                    writeln!(header, "uint {binding}_atomic_min(uint i, uint value) {{")?;
-                    for span in &layout.spans {
-                        let end = span.first + span.count;
-                        writeln!(header, "if(i >= {}u && i < {end}u) {{ return vork_page_{}[{}u + i - {}u].min(value); }}", span.first, span.page, span.offset, span.first)?;
-                    }
-                    header.push_str("return 0xffffffffu; }\n");
-                }
-                typed_accessors(&mut header, binding, source.buffers[buffer].element_type)?;
-            }
-            let (text, origin) = programs::program_source(base, name, program)?;
-            let key = blake3::hash(
-                format!(
-                    "compute-tiled:{threads:?}:{}:{}:{}:{}:{}:{header}:{text}",
-                    vork_slang::VERSION,
-                    vork_slang::ABI_VERSION,
-                    constants::PROGRAM_WORKGROUP,
-                    origin.display(),
-                    name
-                )
-                .as_bytes(),
-            );
-            let abi=programs::abi();
-            let compiler=vork_slang::Compiler::discover();
-            let inputs=programs::bound_program_identity(&r.disk_cache,&compiler,&abi,&text,&origin,&header)?;
-            let compiler=compiler.with_identity(&inputs);
-            let artifact = programs::cached(
-                r,
-                key,
-                &compiler,
-                &abi, &text, &origin,
-                |compiler| {
-                    compiler.compile_compute(
-                        &text,
-                        &origin,
-                        &header,
-                        constants::PROGRAM_WORKGROUP,
-                        threads,
-                    )
-                },
-            )?;
+            let scope = scope_index.map(|index| &geometry_scopes[index]);
+            let prepared=prepared.get(&(name.clone(),scope.map(|scope|scope.geometry.clone())))
+                .with_context(||format!("compute {name}: missing prepared geometry context"))?;
+            let artifact=&prepared.artifact;
+            let used=&prepared.used;
+            let key=prepared.key;
+            let implicit=&prepared.implicit;
+            let input_binding=prepared.input_binding;
             if program.schedule == Some(ComputeSchedule::Simulation) {
                 identity.update(key.as_bytes());
                 // Bind retained simulation to the compiled code and reflected
                 // defaults, never to dependency bytes reopened after compilation.
-                identity.update(&serde_json::to_vec(&artifact)?);
+                identity.update(&serde_json::to_vec(artifact)?);
             }
             if !artifact.warnings.trim().is_empty() {
                 eprintln!("{}", artifact.warnings.trim());
             }
-            let mut types = vec![None, None];
-            types.extend(used.iter().map(|_| Some(false)));
+            let mut types = vec![(0, None), (1, None)];
+            types.extend(used.iter().enumerate().map(|(index, _)| (index as u32 + 2, Some(false))));
             let mut shader = artifact.wgsl.clone();
             let has_inputs = !artifact.inputs.fields.is_empty();
             if has_inputs {
-                let binding = types.len();
-                types.push(Some(true));
+                let binding = input_binding;
+                types.push((binding, Some(true)));
                 writeln!(
                     shader,
                     "@group(0) @binding({binding}) var<storage,read> vork_compute_inputs:array<u32>; fn vork_material_word(i:u32)->u32{{return vork_compute_inputs[i];}}"
                 )?;
             }
-            ensure!(
-                used.len() as u32 + u32::from(has_inputs)
-                    <= r.device.limits().max_storage_buffers_per_shader_stage,
-                "compute {name}: inputs and buffer pages exceed storage binding limit"
-            );
-            let pipeline = pipeline_layout(r, &shader, name, &types, "vork_entry");
+            let active = used_compute_bindings(&shader)?;
+            let mut implicit_buffers = Vec::new();
+            for binding in implicit.iter().filter(|binding| active.contains(&binding.binding)) {
+                let buffer = match binding.input {
+                    GeometryInput::Predecessor(page) => scope.and_then(|scope| scope.objects.first())
+                        .and_then(|object| geometry_inputs.as_ref().and_then(|inputs| inputs.page(*object,page)))
+                        .unwrap_or(&initial[page as usize]).clone(),
+                    GeometryInput::Reference => geometry_inputs.as_ref().and_then(|inputs|inputs.reference.as_ref()).context("geometry reference table was not installed")?.buffer.clone(),
+                    GeometryInput::Previous(local_page) => {
+                        let page = scope.map_or(local_page as usize, |scope| scope.pages[local_page as usize]);
+                        let snapshot = previous_state.bind(r, &pages, page).clone();
+                        let schedule = program.schedule.context("compute schedule required")?;
+                        for layout in program.bindings.values().map(|name| &attributes.bindings[name]) {
+                            for span in layout.spans.iter().filter(|span| span.page == local_page) {
+                                let range = (schedule, page, u64::from(span.offset)*4, u64::from(span.count)*u64::from(layout.width)*4);
+                                if !previous_state.ranges.contains(&range) { previous_state.ranges.push(range); }
+                            }
+                        }
+                        snapshot
+                    }
+                };
+                types.push((binding.binding, Some(true)));
+                implicit_buffers.push((binding.binding, buffer));
+            }
+            ensure!(types.iter().filter(|(_, ty)| ty.is_some()).count() as u32 <= r.device.limits().max_storage_buffers_per_shader_stage,
+                "compute {name}: geometry/previous-state inputs and buffer pages exceed storage binding limit");
+            let query_program=!artifact.queries.is_empty();
+            let group=if query_program {1} else {0};
+            let pipeline=if query_program {trace.as_ref().unwrap().pipeline(r,prepared,&types)?}
+                else {pipeline_layout_explicit(r,&shader,name,&types,"vork_entry")};
             let materials: Vec<_> = source
                 .materials
                 .iter()
@@ -474,8 +702,10 @@ impl Compute {
                     })
                     .transpose()?
                     .unwrap_or_default();
-                let mut words = artifact.inputs.pack(&values, |name, _| {
-                    bail!("compute input {name} must be numeric")
+                let mut words = artifact.inputs.pack(&values, |name,value| {
+                    ensure!(artifact.inputs.fields.iter().any(|field|field.name==name && field.ty==vork_slang::Type::Geometry),"compute input {name}: use a numeric input or a Geometry handle");
+                    let target=value.get("geometry").and_then(serde_json::Value::as_str).with_context(||format!("compute input {name}: Geometry requires {{geometry: mesh-node-name}}"))?;
+                    crate::geometry_reference::handle(source,target)
                 })?;
                 let animation = material.map(|(name, _)| programs::InputAnimation::new(source, base, name, &artifact.inputs, &mut words)).transpose()?.flatten();
                 if program.schedule == Some(ComputeSchedule::Simulation) {
@@ -504,23 +734,25 @@ impl Compute {
                     for (i, page) in used.iter().enumerate() {
                         entries.push(entry(
                             i as u32 + 2,
-                            pages[*page as usize].as_entire_binding(),
+                            attributes.storage[*page as usize].as_entire_binding(),
                         ));
                     }
                     if has_inputs {
                         entries.push(entry(
-                            used.len() as u32 + 2,
+                            input_binding,
                             input.as_ref().unwrap().as_entire_binding(),
                         ));
                     }
+                    for (binding, buffer) in &implicit_buffers { entries.push(entry(*binding, buffer.as_entire_binding())); }
                     let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some(name),
-                        layout: &pipeline.get_bind_group_layout(0),
+                        layout: &pipeline.get_bind_group_layout(group),
                         entries: &entries,
                     });
                     bindings.push((bind, groups));
                 }
                 dispatches.push(Dispatch {
+                    queries:query_program,
                     name: name.clone(),
                     writes: program.bindings.values().cloned().collect(),
                     writes_placement: program.bindings.values().any(|name| placement_sources.contains(name)),
@@ -595,31 +827,17 @@ impl Compute {
                 }
             }
         }
-        let mut initial = Vec::new();
-        let mut previous = Vec::new();
-        let mut encoder = r.device.create_command_encoder(&Default::default());
-        for page in &pages {
-            let buffer = crate::gpu_memory::buffer(
-                &r.device,
-                &wgpu::BufferDescriptor {
-                    label: Some("compute initial page"),
-                    size: page.size(),
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                },
-            );
-            encoder.copy_buffer_to_buffer(page, 0, &buffer, 0, page.size());
-            initial.push(buffer);
-            previous.push(crate::gpu_memory::buffer(
-                &r.device,
-                &wgpu::BufferDescriptor {
-                    label: Some("previous compute page"),
-                    size: page.size(),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                },
-            ));
-        }
+        // Only TRS and membership participate in the object bridge. In
+        // particular a cloth/particle solver's unrelated dense scratch must
+        // not be copied for every shutter sample's historical placement.
+        let mut placement_ranges: Vec<_> = instances.iter()
+            .flat_map(|instance| instance.trs.iter().flatten().chain(instance.count.iter()))
+            .flat_map(|binding| binding.spans.iter().map(move |span|
+                (span.page as usize, u64::from(span.offset)*4,
+                 u64::from(span.count)*u64::from(binding.width)*4)))
+            .collect();
+        placement_ranges.sort_unstable();
+        placement_ranges.dedup();
         let count=if dispatches.iter().any(|d|d.schedule==ComputeSchedule::Frame) {
             (duration.into().exact()*vork_time::exact::decimal(&rate.to_string())?).ceil().to_integer()
         }else{1.into()};
@@ -632,19 +850,33 @@ impl Compute {
             .flat_map(|d| d.writes.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect();
         let mut simulation_ranges = Vec::new();
         let mut frame_ranges = Vec::new();
-        for (name, binding) in &attributes.bindings {
-            let ranges = if source.simulation.as_ref().is_some_and(|s| s.state.contains(name)) {
-                &mut simulation_ranges
-            } else if frame_sources.contains(name) { &mut frame_ranges } else { continue };
-            for span in &binding.spans {
-                ranges.push((span.page as usize, u64::from(span.offset) * 4, u64::from(span.count) * u64::from(binding.width) * 4));
+        for (attributes, page_map) in std::iter::once((attributes, None))
+            .chain(geometry_scopes.iter().map(|scope| (&scope.buffers, Some(&scope.pages)))) {
+            for (name, binding) in &attributes.bindings {
+                let ranges = if source.simulation.as_ref().is_some_and(|s| s.state.contains(name)) {
+                    &mut simulation_ranges
+                } else if frame_sources.contains(name) { &mut frame_ranges } else { continue };
+                for span in &binding.spans {
+                    let page = page_map.map_or(span.page as usize, |pages| pages[span.page as usize]);
+                    ranges.push((page, u64::from(span.offset) * 4, u64::from(span.count) * u64::from(binding.width) * 4));
+                }
             }
         }
+        simulation_ranges.sort_unstable();
+        simulation_ranges.dedup();
+        frame_ranges.sort_unstable();
+        frame_ranges.dedup();
         let result = Self {
+            geometry_inputs,
+            trace,
             dispatches,
+            geometry_scopes,
+            previous_state,
+            named_pages: attributes.storage.len(),
             pages,
             initial,
             previous,
+            placement_ranges,
             device: r.device.clone(),
             timestamp_period: r.queue.get_timestamp_period(),
             simulation: source.simulation.clone(),
@@ -652,6 +884,7 @@ impl Compute {
             frame_ranges,
             frame_sources,
             checkpoint_store: r.disk_cache.clone(),
+            gpu_only_checkpoints: geometry_checkpoints(source),
             identity: identity.finalize(),
             tick,
             fps,
@@ -665,14 +898,31 @@ impl Compute {
         };
         // Install dispatches run now; seeks replay them from the same initial bytes.
         let mut cursor = result.cursor.lock().expect("compute cursor poisoned");
+        if result.dispatches.iter().any(|dispatch| dispatch.schedule == ComputeSchedule::Install) {
+            if let Some(inputs) = &result.geometry_inputs {
+                inputs.sample(&mut encoder, &vork_time::Request::Frame(0, result.rate))?;
+            }
+            if let Some(sample) = sample.as_mut() {
+                sample(&mut encoder, ComputeSchedule::Install, &vork_time::Request::Frame(0, result.rate))?;
+            }
+        }
         result.run(&mut encoder, &mut cursor, ComputeSchedule::Install, 0);
         if let Some(sim) = &result.simulation {
+            if let Some(inputs) = &result.geometry_inputs {
+                inputs.sample(&mut encoder, &vork_time::Request::Tick(0, sim.t0.clone(), sim.dt.clone()))?;
+            }
+            if let Some(sample) = sample.as_mut() {
+                sample(&mut encoder, ComputeSchedule::Install, &vork_time::Request::Tick(0, sim.t0.clone(), sim.dt.clone()))?;
+            }
             result.set_tick(&mut encoder, 0, sim.t0.as_f64(), 0., sim.seed);
             result.run_named(&mut encoder, &mut cursor, &sim.init, sim.t0.as_f64() as f32);
         }
         crate::command_finish::Segments::submit(&r.queue, encoder);
         drop(cursor);
         Ok(Some(result))
+    }
+    pub(crate) fn geometry_buffers(&self, object: u32) -> Option<&ProgramBuffers> {
+        self.geometry_scopes.iter().find(|scope| scope.objects.contains(&object)).map(|scope| &scope.buffers)
     }
     pub(crate) fn bounds(&self, draw: usize) -> Option<(Vec3, Vec3)> {
         self.instances
@@ -736,6 +986,10 @@ impl Compute {
             }
         }
     }
+    pub(crate) fn publish_queries(&self,r:&Renderer,encoder:&mut wgpu::CommandEncoder,destination:&wgpu::Buffer) {
+        if let Some(trace)=&self.trace {trace.publish(r,encoder,destination);}
+        if let Some(inputs)=&self.geometry_inputs {inputs.publish_errors(r,encoder,destination);}
+    }
     pub(crate) fn has_simulation(&self) -> bool { self.simulation.is_some() }
     pub(crate) fn has_instances(&self) -> bool {
         !self.instances.is_empty()
@@ -744,13 +998,15 @@ impl Compute {
         self.instances.iter().any(|i| i.draw == draw)
     }
     fn run(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, schedule: ComputeSchedule, frame: u32) {
+        self.previous_state.capture(encoder, &self.pages, schedule);
         for dispatch in self.dispatches.iter().filter(|d| d.schedule == schedule) {
             dispatch.publish(cursor);
             self.inputs(encoder, dispatch, frame as f32 / self.fps);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&dispatch.pipeline);
+            if dispatch.queries {self.trace.as_ref().unwrap().bind(&mut pass);}
             for (bind, groups) in &dispatch.tiles {
-                pass.set_bind_group(0, bind, &[]);
+                pass.set_bind_group(if dispatch.queries {1} else {0}, bind, &[]);
                 pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
             }
         }
@@ -772,6 +1028,7 @@ impl Compute {
         self.run_named_uploaded(encoder,cursor,names,time,None,None);
     }
     fn run_named_uploaded(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, names: &[String], time: f32, upload: Option<(&ReplayUpload,u32)>, queries: Option<&wgpu::QuerySet>) {
+        self.previous_state.capture(encoder, &self.pages, ComputeSchedule::Simulation);
         let mut remaining=names.iter().map(|name|self.dispatches.iter().filter(|d|&d.name==name).count()).sum::<usize>();
         let mut first=true;
         for name in names {
@@ -790,8 +1047,9 @@ impl Compute {
                 first=false;
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:None,timestamp_writes});
                 pass.set_pipeline(&dispatch.pipeline);
+            if dispatch.queries {self.trace.as_ref().unwrap().bind(&mut pass);}
                 for (bind, groups) in &dispatch.tiles {
-                    pass.set_bind_group(0, bind, &[]);
+                    pass.set_bind_group(if dispatch.queries {1} else {0}, bind, &[]);
                     pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
                 }
             }
@@ -836,6 +1094,7 @@ impl Compute {
         self.simulation_ranges.iter().map(|r| r.2).sum()
     }
     fn restore_checkpoint(&self, encoder: &mut wgpu::CommandEncoder, target: u32, minimum: u32) -> Option<u32> {
+        if self.gpu_only_checkpoints { return None; }
         let size = self.checkpoint_size();
         if size == 0 { return None; }
         for tick in (1..=target / CHECKPOINT_INTERVAL).rev().map(|n| n * CHECKPOINT_INTERVAL) {
@@ -878,6 +1137,76 @@ impl Compute {
                 if *count==0 { cursor.requested.remove(&tick); }
             }
         }
+        Ok(())
+    }
+    /// Historical placement is a sampled output, not another solver advance.
+    pub(crate) fn plan_placement_requests(&self, cursor: &mut Cursor, times: &[vork_time::Request], cut: bool) -> Result<()> {
+        let previous=times.iter().map(|time|if cut {Ok(time.clone())}else{time.previous(self.rate)})
+            .collect::<Result<Vec<_>>>()?;
+        let wanted=times.iter().chain(&previous).map(|time|self.request_key(time)).collect::<Result<BTreeSet<_>>>()?;
+        cursor.placement_history.retain(|key,cache|wanted.contains(key) && cache.is_resident());
+        self.plan_requests(cursor,times.iter().chain(&previous).cloned())
+    }
+    fn placement_history_buffer(&self, cursor: &Cursor) -> Option<wgpu::Buffer> {
+        let size=self.placement_ranges.iter().map(|range|range.2).sum::<u64>();
+        if size==0 || size>self.device.limits().max_buffer_size {return None;}
+        let headroom=cursor.placement_history.values().find_map(|cache|cache.get()
+            .and_then(|buffer|crate::residency::buffer_available(&self.device,&buffer)));
+        if headroom.is_some_and(|free|free<size) {return None;}
+        crate::gpu_memory::retention_buffer(&self.device,&wgpu::BufferDescriptor {
+            label:Some("historical placement columns"),size,
+            usage:wgpu::BufferUsages::COPY_SRC|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false,
+        })
+    }
+    fn save_placement_history(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, key: [u32;2], buffer: wgpu::Buffer) {
+        let mut destination=0;
+        for &(page,offset,size) in &self.placement_ranges {
+            encoder.copy_buffer_to_buffer(&self.pages[page],offset,&buffer,destination,size);
+            destination+=size;
+        }
+        let cache=crate::residency::Cache::new(&crate::gpu_memory::ledger(&self.device));
+        cache.insert(buffer,destination);
+        cursor.placement_history.insert(key,cache);
+    }
+    pub(crate) fn retain_placement_history(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, time: &vork_time::Request) -> Result<()> {
+        let key=self.request_key(time)?;
+        if cursor.placement_history.get(&key).is_some_and(|cache|cache.is_resident()) {return Ok(());}
+        if let Some(buffer)=self.placement_history_buffer(cursor) {self.save_placement_history(encoder,cursor,key,buffer);}
+        Ok(())
+    }
+    pub(crate) fn restore_placement_history(&self, encoder: &mut wgpu::CommandEncoder, cursor: &Cursor, time: &vork_time::Request) -> Result<bool> {
+        let Some(buffer)=cursor.placement_history.get(&self.request_key(time)?).and_then(|cache|cache.get()) else {return Ok(false);};
+        let mut source=0;
+        for &(page,offset,size) in &self.placement_ranges {
+            encoder.copy_buffer_to_buffer(&buffer,source,&self.previous[page],offset,size);
+            source+=size;
+        }
+        Ok(true)
+    }
+    /// Gather missing historical columns in clock order before current shutter
+    /// evaluation. Cache hits never move the canonical simulation/frame cursor.
+    pub(crate) fn prepare_placement_history(&self, r: &Renderer, cursor: &mut Cursor, times: &[vork_time::Request], cut: bool, checkpoint: &mut Option<Checkpoint>) -> Result<()> {
+        if cut {return Ok(());}
+        let mut times=times.iter().map(|time| {
+            let previous=time.previous(self.rate)?;
+            Ok((previous.exact()?,previous))
+        }).collect::<Result<Vec<_>>>()?;
+        times.sort_by(|a,b|a.0.compare(&b.0));
+        let mut encoder=r.device.create_command_encoder(&Default::default());
+        for (_,time) in times {
+            let key=self.request_key(&time)?;
+            if cursor.placement_history.get(&key).is_some_and(|cache|cache.is_resident()) {continue;}
+            // A residency miss falls back at the consumer, without first doing
+            // an unretainable historical replay in this preparation pass.
+            let Some(buffer)=self.placement_history_buffer(cursor) else {continue;};
+            let saved=self.advance_with(&mut encoder,cursor,&time,|encoder| {
+                let next=r.device.create_command_encoder(&Default::default());
+                crate::command_finish::Segments::submit(&r.queue,std::mem::replace(encoder,next));
+            })?;
+            if checkpoint.is_none() {*checkpoint=saved;}
+            self.save_placement_history(&mut encoder,cursor,key,buffer);
+        }
+        crate::command_finish::Segments::submit(&r.queue,encoder);
         Ok(())
     }
     fn restore_resident(&self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, target: u32) -> Option<u32> {
@@ -941,6 +1270,7 @@ impl Compute {
         cursor.resident.push_back((target,cache));
     }
     fn checkpoint(&self, encoder: &mut wgpu::CommandEncoder, tick: u32) -> Option<Checkpoint> {
+        if self.gpu_only_checkpoints { return None; }
         let size = self.checkpoint_size();
         if size == 0 {return None;}
         // Match retained storage ranges: page size is transfer granularity, not
@@ -972,24 +1302,32 @@ impl Compute {
     ) -> Result<Option<Checkpoint>> {
         self.advance_paged(encoder,cursor,time,constants::SCENE_BUFFER_PAGE_BYTES as u64,boundary)
     }
+    /// Use the existing cursor while refreshing external geometry at canonical
+    /// dispatch times. Installation receives the same sampler separately.
     pub(crate) fn advance_observing(
-        &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor, time: impl Into<vork_time::Request>,
+        &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor,
+        time: impl Into<vork_time::Request>,
         boundary: impl FnMut(&mut wgpu::CommandEncoder),
+        sample: Option<&mut InputSampler<'_>>,
         observe: impl FnMut(&mut wgpu::CommandEncoder,u32),
     ) -> Result<Option<Checkpoint>> {
-        self.advance_paged_observing(encoder,cursor,time,constants::SCENE_BUFFER_PAGE_BYTES as u64,boundary,observe)
+        self.advance_paged_sampling(encoder,cursor,time,constants::SCENE_BUFFER_PAGE_BYTES as u64,boundary,sample,observe)
     }
     fn advance_paged(
         &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor,
         time: impl Into<vork_time::Request>, upload_page_bytes: u64,
         boundary: impl FnMut(&mut wgpu::CommandEncoder),
     ) -> Result<Option<Checkpoint>> {
-        self.advance_paged_observing(encoder,cursor,time,upload_page_bytes,boundary,|_,_| {})
+        self.advance_paged_sampling(encoder,cursor,time,upload_page_bytes,boundary,None,|_,_| {})
     }
-    fn advance_paged_observing(
+    /// Refresh read-only geometry inputs before a canonical dispatch group.
+    /// Sampling happens at the tick's left endpoint, including replay; observing
+    /// happens after the group. Neither callback owns or advances a clock.
+    fn advance_paged_sampling(
         &self, encoder: &mut wgpu::CommandEncoder, cursor: &mut Cursor,
         time: impl Into<vork_time::Request>, upload_page_bytes: u64,
         mut boundary: impl FnMut(&mut wgpu::CommandEncoder),
+        mut sample: Option<&mut InputSampler<'_>>,
         mut observe: impl FnMut(&mut wgpu::CommandEncoder,u32),
     ) -> Result<Option<Checkpoint>> {
         let time=time.into();
@@ -1002,6 +1340,12 @@ impl Compute {
                 cursor.simulation=Some(tick);
             }
             if cursor.simulation.is_some_and(|last| target < last) {
+                if let Some(inputs) = &self.geometry_inputs {
+                    inputs.sample(encoder, &vork_time::Request::Tick(0, sim.t0.clone(), sim.dt.clone()))?;
+                }
+                if let Some(sample) = sample.as_mut() {
+                    sample(encoder, ComputeSchedule::Install, &vork_time::Request::Tick(0, sim.t0.clone(), sim.dt.clone()))?;
+                }
                 for &(page, offset, bytes) in &self.simulation_ranges {
                     encoder.copy_buffer_to_buffer(&self.initial[page], offset, &self.pages[page], offset, bytes);
                 }
@@ -1037,8 +1381,15 @@ impl Compute {
                     upload=Some(self.replay_upload(sim,step,target.min(step.saturating_add(count)),upload_page_bytes));
                 }
                 let page=upload.as_ref().unwrap();
+                if let Some(inputs) = &self.geometry_inputs {
+                    inputs.sample(encoder, &vork_time::Request::Tick(step, sim.t0.clone(), sim.dt.clone()))?;
+                }
+                if let Some(sample) = sample.as_mut() {
+                    sample(encoder, ComputeSchedule::Simulation, &vork_time::Request::Tick(step, sim.t0.clone(), sim.dt.clone()))?;
+                }
                 encoder.copy_buffer_to_buffer(&page.buffer,page.offset(step),&self.tick,0,16);
                 self.run_named_uploaded(encoder, cursor, &sim.steps, (sim.t0.as_f64() + f64::from(step) * sim.dt.as_f64()) as f32,Some((page,step)),probe.as_ref().map(|p|&p.queries));
+                cursor.simulation = Some(step + 1);
                 if let Some(probe)=probe {cursor.replay_cost=probe.resolve(encoder,self.timestamp_period);}
                 observe(encoder,step+1);
                 self.retain_resident(encoder,cursor,step+1);
@@ -1053,14 +1404,17 @@ impl Compute {
             if cursor.requested.is_empty() { cursor.resident.clear(); }
         }
         if !self.dispatches.iter().any(|d| d.schedule == ComputeSchedule::Frame) {
-            for (page, previous) in self.pages.iter().zip(&self.previous) {
-                encoder.copy_buffer_to_buffer(page, 0, previous, 0, page.size());
-            }
             return Ok(checkpoint);
         }
         let frame=nominal_frame(&time,self.rate,self.frames)?;
 
         if cursor.frame.is_some_and(|last| frame < last) {
+            if let Some(inputs) = &self.geometry_inputs {
+                inputs.sample(encoder, &vork_time::Request::Frame(0, self.rate))?;
+            }
+            if let Some(sample) = sample.as_mut() {
+                sample(encoder, ComputeSchedule::Install, &vork_time::Request::Frame(0, self.rate))?;
+            }
             for &(page, offset, bytes) in &self.frame_ranges {
                 encoder.copy_buffer_to_buffer(&self.initial[page], offset, &self.pages[page], offset, bytes);
             }
@@ -1072,25 +1426,25 @@ impl Compute {
         }
         let start = cursor.frame.map_or(0, |f| f + 1);
         for step in start..=frame {
-            for &(page, offset, bytes) in &self.frame_ranges {
-                encoder.copy_buffer_to_buffer(&self.pages[page], offset, &self.previous[page], offset, bytes);
+            if let Some(inputs) = &self.geometry_inputs {
+                inputs.sample(encoder, &vork_time::Request::Frame(step, self.rate))?;
+            }
+            if let Some(sample) = sample.as_mut() {
+                sample(encoder, ComputeSchedule::Frame, &vork_time::Request::Frame(step, self.rate))?;
             }
             self.set_tick(encoder,step,f64::from(step)*self.rate.denominator() as f64/self.rate.numerator() as f64,if step==0 {0.}else{self.rate.denominator() as f64/self.rate.numerator() as f64},0);
             self.run(encoder, cursor, ComputeSchedule::Frame, step);
-            // Initialization at t=0 has no preceding simulation frame. Its
-            // previous transforms must equal the initialized state, including
-            // after a backward seek, so first-frame motion stays zero.
-            if step == 0 {
-                for (page, previous) in self.pages.iter().zip(&self.previous) {
-                    encoder.copy_buffer_to_buffer(page, 0, previous, 0, page.size());
-                }
-            }
             cursor.frame = Some(step);
         }
-        for &(page, offset, bytes) in &self.simulation_ranges {
-            encoder.copy_buffer_to_buffer(&self.pages[page], offset, &self.previous[page], offset, bytes);
-        }
         Ok(checkpoint)
+    }
+    /// Snapshot an explicitly requested output pose, never an incidental producer
+    /// tick. The submission owner holds the single cursor lock through the copy,
+    /// subsequent current-pose evaluation and bridge consumption.
+    pub(crate) fn snapshot_placement_previous(&self, encoder: &mut wgpu::CommandEncoder) {
+        for &(page, offset, size) in &self.placement_ranges {
+            encoder.copy_buffer_to_buffer(&self.pages[page], offset, &self.previous[page], offset, size);
+        }
     }
     pub(crate) fn commands(r: &Renderer, draws: &[install::Draw]) -> wgpu::Buffer {
         let args: Vec<_> = draws
@@ -1143,7 +1497,7 @@ impl Compute {
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
         );
-        let count = self.pages.len();
+        let count = self.named_pages;
         let (pipeline, groups, indices) = self
             .bridge
             .as_ref()
@@ -1206,7 +1560,7 @@ impl Compute {
         wgpu::Buffer,
     )> {
         let mut code = String::from(FINITE_WGSL);
-        let count = self.pages.len();
+        let count = self.named_pages;
         ensure!(
             2 * count as u32 + 5 <= r.device.limits().max_storage_buffers_per_shader_stage,
             "compute instance bridge exceeds device storage binding limit"
@@ -1374,11 +1728,16 @@ pub(crate) fn pipeline_layout(
     types: &[Option<bool>],
     entry_point: &str,
 ) -> wgpu::ComputePipeline {
+    let bindings: Vec<_> = types.iter().enumerate().map(|(index, ty)| (index as u32, *ty)).collect();
+    pipeline_layout_explicit(r, source, label, &bindings, entry_point)
+}
+fn pipeline_layout_explicit(
+    r: &Renderer, source: &str, label: &str, types: &[(u32, Option<bool>)], entry_point: &str,
+) -> wgpu::ComputePipeline {
     let entries: Vec<_> = types
         .iter()
-        .enumerate()
-        .map(|(i, ty)| wgpu::BindGroupLayoutEntry {
-            binding: i as u32,
+        .map(|(binding, ty)| wgpu::BindGroupLayoutEntry {
+            binding: *binding,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: ty.map_or(wgpu::BufferBindingType::Uniform, |read_only| {
@@ -1448,6 +1807,9 @@ fn typed_accessors(
     binding: &str,
     kind: vork_scene::v2::BufferType,
 ) -> Result<()> {
+    typed_element_accessors(header, binding, kind, true)
+}
+fn typed_element_accessors(header: &mut String, binding: &str, kind: v2::BufferType, writable: bool) -> Result<()> {
     use vork_scene::v2::BufferType::*;
     let (ty, width, decode, encode) = match kind {
         F32 => ("float", 1, "asfloat", "asuint"),
@@ -1480,10 +1842,9 @@ fn typed_accessors(
             "value{field} = {decode}(_vork_{binding}_load(i*{width}+{word}));"
         )?;
     }
-    writeln!(
-        header,
-        "return value; }}\nvoid {binding}_store(uint i, {ty} value) {{ if(i >= {binding}_count) return;"
-    )?;
+    writeln!(header, "return value; }}")?;
+    if !writable { return Ok(()); }
+    writeln!(header, "void {binding}_store(uint i, {ty} value) {{ if(i >= {binding}_count) return;")?;
     for word in 0..width {
         let field = if width == 1 {
             String::new()

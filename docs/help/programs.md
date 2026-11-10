@@ -1,12 +1,17 @@
 PROGRAMS
-Use built-in materials first. Custom Slang programs provide surface shading,
-displacement, environments, cameras, sensors, compositing and compute.
+Use std/openpbr data inputs first (vork help materials). Data materials share
+the shipped evaluator; custom surfaces can add code to the scene kernel and
+increase first-render compilation time. Use programs for custom logic.
+Custom Slang programs provide surface shading,
+displacement, media, environments, cameras, sensors, compositing and compute.
+Medium coefficient units, bounds and admission: vork help fog.
 Use vork help programs --all for the advanced reference and stage declarations.
 Procedural textures: import std.procedurals; signatures: vork help std --all.
 <!-- all -->
 PROGRAM REFERENCE
 Slang modules: `import vork;`, one `struct Inputs {...}` whose initializers are
-defaults; meshes require surface (lit/displace supplement surface):
+defaults; surface meshes require surface (lit/displace supplement surface);
+medium-only carriers require medium instead (vork help fog):
   Closure|Blend|Hair surface(ShadingContext, Inputs)
     OpenPBR emission is shared by hits and light samples; lit output is authored shading.
     Light samples use zero differentials; hits retain their shading footprint.
@@ -15,6 +20,7 @@ defaults; meshes require surface (lit/displace supplement surface):
     Hair uses curve geometry and a surface stage only.
   void aov(ShadingContext, Inputs, inout AovOutputs) write_aov(output, inputs.a, value)
   Closure lit(ShadingContext, Inputs, Lighting)      shader-to-RGB: return unlit(rgb)
+  MediumCoefficients medium(MediumContext, Inputs)  physical point coefficients; vork help fog
   float3 environment(EnvironmentContext, Inputs)    radiance
   float4 composite(CompositeContext, Inputs)         vork help compositor
   CameraRay camera(CameraContext, Inputs)           camera.material; vork help light-paths
@@ -41,9 +47,30 @@ DisplacementContext has only undisplaced object-local POSITION, NORMAL and time 
 Per-instance displacement values use bound Attribute<T> inputs.
 For topology:"points", displace evaluates once per undisplaced object-local point centre and translates the whole sphere without changing its width; NORMAL and generated surface UV/tangent inputs are unavailable.
 
+GEOMETRIC QUERIES (surface and compute)
+TraceHit trace(float3 origin, float3 direction, float min_distance,
+               float max_distance, uint mask=255u, uint object=0xffffffffu)
+Closest geometric triangle boundary in world space; direction is normalized.
+Finite distances require 0 <= min_distance <= max_distance. Invalid inputs miss.
+Use ctx.POSITION and an explicit minimum distance to avoid self-intersection.
+The query ignores opacity and materials, including normal maps and backface culling.
+Hit fields: hit, distance, position, geometric_normal, shading_normal, object_id,
+instance_index, primitive_id, barycentrics (three weights), uv (UV0), front_facing.
+Object selection is exact public identity; mask selects the low eight AS visibility bits.
+Miss: distance=-1, identities=0xffffffffu, other fields zero.
+Reached calls count as work even when hit data is ignored; dead branches do not.
+Use fixed bounded loops. Work exhaustion refuses the exposure; it never publishes
+partial output. Compute queries require immutable triangle targets: select a static
+collider's pass_index with the object argument.
+Animated or computed target geometry/placement is refused, including self-dependencies.
+Compute queries retain that installed snapshot through ticks and replay. Implicit
+geometry queries are not yet qualified. Raster installs ray resources when queries
+need them. Real-time queries require
+a separately qualified profile and frame budget.
+
 Noise primitives: import std.procedurals; compose noise/ramps for wood, marble or stone.
 Wave and brick patterns: import blender.procedurals; vork help blender --all.
-signatures, case-sensitive enums and a surface example: vork help std --all.
+signatures and case-sensitive enums: vork help std --all.
 
 SIMULATION
 Use scene.simulation with t0, positive dt, seed, state buffer names, and ordered init/steps
@@ -57,10 +84,47 @@ Keep kernels race-free for reproducible seeking on the same backend. Use compute
 placement for opaque, unskinned geometry. Computed instance material attributes
 follow GPU updates; displacement cannot read them. Author transparent placements.
 
+
+GEOMETRY PROGRAM INPUTS
+Geometry programs automatically receive read-only predecessor attributes. Built-in channels
+use geometry_POSITION_load(index), geometry_NORMAL_load(index), and the other
+present glTF semantics. All authored channels also have typed
+geometry_attribute_N_load(index), numbered in attribute-name order, starting at zero;
+this includes custom names that are not Slang identifiers. Each accessor has a _count.
+geometry_vertex_capacity is the installed capacity; geometry_vertex_count()
+returns predecessor membership. Authored point widths and IDs use
+geometry_width_load(index) and geometry_id_load(index).
+Native triangle morphs and skinning evaluate before these reads: simulation
+initialization samples t0, and each tick samples its left endpoint, including replay.
+Each object's input preserves authored vertex rows, including unreferenced rows.
+
+A named compute input may use {"geometry":"body"}, where body names a native mesh
+object. Declare Geometry body in Inputs. geometry_POSITION_load(inputs.body,i)
+and geometry_NORMAL_load(inputs.body,i) read its local vertices;
+geometry_to_world(inputs.body,p) applies its sampled placement.
+geometry_vertex_count(inputs.body), geometry_triangle_count(inputs.body), and
+geometry_triangle_load(inputs.body,triangle) expose fixed triangle connectivity.
+geometry_source_vertex_load(inputs.body,i) retains authored vertex identity;
+geometry_object_id(inputs.body) retains the installed object identity.
+Colliders may move, morph, skin or displace: inputs sample at initialization and
+each canonical tick, including replay. References are read-only and cannot form
+cycles. Use one separately named native triangle object per collider instance;
+imported, subdivided and compute-produced collider streams report their supported
+proxy alternative. Static trace() queries retain their separate snapshot contract.
+
+Every compute binding also has previous_<binding>_load(index) and _count, with its
+ordinary element type. These read the state before the whole scheduled tick, including
+when several ordered simulation steps write that binding. Initialization reads the initial
+buffer bytes; the first simulation step reads initialized S0. Frame schedules follow their
+existing nominal frame clock. These inputs expose no stores or atomics and need no new
+binding fields. Reads do not publish writes or become checkpoint state.
+
 EnvironmentContext: normalized direction, time (seconds), camera (camera escape versus lighting).
 Environment programs depend on direction and may sample file images.
 Displacement may sample static file images. For points use POSITION, time and bound
-attributes; use surface shading without displacement on computed or implicit geometry.
+attributes. Fixed computed triangles support displacement, including historical
+vertex attributes; computed points and implicit fields need producer offsets or
+pre-baked triangle geometry.
 
 `scene.propagation={program,bounds}` selects `PropagationStep propagation(PropagationContext,Inputs)`; bounds are world-space `[min,max]` metres.
 Context: `position` (metres), unit `direction`, `time` (seconds), `previous_distance` (metres; zero at launch). Step: `direction` (normalized), positive `distance` (metres), `absorbed=false`, `radiance=float3(1)` (multiplied at segment start).

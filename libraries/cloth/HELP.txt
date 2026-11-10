@@ -1,0 +1,60 @@
+cloth: GPU XPBD cloth on the ordinary geometry compute chain.
+Python: from vork.cloth import attach; attach(scene, "fabric", collider="body").
+Call before write_scene, on native triangle buffers in world metres. Pins are
+vertex indices; collider names a native mesh, including animated skin or morphs.
+Scenes without cloth install no cloth resources or dispatches.
+Use vork help cloth --all for controls and limits.
+
+<!-- all -->
+# Cloth simulation
+
+attach(scene, node, *, pins=(), collider=None, dt=None, iterations=64,
+       density=.2, stretch_modulus=50000, bending_rigidity=.002, damping=.8,
+       collision_margin=.004, acceleration=None)
+
+The helper appends ordinary compute programs and state to scene.simulation and
+rewires POSITION/NORMAL/TANGENT, preserving surface materials, UVs and other
+attributes. Each object receives automatic private state, reset, checkpoints
+and canonical predecessor inputs. Existing passes keep their order. Optional
+Slang includes share generated typed accessors: cloth/solver.slang,
+cloth/body.slang, cloth/self.slang. No renderer cloth primitive or extra clock.
+
+Units: density kg/m², stretch modulus N/m, bending rigidity N·m, damping 1/s,
+margin metres. Mass uses triangle area; stretch/dihedral compliance uses dual
+edge widths. XPBD accumulates multipliers within each tick, with compliance/dt².
+Reference: https://matthias-research.github.io/pages/publications/XPBD.pdf
+The finite iterative solve still needs convergence checks for the chosen mesh.
+
+Omitted dt inherits scene.simulation.dt, otherwise 1/240 seconds. All patches
+share that exact clock. iterations is positive and even. Pins follow canonical
+predecessor positions, so native morphs/skin can animate attachments.
+acceleration is a Slang body with i, p, v and time, returning float3 in m/s²
+INCLUDING gravity. Default: return float3(0,-9.81,0);. A wind-like loading:
+return float3(20,-9.81,4*sin(time*3+p.x*4))-1.5*v;
+This prescribes acceleration, not calibrated aerodynamic pressure.
+
+Use consistently oriented fixed native triangles, 3..1024 vertices per patch,
+no unused vertices, degenerate triangles or nonmanifold edges. Bake transforms
+into rest vertices and keep each cloth node at an identity root; animate pins
+through skin/morphs instead of root TRS. Instances, imported geometry,
+subdivision and computed colliders need a baked native proxy. A collider may
+have 1..4096 triangles and authored NORMAL (split triangle vertices for face
+normals); the general Geometry input samples it at canonical tick
+left endpoints. Keep motion per tick small relative to the collision margin.
+
+Surface contact uses point/face and edge/edge constraints, Coulomb friction .6
+and self separation 6*collision_margin (three margins on each surface).
+Contact generation runs in parallel;
+contact planes refresh up to eight times per tick; colored structural constraints
+and ordered contact projection share one
+workgroup. There are 512 contact slots per vertex. Overflow invalidates output
+rather than silently dropping contacts. On invalid computed positions, check
+contact density, initial intersections, dt and numerical scale; separate crowded
+patches or simplify the collision proxy. No continuous collision detection:
+fast motion or extreme folding needs smaller dt and convergence checks.
+
+Publication reconstructs area-weighted normals and UV0 tangents/handedness;
+without UV0 it supplies a finite geometric frame. Duplicated seam vertices are
+independent unless connected by triangles. State stays on GPU; no runtime
+position readback. Cost grows with contacts and iterations; the contact-heavy
+625-vertex drape is a quality example, not an interactive performance promise.

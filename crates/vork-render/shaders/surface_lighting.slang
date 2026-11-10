@@ -19,7 +19,6 @@ import emitter;
 import vork_sampling;
 import reflection_environment;
 import reflection_bsdf;
-import surface_medium;
 #ifdef VORK_PROBES
 // Queued camera work supplies completed incident irradiance before evaluating
 // a nonlinear lit hook. Secondary hits never consume this camera-local input.
@@ -52,8 +51,9 @@ struct LightSite { MaterialUv m; bool camera_clusters; bool secondary; float3 fa
 // receiver owns its covered-sample quadrature and visibility; every source
 // direction retains its exact BSDF response through that visibility query.
 struct AnalyticRadiance {
+    int selected_source=-1;float source_probability=1.;
     uint lobes;bool exposed;bool indirect_only;bool capture_endpoint;bool glossy_ambient;bool sampled_sources;
-    __init(uint lobes,bool exposed,bool indirect_only=false,bool capture_endpoint=false,bool glossy_ambient=true,bool sampled_sources=false) {this.lobes=lobes;this.exposed=exposed;this.indirect_only=indirect_only;this.capture_endpoint=capture_endpoint;this.glossy_ambient=glossy_ambient;this.sampled_sources=sampled_sources;}
+    __init(uint lobes,bool exposed,bool indirect_only=false,bool capture_endpoint=false,bool glossy_ambient=true,bool sampled_sources=false) {this.selected_source=-1;this.source_probability=1.;this.lobes=lobes;this.exposed=exposed;this.indirect_only=indirect_only;this.capture_endpoint=capture_endpoint;this.glossy_ambient=glossy_ambient;this.sampled_sources=sampled_sources;}
 };
 
 // One connection samples the complete emitter/visible-normal mixture. The
@@ -124,7 +124,7 @@ Response analytic_radiance_at<V:IVariant, S:IShadows>(Varying v, Surface s, Ligh
     // light list outside the camera frustum.
     // Directional-only variants have no spatially culled lights. Their complete
     // batch is already the exact cluster list, without a receiver lookup.
-    let clustered=V.light_types>1u && site.camera_clusters && camera_cluster_base(v.world,frame,clusters,list_base);
+    let clustered=policy.selected_source<0 && V.light_types>1u && site.camera_clusters && camera_cluster_base(v.world,frame,clusters,list_base);
     // Cluster lists are counted and sorted by light kind at construction.
     let count=uint(frame_light_count(frame));
     let visible_count=policy.indirect_only ? 0u : clustered ? cluster_lights[list_base] : count;
@@ -135,13 +135,13 @@ Response analytic_radiance_at<V:IVariant, S:IShadows>(Varying v, Surface s, Ligh
         let u=sample_2d(key,index,max(S.sample_count(),1u),REG_SAMPLING_STREAM_MEDIUM_LIGHT).x;
         next=min(uint(u*float(visible_count)),visible_count-1u);
     }
-    let light_weight=policy.sampled_sources ? float(visible_count) : 1.;
+    let light_weight=policy.selected_source>=0 ? 1./policy.source_probability : policy.sampled_sources ? float(visible_count) : 1.;
     for (;;) {
     if (next>=visible_count) { break; }
-    var i=next;
+    var i=policy.selected_source>=0 ? uint(policy.selected_source) : next;
     if (clustered) {
     i=cluster_lights[list_base+REG_CLUSTER_LIST_HEADER+next]; }
-    next=policy.sampled_sources ? visible_count : next+1u;
+    next=policy.sampled_sources || policy.selected_source>=0 ? visible_count : next+1u;
     if (i>=count) { break; }
     let record=specialized_light<V>(lights[i]);
     var contribution_mask=REG_RAY_DIFFUSE|REG_RAY_SPECULAR;
@@ -188,9 +188,6 @@ Response analytic_radiance_at<V:IVariant, S:IShadows>(Varying v, Surface s, Ligh
             if (thin && dot(geometric,axis)<0.) {shadow_normal=-geometric;}
             let connection=surface_ray_connection(shadow_world,source_world,axis,source.distance);
             var visibility=S.visibility_direction(shadow_world,shadow_normal,record,i,connection.xyz,connection.w,site.position_error,source_sample,S.sample_count(),s.is_hair);
-#ifdef VORK_SURFACE_MEDIUM
-            if(any(visibility!=float3(0.))) visibility*=surface_medium_transmittance(shadow_world,connection.xyz,connection.w);
-#endif
             direct+=response*weight*visibility;scattering+=scattered*weight*visibility;
         }
         if (spatial && dot(geometric,axis)<0. && (contribution_mask&REG_RAY_DIFFUSE)!=0u) {
@@ -198,9 +195,6 @@ Response analytic_radiance_at<V:IVariant, S:IShadows>(Varying v, Surface s, Ligh
             if (chord>=0. && chord<source.distance) {
                 let boundary=source_world+axis*chord;
                 var visibility=S.visibility_direction(boundary,axis,record,i,axis,source.distance-chord,site.position_error,source_sample,S.sample_count());
-#ifdef VORK_SURFACE_MEDIUM
-                if(any(visibility!=float3(0.))) visibility*=surface_medium_transmittance(boundary,axis,source.distance-chord);
-#endif
                 direct+=subsurface_transmission(original,geometric,view,axis,thickness)*max(-dot(geometric,axis),0.)/REG_PI*l.throughput*l.scale*weight*visibility;
             }
         }
@@ -268,32 +262,6 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
         }
         reflection_environment+=frame.environment.x*frame.environment.y*frame.environment_color.rgb*world_reflected*radiance;
     }
-#ifdef VORK_SURFACE_MEDIUM
-    var back_world_before=frame.radiance.xyz;
-    if(frame.environment.x>0.) {back_world_before+=frame.environment.x*frame.environment.y*frame.environment_color.rgb*env_diffuse.SampleLevel(env_sampler,environment_uv(-n,frame.environment_rotation),0.).rgb;}
-    if(policy.indirect_only) {back_world_before=float3(0.);}
-    var medium_front=policy.indirect_only ? float3(0.) : irradiance;
-    var medium_back=back_world_before;
-    if(surface_medium_active()) {
-        medium_back=float3(0.);
-        if(!policy.indirect_only) {
-            // Do not walk the World for a closure with no diffuse consumer.
-            // Fuzz, diffusion and strands can still need its incident radiance.
-            medium_front=float3(0.);
-            if(any(world_response!=float3(0.)) || any(scattering_consumer!=float3(0.)) || c.fuzz_weight>0. || s.is_hair) {
-                medium_front=surface_medium_diffuse(v.world,n,quadrature_sample,S.sample_count());
-            }
-            if(any(back_response>float3(0.))) {medium_back=surface_medium_diffuse(v.world,-n,quadrature_sample,S.sample_count());}
-        }
-    }
-    ambient+=world_response*(medium_front-irradiance)+back_response*(medium_back-back_world_before);
-    back_ambient+=back_response*(medium_back-back_world_before);
-    irradiance=medium_front;
-    if(any(reflection_environment!=float3(0.))) {
-        let medium_reflected=reflection_environment*surface_medium_transmittance(v.world,reflect(-view,n),REG_FP32_MAX);
-        ambient+=medium_reflected-reflection_environment;reflection_environment=medium_reflected;
-    }
-#endif
 #ifdef VORK_PROBES
     // World permission belongs to the source, not the material response to the
     // captured local lights, emission and bounce light. Only remove the World
@@ -320,9 +288,6 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
     if (any(back_diffuse>float3(0.))) {
         var back_world=policy.indirect_only ? float3(0.) : frame.radiance.xyz;
         if (frame.environment.x>0. && !policy.indirect_only) {back_world+=frame.environment.x*frame.environment.y*frame.environment_color.rgb*env_diffuse.SampleLevel(env_sampler,environment_uv(-n,frame.environment_rotation),0.).rgb;}
-#ifdef VORK_SURFACE_MEDIUM
-        back_world=medium_back;
-#endif
         back_world=select(world_diffuse,back_world,float3(0.));
         let field=probe_field_sample<S>(v.world,-n,-view,-n,1.,-geometric,position_error);
         let back_probed=field.owned ? field.radiance : back_world;
@@ -334,9 +299,6 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
         let provider=receiver_provider(v.world,n,view,mirror,policy.capture_endpoint ? 1. : roughness,frame,env_specular,env_sampler,policy.capture_endpoint,world_specular);
         if(provider.local) {
             var world_reflection=world_specular ? reflection_fallback(mirror,policy.capture_endpoint ? 1. : roughness,frame,env_specular,env_sampler) : float3(0.);
-#ifdef VORK_SURFACE_MEDIUM
-            if(any(world_reflection!=float3(0.))) world_reflection*=surface_medium_transmittance(v.world,mirror,REG_FP32_MAX);
-#endif
             let reflection_delta=indirect_reflected*provider.radiance-world_reflected*world_reflection;
             ambient+=reflection_delta;reflection_environment+=reflection_delta;
         }
@@ -367,9 +329,6 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
             var received=world_specular;
             var world=frame.radiance.xyz;
             if (frame.environment.x>0.) { world+=frame.environment.x*frame.environment.y*frame.environment_color.rgb*env_specular.SampleLevel(env_sampler,environment_uv(reflect(-view,cn),frame.environment_rotation),(policy.capture_endpoint ? 1. : coat_roughness)*frame.environment.z).rgb; }
-#ifdef VORK_SURFACE_MEDIUM
-            world*=surface_medium_transmittance(v.world,reflect(-view,cn),REG_FP32_MAX);
-#endif
 #ifdef VORK_PROBES
             if(probe_grid().field.x!=0u) {
                 let provider=receiver_provider(v.world,cn,view,reflect(-view,cn),policy.capture_endpoint ? 1. : coat_roughness,frame,env_specular,env_sampler,policy.capture_endpoint,world_specular);
@@ -377,33 +336,12 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
             }
 #endif
             coat_ambient=select(received,coat_reflected*world,float3(0.));
-#ifdef VORK_SURFACE_MEDIUM
-            // Extinction belongs inside the angular integral. A prefiltered
-            // World times mirror transmission loses rough-lobe escape directions.
-            if(surface_medium_active() && c.coat_roughness>0. && glossy_enabled && !policy.indirect_only) {
-                var coat=(Closure)0;
-                coat.geometry_normal=cn;coat.specular_roughness=c.coat_roughness;
-                coat.specular_ior=c.coat_ior;coat.specular_weight=c.coat_weight;coat.specular_color=float3(1.);
-                var integrated=float3(0.);
-                for(uint j=0u;j<quadrature_rotations(quadrature_sample);j++) {
-                    let rotation=quadrature_rotation(j,quadrature_sample,S.sample_count());
-                    float3 direction;
-                    let weight=specular_quadrature_sample(coat,view,specular_quadrature_point(0u,rotation,1u),direction,float3(0.));
-                    if(any(weight>float3(0.))) {
-                        integrated+=weight*receiver_reflection(v.world,cn,view,direction,policy.capture_endpoint ? 1. : 0.,frame,env_specular,env_sampler,policy.capture_endpoint,world_specular);
-                    }
-                }
-                coat_ambient=l.throughput*integrated/float(quadrature_rotations(quadrature_sample));
-            }
-#endif
         }
         let fuzz=c.fuzz_weight*c.fuzz_color*l.fuzz_albedo;
         var world_irradiance=frame.radiance.xyz;
         if (frame.environment.x>0.) { world_irradiance+=frame.environment.x*frame.environment.y*frame.environment_color.rgb*env_diffuse.SampleLevel(env_sampler,environment_uv(n,frame.environment_rotation),0.).rgb; }
 #ifdef VORK_PROBES
         world_irradiance=irradiance;
-#elif defined(VORK_SURFACE_MEDIUM)
-        if(surface_medium_active()) {world_irradiance=irradiance;}
 #endif
 #ifdef VORK_PROBES
         ambient=l.throughput*l.scale*ambient+coat_ambient+fuzz*world_irradiance;
@@ -423,7 +361,7 @@ Response surface_radiance_at<V:IVariant,S:IShadows>(Varying v, Surface s, Layers
     if (s.is_hair) {
         var world=frame.radiance.xyz;
         if (frame.environment.x>0.) {world+=frame.environment.x*frame.environment.y*frame.environment_color.rgb*env_diffuse.SampleLevel(env_sampler,environment_uv(n,frame.environment_rotation),0.).rgb;}
-#if defined(VORK_PROBES) || defined(VORK_SURFACE_MEDIUM)
+#if defined(VORK_PROBES)
         world=irradiance;
 #endif
         ambient=select(world_specular,strand_world(s.hair0,s.hair1,s.strand,geometric,view,world),float3(0.));

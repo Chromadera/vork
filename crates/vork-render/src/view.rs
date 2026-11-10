@@ -277,13 +277,12 @@ impl ViewState {
         let shadow_bind = shared.shadow_bind;
         let deforms = shared.deforms;
         let frame_materials = shared.materials;
-        let volume_samples=if [Pass::Visibility,Pass::Shade,Pass::Volume,Pass::Ao,Pass::Reflections].iter().any(|&pass|view_graph.runs(pass)) {medium::sample_buffers(s,d,[iw,ih],visibility_samples)} else {Vec::new()};
-        let visibility = decoupled_enabled.then(|| passes::decoupled::Sampling::new(d, [iw, ih], visibility_samples,
-            s.pipelines.resolve_native.as_ref().map_or(0,|n|n.froxel_page_elements)));
-        let fragments = decoupled_enabled.then(|| passes::decoupled::Fragments::new(s, r, [iw, ih], visibility_samples, &volume_samples, visibility.as_ref().unwrap(), &deforms)).transpose()?;
+        let visibility = decoupled_enabled.then(|| passes::decoupled::Sampling::new(d, [iw, ih], visibility_samples));
+        let fragments = decoupled_enabled.then(|| passes::decoupled::Fragments::new(s, r, [iw, ih], visibility_samples, visibility.as_ref().unwrap(), &deforms)).transpose()?;
         let fragments_bind = fragments.as_ref().and_then(|f| f.bind.clone());
         let fragments_geometry = fragments.as_ref().and_then(|f| f.geometry.clone());
         let recorder = crate::bundles::Recorder {
+            shadow_bind,
             graph: &view_graph,
             camera_instances: Some(&camera_cull.instances),
             transparent_instances: transparent_instances.as_ref(),
@@ -322,7 +321,7 @@ impl ViewState {
                 &vec![0; if scene_work {batch.nodes.len().max(1)} else {1} * std::mem::size_of::<Light>()],
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             );
-            let path_light_tree = (view_graph.runs(Pass::Path)).then(|| init(
+            let path_light_tree = (view_graph.runs(Pass::Path) || view_graph.runs(Pass::Ao)).then(|| init(
                 d, "path spatial light tree",
                 &vec![0; crate::lights::distribution::node_count(batch.nodes.len()) * std::mem::size_of::<crate::lights::tree::Node>()],
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
@@ -392,7 +391,7 @@ impl ViewState {
                 clusters,
             };
         }
-        let decoupled = visibility_passes.zip(fragments).map(|(passes, fragments)| passes::decoupled::View::new(s, r, [iw, ih], visibility.as_ref().unwrap(), &targets, &volume_samples, passes, fragments, deforms,
+        let decoupled = visibility_passes.zip(fragments).map(|(passes, fragments)| passes::decoupled::View::new(s, r, [iw, ih], visibility.as_ref().unwrap(), &targets, passes, fragments, deforms,
             [forward_global.clone(), recorder.material_bind.clone(), shadow_bind.clone()],frame_materials.as_ref().map(|m|&m.shader_errors),shared.rays.and_then(|r|r.emitter_weights.as_ref().map(|w|&w.buffer)))).transpose()?;
         let subsurface = if view_graph.runs(Pass::SubsurfaceDiffuse) {
             let visibility=decoupled.as_ref().context("subsurface visibility")?;
@@ -419,7 +418,6 @@ impl ViewState {
                 .materials
                 .as_ref()
                 .map_or_else(|| s.material_table.bind(), |m| &m.bind),
-            &volume_samples,
             view_graph.runs(Pass::Reflections),
             &mut work,
         )?;
@@ -427,6 +425,7 @@ impl ViewState {
         // While feature variants compile in the background, keep what re-recording
         // the shading bundles needs; the first frame after they land switches.
         let recording = Rerecord {
+            shadow_bind: shadow_bind.clone(),
             compute: shared.compute.cloned(),
             subset: subset.map(|s| (s.draws.clone(), s.objects.clone())),
             deforms: deforms.to_vec(),
@@ -438,14 +437,13 @@ impl ViewState {
         let ao = passes::ao::Resources::new(
             s, d, &lighting.uniform,
             ao_guides, [targets.resolved.texture().width(), targets.resolved.texture().height()], &targets.post_ambient, &targets.diffuse_response,
-            shared.rays, &lighting.lights, objects, &lighting.cluster_config, &lighting.cluster_lights,
+            shared.rays, &lighting.lights, lighting.path_light_tree.as_ref(), objects, &lighting.cluster_config, &lighting.cluster_lights,
             frame_materials.as_ref().map_or_else(|| s.material_table.bind(), |m| &m.bind), visibility_samples, view_graph.runs(Pass::Ao), &mut work,
         )?;
         let (mut post, output_bind) = passes::resolve::Resources::new(
             s,
             r,
             &lighting.uniform,
-            &volume_samples,
             ao_guides,
             &lighting.lights,
             lighting.path_light_tree.as_ref(),
@@ -461,7 +459,6 @@ impl ViewState {
             &output,
             output_planes,
             exposure_samples,
-            visibility_samples,
             shared.rays,
             frame_materials
                 .as_ref()
@@ -591,6 +588,7 @@ pub(crate) struct Rerecord {
     subset: Option<(Vec<bool>, Vec<bool>)>,
     deforms: Vec<Option<EvaluatedGeometry>>,
     material_bind: wgpu::BindGroup,
+    shadow_bind: wgpu::BindGroup,
     forward: wgpu::BindGroup,
 }
 pub(crate) struct ShadingBundles {
@@ -646,6 +644,7 @@ impl View {
             return Ok(());
         };
         let recorder = crate::bundles::Recorder {
+            shadow_bind: &p.shadow_bind,
             graph: &self.graph,
             camera_instances: Some(&self.camera_cull.instances),
             transparent_instances: self.transparent_instances.as_ref(),

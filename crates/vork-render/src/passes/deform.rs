@@ -29,6 +29,10 @@ pub(crate) fn pipeline(
     r: &Renderer,
     module: &std::sync::OnceLock<wgpu::ShaderModule>,
 ) -> wgpu::ComputePipeline {
+    pipeline_for(r,module,&native::DEFORM_EVALUATE)
+}
+
+fn pipeline_for(r: &Renderer, module: &std::sync::OnceLock<wgpu::ShaderModule>, shader: &native::Compiled) -> wgpu::ComputePipeline {
     let bind = r
         .device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -45,7 +49,7 @@ pub(crate) fn pipeline(
     r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("deformation"),
         layout: Some(&layout),
-        module: module.get_or_init(|| native::shader_module(&r.device, &native::DEFORM_EVALUATE)),
+        module: module.get_or_init(|| native::shader_module(&r.device, shader)),
         entry_point: Some("evaluate"),
         compilation_options: Default::default(),
         cache: r.cache.as_ref(),
@@ -56,6 +60,7 @@ pub(crate) fn pipeline(
 #[test]
 fn slang_layout() {
     native::tests::check(&native::DEFORM_EVALUATE, &[&LAYOUT]);
+    native::tests::check(&native::DEFORM_CHAIN_EVALUATE, &[&LAYOUT]);
 }
 
 // Reserved header lanes carry exact integer bits; Metal cannot query buffer lengths.
@@ -75,6 +80,10 @@ pub(crate) fn header(deform: &Deform) -> [f32; 4] {
 /// the pool size. Offsets satisfy both storage-binding alignment (ray hits bind
 /// each range as a hit buffer) and whole DeformedVertex units (BLAS builds).
 pub(crate) fn pool_layout(draws: &[install::Draw], limits: &wgpu::Limits) -> (Vec<Option<u64>>, u64) {
+    pool_layout_for(draws,limits,None)
+}
+
+fn pool_layout_for(draws: &[install::Draw], limits: &wgpu::Limits, leaders: Option<&[usize]>) -> (Vec<Option<u64>>, u64) {
     let stride = std::mem::size_of::<DeformedVertex>() as u64;
     let storage = u64::from(limits.min_storage_buffer_offset_alignment);
     let gcd = |mut a: u64, mut b: u64| {
@@ -86,13 +95,14 @@ pub(crate) fn pool_layout(draws: &[install::Draw], limits: &wgpu::Limits) -> (Ve
     let alignment = storage / gcd(storage, stride) * stride;
     let mut offsets: Vec<Option<u64>> = Vec::with_capacity(draws.len());
     let mut size = 0u64;
-    for draw in draws {
+    for (index,draw) in draws.iter().enumerate() {
         let Some(a) = draw.deform.as_ref() else {
             offsets.push(None);
             continue;
         };
-        if a.leader < offsets.len() {
-            offsets.push(offsets[a.leader]);
+        let leader=leaders.map_or(a.leader,|leaders|leaders[index]);
+        if leader < offsets.len() {
+            offsets.push(offsets[leader]);
             continue;
         }
         let offset = size.next_multiple_of(alignment);
@@ -102,9 +112,29 @@ pub(crate) fn pool_layout(draws: &[install::Draw], limits: &wgpu::Limits) -> (Ve
     (offsets, size)
 }
 
-pub(crate) fn resources(s: &InstalledScene, r: &Renderer) -> Result<Vec<Option<FrameDeform>>> {
+#[derive(Clone)]
+pub(crate) struct Chained {
+    source: crate::geometry_stage_source::Source,
+    pipeline: wgpu::ComputePipeline,
+    pub bounds: crate::geometry_stage_source::Bounds,
+}
+
+pub(crate) fn resources(s: &InstalledScene, r: &Renderer, inputs: &[Option<EvaluatedGeometry>]) -> Result<Vec<Option<FrameDeform>>> {
     let d = &r.device;
-    let (offsets, pool_size) = pool_layout(&s.draws, &d.limits());
+    let has_inputs=s.draws.iter().zip(inputs).any(|(draw,input)|draw.deform.is_some() && input.is_some());
+    let leaders=has_inputs.then(|| {
+        let mut found=std::collections::HashMap::new();
+        s.draws.iter().enumerate().map(|(index,draw)| {
+            let Some(deform)=&draw.deform else {return index;};
+            let input=inputs.get(index).and_then(Option::as_ref).map(|input| (
+                input.output.buffer.clone(),input.output.offset,input.output.size,
+                input.previous_output.buffer.clone(),input.previous_output.offset,input.previous_output.size,
+            ));
+            *found.entry((deform.job,input)).or_insert(index)
+        }).collect::<Vec<_>>()
+    });
+    let (offsets, pool_size) = if let Some(leaders)=&leaders {pool_layout_for(&s.draws,&d.limits(),Some(leaders))} else {pool_layout(&s.draws,&d.limits())};
+    let chained_pipeline=has_inputs.then(||pipeline_for(r,&std::sync::OnceLock::new(),&native::DEFORM_CHAIN_EVALUATE));
     // Raster vertex streams, BLAS builds and ray hits all read the one pool.
     let pool = (pool_size > 0).then(|| {
         crate::gpu_memory::buffer(d, &wgpu::BufferDescriptor {
@@ -123,12 +153,13 @@ pub(crate) fn resources(s: &InstalledScene, r: &Renderer) -> Result<Vec<Option<F
             frames.push(None);
             continue;
         };
-        if a.leader < index {
-            frames.push(frames[a.leader].clone());
+        let leader=leaders.as_ref().map_or(a.leader,|leaders|leaders[index]);
+        if leader < index {
+            frames.push(frames[leader].clone());
             continue;
         }
         ensure!(
-            a.leader == index,
+            leader == index,
             "deformation leader must precede its aliases"
         );
         let pipeline = s
@@ -184,11 +215,20 @@ pub(crate) fn resources(s: &InstalledScene, r: &Renderer) -> Result<Vec<Option<F
                 (palette(), palette())
             })
             .clone();
+        let chained=inputs.get(index).and_then(Option::as_ref).map(|input| {
+            ensure!(a.cpu.is_none(),"a deformation stage after another stage cannot yet include subdivision; separate subdivision from deformation");
+            Ok(Chained {
+                source:crate::geometry_stage_source::Source::new(r,&a.source,input,a.count)?,
+                pipeline:chained_pipeline.as_ref().context("chained deformation pipeline")?.clone(),
+                bounds:crate::geometry_stage_source::Bounds::new(r,&current,a.count),
+            })
+        }).transpose()?;
+        let pipeline=chained.as_ref().map_or(pipeline,|chained|&chained.pipeline);
         let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("current and previous deformation"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                entry(0, a.source.as_entire_binding()),
+                entry(0, chained.as_ref().map_or(&a.source,|chained|&chained.source.buffer).as_entire_binding()),
                 entry(1, a.influences.as_entire_binding()),
                 entry(2, a.morphs.as_entire_binding()),
                 entry(3, params.as_entire_binding()),
@@ -198,6 +238,8 @@ pub(crate) fn resources(s: &InstalledScene, r: &Renderer) -> Result<Vec<Option<F
             ],
         });
         frames.push(Some(FrameDeform {
+            leader,
+            chained,
             output: current,
             previous_output: previous,
             params,
@@ -208,8 +250,22 @@ pub(crate) fn resources(s: &InstalledScene, r: &Renderer) -> Result<Vec<Option<F
     Ok(frames)
 }
 
-pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: &FrameSlot) {
-    dispatch(encoder,s,&f.skin,Some(&f.queries));
+/// An explicitly ordered deformation consumes its predecessor before dispatch.
+/// The legacy fused prefix keeps the original dispatch path below.
+pub(crate) fn dispatch_chained(encoder:&mut wgpu::CommandEncoder,s:&InstalledScene,skin:&[Option<FrameDeform>]) {
+    for (index,frame) in skin.iter().enumerate().filter_map(|(i,f)|f.as_ref().map(|f|(i,f))) {
+        if frame.leader==index {if let Some(chained)=&frame.chained {chained.source.encode(encoder);}}
+    }
+    let Some(default)=s.pipelines.deform_pipeline.get() else {return;};
+    let mut pass=encoder.begin_compute_pass(&Default::default());
+    for (index,(draw,frame)) in s.draws.iter().zip(skin).enumerate() {
+        if let (Some(deform),Some(frame))=(&draw.deform,frame) {
+            if frame.leader!=index {continue;}
+            pass.set_pipeline(frame.chained.as_ref().map_or(default,|chained|&chained.pipeline));
+            pass.set_bind_group(0,&frame.bind,&[]);
+            pass.dispatch_workgroups(deform.count.div_ceil(constants::DEFORM_GROUP),3,1);
+        }
+    }
 }
 
 pub(crate) fn dispatch(encoder:&mut wgpu::CommandEncoder,s:&InstalledScene,skin:&[Option<FrameDeform>],queries:Option<&wgpu::QuerySet>) {

@@ -66,14 +66,21 @@ class MaterialWriter:
         self.programs = {}
         self.image_keys = {}
 
-    def write_compositor(self, source):
+    def write_display(self, source, view_program, inputs):
         key = '__blender_display_curves'
         while key in self.programs or key in self.materials:
             key += '_'
         filename = key + '.slang'
         (self.directory / filename).write_text(source)
         self.programs[key] = dict(file=filename)
-        self.materials[key] = dict(program=key)
+        inputs = dict(inputs)
+        if view_program in ('std/agx', 'blender/filmic'):
+            import shutil
+            name = 'agx' if view_program == 'std/agx' else 'filmic'
+            filename = f'blender-{name}.exr'
+            shutil.copyfile(Path(__file__).resolve().parents[2]/'libraries/blender'/f'{name}.exr', self.directory/filename)
+            inputs['lut'] = {'image': {'file': filename, 'color_space': 'Linear Rec.709'}}
+        self.materials[key] = dict(program=key, inputs=inputs)
         return key
 
     def curve_image(self, table):

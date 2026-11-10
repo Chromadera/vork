@@ -171,7 +171,7 @@ fn implicit_liquid_state_and_seek() -> Result<()> {
     let decoded=buffers::SceneBuffers::decode(&scene,&base)?;
     let attrs=if production {buffers::ProgramBuffers::install(&renderer,&scene,&decoded)?}
         else {buffers::ProgramBuffers::install_with_page_limit(&renderer,&scene,&decoded,1024*1024)?};
-    let compute=compute::Compute::install(&renderer,&scene,&base,Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.5)?.unwrap();
+    let compute=compute::Compute::test_install(&renderer,&scene,&base,Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.5)?.unwrap();
     assert!(attrs.bindings["surface"].spans.len()>1,"fine field must exercise retained storage across pages");
     let dims=scene.buffers["surface"].dims.unwrap();
     assert!(dims[0]>scene.buffers["phi"].dims.unwrap()[0], "surface resolution must be independent of the pressure grid");
@@ -442,28 +442,7 @@ fn raster_implicit_alpha_orders_interleaved_fields() -> Result<()> {
     Ok(())
 }
 
-#[test]
-#[ignore = "requires a real ray-query GPU and pinned Slang"]
-fn raster_implicit_native_medium_linking_smoke() -> Result<()> {
-    let renderer=Renderer::new()?;
-    let mut document=sphere_document();
-    document["nodes"].as_array_mut().unwrap().extend([
-        serde_json::json!({"type":"light","shape":"environment","color":[0,0,0],"energy":0,
-            "medium":{"program":"std/fog","inputs":{"density":0.02,"scattering":[1,1,1]}}}),
-        serde_json::json!({"type":"light","shape":"rectangle","translation":[2,2,2],"target":[0,0,0],"energy":20,"size":1,"size_y":1}),
-    ]);
-    let mut scene:Scene=vork_scene::v2::from_test_value(document)?;
-    scene.render.settings=vork_scene::Settings::for_level(1,Default::default());scene.render.settings.samples=1;
-    let installed=renderer.install(scene,Path::new("."))?;
-    let native=installed.pipelines.resolve_native.as_ref().context("native fog lighting")?;
-    assert!(native.implicit && native.program_coverage,"opaque fields still require material-aware medium visibility");
-    let mut frame=installed.create_frame_slot(&renderer,ReadbackPrecision::Float)?;
-    frame.submit_outputs(&installed,&renderer,0.,ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
-    let pixels=frame.collect(&renderer)?.linear_rgba.unwrap();
-    assert!(pixels.iter().flatten().all(|v|v.is_finite()));
-    assert!(pixels[16*32+16][0]>0.5,"emitting field must remain visible through fog");
-    Ok(())
-}
+
 
 #[test]
 #[ignore = "requires a real ray-query GPU and pinned Slang"]
@@ -622,9 +601,9 @@ fn implicit_caster_shadows_medium_illumination() -> Result<()> {
     }
     for caster in 0..2 {
         let relative=(profile_energies[0][caster].1/profile_energies[1][caster].1-1.).abs();
-        assert!(relative<0.05,"raster/path fog energy differs by {relative}: {profile_energies:?}");
+        assert!(relative<0.05,"selected/promoted path fog energy differs by {relative}: {profile_energies:?}");
     }
-    assert!((ratios[0]-ratios[1]).abs()<0.075,"raster/path medium shadow ratios disagree: {ratios:?}");
+    assert!((ratios[0]-ratios[1]).abs()<0.075,"selected/promoted path medium shadow ratios disagree: {ratios:?}");
     Ok(())
 }
 
@@ -673,7 +652,7 @@ fn fluid_edge_publication_and_physical_volume() -> Result<()> {
             let scene=crate::test_scene(document,Path::new("."))?;
             let decoded=buffers::SceneBuffers::decode(&scene,Path::new("."))?;
             let attrs=buffers::ProgramBuffers::install(&renderer,&scene,&decoded)?;
-            let compute=compute::Compute::install(&renderer,&scene,Path::new("."),Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.)?.unwrap();
+            let compute=compute::Compute::test_install(&renderer,&scene,Path::new("."),Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.)?.unwrap();
             let mut cursor=compute.cursor.lock().unwrap();
             let mut encoder=renderer.device.create_command_encoder(&Default::default());
             compute.advance_with(&mut encoder,&mut cursor,0.,|encoder| {

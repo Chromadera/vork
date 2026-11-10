@@ -90,9 +90,12 @@ impl Profile {
     pub fn resolve(&self, explicit: &serde_json::Map<String, serde_json::Value>) -> Result<Settings> {
         let mut merged = self.settings.clone();
         merged.extend(explicit.clone());
+        let promotion_denoise = merged.get("denoise").and_then(serde_json::Value::as_bool);
         let intent = RenderSettings::deserialize(serde_json::Value::Object(merged))
             .map_err(|error| anyhow::anyhow!("profile {}: {error}; choose std/previs, std/draft, std/final or std/path for quality", self.name))?;
-        Ok(Settings::for_level(self.level, intent))
+        let mut settings = Settings::for_level(self.level, intent);
+        settings.promotion_denoise = promotion_denoise;
+        Ok(settings)
     }
 }
 
@@ -159,7 +162,9 @@ pub fn test_settings(base: &Settings, overrides: &serde_json::Map<String, serde_
         serde_json::to_value(Settings::with_integrator(serde_json::from_value(serde_json::json!({"integrator":integrator}))?))?
     } else { serde_json::to_value(base)? };
     value.as_object_mut().unwrap().extend(overrides.clone());
-    Ok(serde_json::from_value(value)?)
+    let mut settings: Settings = serde_json::from_value(value)?;
+    if !overrides.contains_key("denoiser") {settings.promotion_denoise=base.promotion_denoise;}
+    Ok(settings)
 }
 
 /// Testing aid: write a scene document holding preset `render.settings` as the
@@ -210,6 +215,21 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn promotion_retains_explicit_denoise_intent() {
+        for profile in ["std/previs", "std/draft", "std/final", "std/path"] {
+            let profile=Profile::load(profile).unwrap();
+            let default=profile.resolve(&Default::default()).unwrap();
+            assert!(default.promotion_denoise.unwrap_or(true));
+            for intent in [false,true] {
+                let settings=profile.resolve(&serde_json::from_value(serde_json::json!({"denoise":intent})).unwrap()).unwrap();
+                assert_eq!(settings.promotion_denoise,Some(intent));
+            }
+        }
+        let profile=Profile::parse("custom.json",br#"{"version":1,"level":1,"settings":{"denoise":false}}"#).unwrap();
+        assert_eq!(profile.resolve(&Default::default()).unwrap().promotion_denoise,Some(false));
+    }
 
     #[test]
     fn previs_is_a_separate_look_with_inherited_capture_policy() {

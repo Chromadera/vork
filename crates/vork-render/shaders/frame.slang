@@ -3,13 +3,8 @@ __exported import vork_prelude;
 __exported import vork_visibility;
 __exported import vork_sampling;
 __exported import vork_light_falloff;
-#ifdef VORK_VOLUME_BINDINGS
-[[vk::binding(5,0)]] ConstantBuffer<Frame> frame;
-[[vk::binding(46,0)]] StructuredBuffer<Object> objects;
-#else
 [[vk::binding(0,0)]] ConstantBuffer<Frame> frame : register(b0);
 [[vk::binding(1,0)]] StructuredBuffer<Object> objects : register(t1);
-#endif
 // Matrices in the WGSL convention (Slang row i = WGSL column i), so mul(v,m) = M*v.
 float4x4 affine_matrix(float4 rows[3]) {return transpose(float4x4(rows[0],rows[1],rows[2],float4(0.,0.,0.,1.)));}
 float4x4 object_model(uint object) {return affine_matrix(objects[object].model);}
@@ -27,7 +22,6 @@ float4x4 object_next_model(uint object) {return visible_endpoint(object,objects[
 float4x4 object_normal(uint object) {return object_normal_matrix(objects[object]);}
 // Volume shadow closures share the surface BRDF/layer lookups. Other volume
 // entries need only frame/object context.
-#ifndef VORK_VOLUME_BINDINGS
 #ifndef VORK_FRAME_LIGHTS_REGISTER
 #define VORK_FRAME_LIGHTS_REGISTER t2
 #endif
@@ -40,14 +34,7 @@ float4x4 object_normal(uint object) {return object_normal_matrix(objects[object]
 [[vk::binding(8,0)]] StructuredBuffer<uint> cluster_lights : register(t4);
 [[vk::binding(9,0)]] Texture2D ltc_amplitude : register(t3);
 
-#endif
 
-#if !defined(VORK_VOLUME_BINDINGS) || defined(VORK_PROGRAM_COVERAGE)
-#ifdef VORK_VOLUME_BINDINGS
-[[vk::binding(12,0)]] SamplerState env_sampler;
-[[vk::binding(13,0)]] Texture2D env_brdf;
-[[vk::binding(18,0)]] Texture2D ltc_amplitude;
-#endif
 float4 brdf_texel(float2 uv) {
     let size=float(REG_BRDF_SIZE);
     // Inverse of the bake's fourth-power cosine / logarithmic physical-alpha grid.
@@ -72,4 +59,3 @@ float dielectric_albedo(float nv, float roughness, float eta) {
     return lerp(env_brdf.SampleLevel(env_sampler,(a+local)/extent,0.).x,
         env_brdf.SampleLevel(env_sampler,(b+local)/extent,0.).x,at-float(first));
 }
-#endif

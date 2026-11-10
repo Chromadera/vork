@@ -2,7 +2,7 @@
 #   & ([scriptblock]::Create((irm https://github.com/voyager-so/vork/releases/latest/download/install.ps1)))
 # Environment: VERSION, PREFIX (default %LOCALAPPDATA%\Programs\vork), VORK_REPO, VORK_DOWNLOAD_BASE;
 # VORK_SKIP_SETUP=1 skips `vork setup` (GPU-free CI); VORK_NO_MODIFY_PATH=1 leaves the user PATH alone.
-# A custom PREFIX never edits it.
+# VORK_MODIFY_PATH=1 opts a custom PREFIX into PATH edits; VORK_NO_MODIFY_PATH=1 always disables edits.
 param(
     [switch]$DryRun
 )
@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $repo = if ($env:VORK_REPO) { $env:VORK_REPO } else { 'voyager-so/vork' }
 # Default version is generated from Cargo.toml by scripts/sync-version.
-$version = if ($env:VERSION) { $env:VERSION } else { '0.3.0' }
+$version = if ($env:VERSION) { $env:VERSION } else { '0.4.0' }
 $prefix = if ($env:PREFIX) { $env:PREFIX } else { Join-Path $env:LOCALAPPDATA 'Programs\vork' }
 if ($version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid VERSION' }
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -111,9 +111,9 @@ try {
     try { Expand-Archive -LiteralPath $zip -DestinationPath $stage }
     catch { throw "Could not extract vork into $stage ($($_.Exception.Message)). Check free space and write permissions: the expanded release must fit beside $prefix, and the archive occupies $work. Your existing install was not changed." }
     $stageExe = Join-Path $stage 'vork.exe'
-    try { & $stageExe --version }
+    try { $stagedVersionOutput = & $stageExe --version 2>&1 }
     catch { throw "Cannot execute $stageExe ($($_.Exception.Message)). Check platform compatibility, runtime libraries and execution permissions. Your existing install was not changed." }
-    if ($LASTEXITCODE -ne 0) { throw "Staged vork --version failed (exit $LASTEXITCODE); your existing install was not changed." }
+    if ($LASTEXITCODE -ne 0) { throw "Staged vork --version failed (exit $LASTEXITCODE): $stagedVersionOutput; your existing install was not changed." }
     if (Test-Path -LiteralPath $prefix) {
         try { Move-Item -LiteralPath $prefix -Destination $retired }
         catch { throw "Could not replace $prefix ($($_.Exception.Message)) Close anything using that folder and run this again. Your existing install was not changed." }
@@ -123,9 +123,9 @@ try {
     $quotedExe = Quote-ShellLiteral $exe
     & $exe --version
     if ($LASTEXITCODE -ne 0) { throw 'vork --version failed' }
-    # Let a new window find vork. Only the default location touches the user PATH.
+    # Let a new window find vork. Custom prefixes require explicit opt-in.
     $pathNote = $null
-    if ($env:PREFIX -or $env:VORK_NO_MODIFY_PATH -eq '1') {
+    if ($env:VORK_NO_MODIFY_PATH -eq '1' -or ($env:PREFIX -and $env:VORK_MODIFY_PATH -ne '1')) {
         if (-not (($env:Path -split ';') -contains $bin)) {
             $pathNote = "Add it to PATH with:`n  [Environment]::SetEnvironmentVariable('Path', $quotedBin + ';' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
         }

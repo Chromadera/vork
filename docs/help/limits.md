@@ -1,19 +1,20 @@
 LIMITS
 Supported GPUs: Apple Silicon Metal and recent NVIDIA Vulkan with hardware ray
-tracing and storage buffer arrays. AMD, Intel and CPU/software rendering are
-unsupported. Run vork setup to check the adapter. Windows x64 ships install.ps1;
+tracing and storage buffer arrays. AMD and Intel GPUs are unsupported.
+CPU rendering requires the explicit opt-in below. Run vork setup to check the
+adapter. Windows x64 ships install.ps1;
 macOS and Linux provide install.sh as a separate release asset.
 The bundled Slang toolchain targets macOS 26; older macOS is unqualified.
 See README.md (Install) for binary setup.
 
-Participating media (fog, haze, smoke and volumes) are unsupported in 0.3.
-Fog returns in 0.4 with a design independent of pause/resume.
-The removed std/fog, blender/principled_volume and blender.volume programs fail
-with unknown-program errors, including unused material definitions. Remove those
-definitions and medium-only nodes/bindings; see vork help upgrade.
-Used medium bindings and volume topology fail with a named alternative: bake
-an image plate and composite it, or render the medium externally. Surface
-subsurface scattering is supported. Additional environment lights also fail;
+Stage 1 fog supports finite homogeneous convex carriers and constant/height
+world media through complete-camera path transport. See vork help fog for the
+program contract and limits. Arbitrary smoke, grids and procedural density,
+custom surface callbacks and nonconvex carriers remain unsupported; use constant
+convex carriers or render externally and composite a plate. Surface subsurface
+scattering remains supported. std/fog and blender/principled_volume stay removed;
+author a medium program for the supported scope.
+Additional environment lights also fail;
 combine their contributions in one environment program or precomposite their maps.
 
 std/final approximates indirect lighting and can omit bounced paths such as
@@ -25,6 +26,9 @@ indirect clamping, adaptive sampling and denoising; it is not an unclamped oracl
 The indirect clamp limits each contribution's mean absolute RGB to 10, matching
 Cycles' brightness measure. It scales all channels uniformly to preserve hue;
 direct contributions are unclamped. Bright indirect lighting can still lose energy.
+A non-finite path contribution (an infinite light sample) is dropped as zero rather
+than refusing the frame. Each affected frame warns with its dropped count;
+`dropped_light_samples` records the count in frame metadata, even without `--diagnostics`.
 Final's rough glass shadows follow straight connections: roughness does not spread
 transmitted shadows, light off-axis receivers, or test scattered-direction blockers.
 
@@ -60,13 +64,13 @@ samples and seeks. Installation refuses these wholly omitted geometry effects:
 
 - displacement reading computed instance attributes: use static/authored values or
   pre-baked displaced geometry;
-- displacement on computed/implicit geometry: compute displaced positions in the
+- displacement on computed points or implicit geometry: compute displaced positions in the
   producer, evolve the scalar field, or bake triangle geometry;
 - normal-dependent point displacement: use an authored direction attribute or triangles;
 - conflicting displacement materials or inconsistent attributes at shared vertices:
   use one displacement material and continuous attributes, or split the geometry;
-- computed geometry with skinning/coverage/transparency, or computed placement of transparent
-  instances: use opaque unskinned geometry, bake geometry updates, or author placements.
+- computed geometry with coverage/transparency, or computed placement of transparent
+  instances: use opaque geometry, bake geometry updates, or author placements.
 
 These errors name the node and available alternative. Approximate effects still warn
 and render.
@@ -76,3 +80,22 @@ render images fall back to the light colour. Inspect warnings and the image. Eac
 with its code, authored request and omitted/substituted behaviour. Every render
 meta.json sidecar and SDK render result returns the same structured warnings array;
 warning-and-render success does not mean every requested effect was applied.
+
+## Opt-in CPU rendering
+
+On Linux, install recent Mesa Vulkan drivers (`mesa-vulkan-drivers` on
+Debian/Ubuntu; `mesa-vulkan-drivers` or `vulkan-swrast` elsewhere), then run
+`vork setup --gpu cpu` (or `VORK_GPU=cpu vork setup`) and `VORK_GPU=cpu vork render scene.json --out frame.png`.
+The driver must expose ray queries and storage buffer arrays. CPU rendering is
+slow and never selected automatically. Setup warms the default starter. CPU shader
+warm-up has no time limit. First-run shader compilation can take several minutes. vork's driver
+pipeline cache is disabled because it can trigger a lavapipe compiler crash.
+Portable shader artifacts and Mesa's own shader disk cache can still speed later runs.
+
+macOS requires Apple Silicon; CPU mode is unavailable through Metal. Windows
+requires a Vulkan loader and a recent Mesa lavapipe driver with its ICD manifest;
+CPU rendering there has not been qualified.
+
+Stage 1 fog with subsurface scattering is unsupported: its chord/random-walk
+queries are outside the fog ledger. Set subsurface_weight to zero and remove its
+texture/animation binding, or render the shot externally and composite a plate.

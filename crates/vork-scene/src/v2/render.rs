@@ -88,7 +88,7 @@ impl Default for Render {
             duration: constants::DURATION_SECONDS.parse().expect("default duration"),
             motion_blur: None,
             background: Background::Mode(BackgroundMode::Environment),
-            display: NameOr::Inline(Material { program: "std/agx".into(), inputs: Table::new(), double_sided: true, opacity: None }),
+            display: NameOr::Inline(Material { program: "std/agx".into(), inputs: Table::new(), double_sided: true, priority: 0, opacity: None }),
             compositor: Vec::new(),
             settings: Settings::default(),
         }
@@ -99,6 +99,9 @@ impl Default for Render {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 
 pub struct Settings {
+    /// Internal render-call intent; promotion may enable OIDN unless explicitly disabled.
+    #[serde(skip)]
+    pub promotion_denoise: Option<bool>,
     /// Internal blocking-look policy, retained when an effect needs ray camera visibility.
     pub previs: bool,
     /// Internal scene-linear spatial reconstruction; independent of optional OIDN.
@@ -123,6 +126,7 @@ impl Settings {
         } else { Integrator::Raster(RasterIntegrator::default()) });
         settings.samples = match level { 3 => constants::PREVIS_SAMPLES, 0 => constants::DRAFT_SAMPLES, 1 => constants::FINAL_SAMPLES, _ => constants::MAX_RENDER_SAMPLES };
         if let Some(samples) = intent.samples { settings.samples = samples.get(); }
+        settings.promotion_denoise = Some(intent.denoise);
         settings.seed = intent.seed;
         settings.previs = level == 3;
         settings.reconstruct = level == 1 && !intent.denoise;
@@ -142,6 +146,7 @@ impl Settings {
     }
     /// Stop denoising: raster reconstructs spatially, path samples stay raw.
     pub fn disable_denoiser(&mut self) {
+        self.promotion_denoise = Some(false);
         match &mut self.integrator {
             Integrator::Raster(raster) => { raster.denoiser = None; self.reconstruct = true; }
             Integrator::Path(path) => path.denoiser = None,
@@ -150,14 +155,16 @@ impl Settings {
     /// The default look for a machine without a fast GPU denoiser: draft and final
     /// spend more samples instead. Authored sample budgets stay as they are.
     pub fn without_fast_denoiser(&mut self, level: u8, keep_samples: bool) {
+        let promotion_denoise = self.promotion_denoise;
         self.disable_denoiser();
+        self.promotion_denoise = promotion_denoise;
         if !keep_samples {
             self.samples = if level == 0 { constants::DRAFT_SAMPLES_WITHOUT_DENOISER } else { constants::FINAL_SAMPLES_WITHOUT_DENOISER };
         }
     }
     /// An integrator's settings with its default sample budget and aperture sampling.
     pub fn with_integrator(integrator: Integrator) -> Self {
-        Self { previs: false, reconstruct: false, seed: 0, samples: integrator.default_samples(), integrator }
+        Self { promotion_denoise: None, previs: false, reconstruct: false, seed: 0, samples: integrator.default_samples(), integrator }
     }
 }
 // Omitted `integrator` is raster; samples and aperture sampling default by integrator.
@@ -177,6 +184,7 @@ impl<'de> Deserialize<'de> for Settings {
             .map_err(|error| D::Error::custom(error))?;
         let defaults = Self::with_integrator(integrator);
         Ok(Self {
+            promotion_denoise: Some(defaults.integrator.denoiser().is_some()),
             previs,
             reconstruct,
             seed,

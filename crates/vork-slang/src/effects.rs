@@ -108,7 +108,7 @@ enum LoopFlow { Break, Continue, Mixed }
 /// The sources that can change between frames for an object that does not
 /// move, or the wavelength alone for spectral output dependency proofs.
 #[derive(Clone, Copy, Debug)]
-struct Live { texels: bool, wavelength: bool }
+struct Live { texels: bool, wavelength: bool, query_bounds: bool }
 /// Bridge calls reading the camera.
 const CAMERA_CALLS: [&str; 2] = ["vork_world_to_camera", "vork_world_to_window"];
 /// Shading context fields that change between frames at a fixed point.
@@ -127,8 +127,16 @@ fn live_context(module: &naga::Module, ty: naga::Handle<naga::Type>, wavelength:
     }
 }
 
+#[derive(Default)]
+struct QueryReads {filters: BTreeSet<QueryFilter>, incomplete: bool}
+#[derive(Default)]
+struct WorkProof { operations: u32, failure: Option<String> }
 #[derive(Clone, Default)]
 struct State {
+    query_reads: Option<std::sync::Arc<std::sync::Mutex<QueryReads>>>,
+    // Shared across explored branches and nested calls: summing both branches
+    // is conservative, and a global analysis ceiling bounds proof construction.
+    work: Option<std::sync::Arc<std::sync::Mutex<WorkProof>>>,
     image_reads: Option<std::sync::Arc<std::sync::Mutex<Option<BTreeSet<u32>>>>>,
     numeric: bool,
     certified: bool,
@@ -357,6 +365,10 @@ fn expression(
             }),
             // Numbers are exact f32 values, so comparing them is exact, except
             // that a backend may flush a subnormal operand to zero first.
+            // Bounds must remain valid even for undefined floating inputs;
+            // material-effect simplifications do not prove execution limits.
+            (Value::Number(a), Value::Number(b)) if state.live.is_some_and(|l|l.query_bounds) =>
+                [a,b].into_iter().all(normal_f32).then(||compare(*op,a,b)).flatten().unwrap_or(Value::Unknown),
             (Value::Number(a), Value::Number(b)) => [a, b].into_iter().all(normal_f32)
                 .then(|| compare(*op, a, b)).flatten().unwrap_or_else(|| exact_f32(*op, a, b)),
             // A proven zero factor annihilates the other operand, including
@@ -370,7 +382,7 @@ fn expression(
             // position-, time- or texel-driven factor can be. A scalar zero
             // scales a known vector to a zero vector; otherwise it stays the
             // scalar it was.
-            (a, b) if *op == naga::BinaryOperator::Multiply && (a.is_zero() || b.is_zero()) => {
+            (a, b) if !state.live.is_some_and(|l|l.query_bounds) && *op == naga::BinaryOperator::Multiply && (a.is_zero() || b.is_zero()) => {
                 let (zero, other) = if a.is_zero() { (a, b) } else { (b, a) };
                 match other {
                     Value::Parts(parts) if matches!(zero, Value::Number(_)) => Value::Parts(vec![Value::Number(0.); parts.len()]),
@@ -399,7 +411,7 @@ fn expression(
             Value::Number(n) => Value::Number(-n),
             v => Value::dependent([v]),
         },
-        E::Swizzle { size, vector, pattern } if state.numeric => {
+        E::Swizzle { size, vector, pattern } if state.numeric || state.live.is_some_and(|l|l.query_bounds) => {
             let v=get(*vector);
             Value::Parts(pattern[..*size as usize].iter().map(|c|v.part(*c as usize)).collect())
         },
@@ -417,6 +429,7 @@ fn expression(
             arg2: factor,
             ..
         } => {
+            if state.live.is_some_and(|l|l.query_bounds) {return Value::Unknown;}
             let a = get(*arg);
             let b = get(*other);
             if factor.is_some_and(|h| get(h).time()) {
@@ -716,6 +729,8 @@ fn merge_observed(state: &mut State, other: &State) {
     }
 }
 fn unknown(state: &mut State) -> Option<Value> {
+    if let Some(reads)=&state.query_reads {reads.lock().unwrap().incomplete=true;}
+    if let Some(work)=&state.work {work.lock().unwrap().failure.get_or_insert_with(||"unsupported control flow in medium work proof".into());}
     if let Some(reads)=&state.image_reads {*reads.lock().unwrap()=None;}
     // A live probe abandons code that may read a live source.
     let value = if state.live.is_some() { Value::Time } else { Value::dependent(state.arguments.iter().chain(state.locals.values()).cloned()) };
@@ -787,6 +802,15 @@ fn block(
 ) -> Option<Value> {
     let get = |state: &State, h| expression(module, function, args, state, h);
     for statement in body.iter() {
+        if let Some(work)=&state.work {
+            let mut work=work.lock().unwrap();
+            let cost=1+if let S::Emit(range)=statement {range.clone().count() as u32} else {0};
+            if cost>1_000_000 || work.operations>1_000_000-cost {
+                work.failure=Some("medium work proof exceeds its analysis budget".into());
+                return Some(Value::Unknown);
+            }
+            work.operations+=cost;
+        }
         observe(state);
         if (state.simulate_loop && state.loop_flow.is_some()) || state.switch_exit { return None; }
         match statement {
@@ -862,7 +886,7 @@ fn block(
                     })
                     .collect();
                 let (value, mut after) =
-                    evaluate_mode(module, &module.functions[*callee], &values, depth + 1,state.dependency,state.words.clone(),state.live,state.certified,state.numeric,state.image_reads.clone());
+                    evaluate_mode(module, &module.functions[*callee], &values, depth + 1,state.dependency,state.words.clone(),state.live,state.certified,state.numeric,state.image_reads.clone(),state.query_reads.clone(),state.work.clone());
                 if state.certified {
                     state.proof_failures.lock().unwrap().extend(after.proof_failures.lock().unwrap().iter().cloned());
                 }
@@ -951,6 +975,10 @@ fn block(
                 if let Some(after) = constant_loop(module,function,args,state,body,continuing,*break_if,depth) {
                     *state=after;
                     continue;
+                }
+                if let Some(work)=&state.work {
+                    work.lock().unwrap().failure=Some("medium loop count is not provably finite; use statically bounded loops".into());
+                    return Some(Value::Unknown);
                 }
                 if state.dependency || state.certified {
                     if state.certified {state.proof_failures.lock().unwrap().insert("loop count is not provably finite".into());}
@@ -1056,6 +1084,9 @@ fn block(
                     return returned;
                 }
             }
+            S::Atomic {result,..} if state.query_reads.is_some() => {
+                if let Some(result)=result {state.expressions.insert(result.index(),Value::Unknown);}
+            }
             S::Atomic { .. } | S::ImageStore { .. } | S::Kill => return unknown(state),
             _ => {}
         }
@@ -1103,7 +1134,7 @@ fn evaluate(
     live: Option<Live>,
     certified: bool,
 ) -> (Value, State) {
-    evaluate_mode(module,function,args,depth,dependency,words,live,certified,false,None)
+    evaluate_mode(module,function,args,depth,dependency,words,live,certified,false,None,None,None)
 }
 fn evaluate_mode(
     module: &naga::Module,
@@ -1116,7 +1147,18 @@ fn evaluate_mode(
     certified: bool,
     numeric: bool,
     image_reads: Option<std::sync::Arc<std::sync::Mutex<Option<BTreeSet<u32>>>>>,
+    query_reads: Option<std::sync::Arc<std::sync::Mutex<QueryReads>>>,
+    work: Option<std::sync::Arc<std::sync::Mutex<WorkProof>>>,
 ) -> (Value, State) {
+    if function.name.as_deref() == Some("vork_trace_field") {
+        if let Some(reads)=&query_reads {
+            let mask=match args.get(4) {Some(Value::Integer(mask))=>(*mask as u32&255) as u8,_=>255};
+            let object=match args.get(5) {Some(Value::Integer(object))=>u32::try_from(*object).ok().filter(|&object|object!=u32::MAX),_=>None};
+            reads.lock().unwrap().filters.insert(QueryFilter {mask,object});
+        }
+        let value=if live.is_some_and(|live|!live.wavelength) {Value::Time} else {Value::dependent(args.iter().cloned())};
+        return (value, State { arguments: args.to_vec(), ..Default::default() });
+    }
     if let Some(reads)=&image_reads {
         let name=function.name.as_deref().unwrap_or("");
         if matches!(name,SAMPLE_IMAGE|"vork_compositor_load"|"vork_compositor_size"|"vork_compositor_context"|MATERIAL_WORD) {
@@ -1202,7 +1244,9 @@ fn evaluate_mode(
         );
     }
     let mut state = State {
+        work,
         image_reads,
+        query_reads,
         numeric,
         certified,
         dependency,
@@ -1212,6 +1256,7 @@ fn evaluate_mode(
         ..Default::default()
     };
     if depth > 32 {
+        if certified {state.proof_failures.lock().unwrap().insert("query call depth is not provably finite".into());}
         unknown(&mut state);
         return (
             state.arguments.first().cloned().unwrap_or(Value::Unknown),
@@ -1327,13 +1372,19 @@ pub(super) fn medium_connection_profile(module:&naga::Module,entry:&str,words:&[
     let (_,function)=module.functions.iter().find(|(_,f)|f.name.as_deref()==Some(entry)).context("medium coefficient bridge missing")?;
     let position=Value::Parts((0..3).map(|axis|Value::Affine(std::array::from_fn(|i|if i==axis {1.} else {0.}))).collect());
     let words=words.iter().copied().collect();
-    let (value,_)=evaluate(module,function,&[position,Value::Independent,Value::Integer(0),Value::Position,Value::Independent],0,true,Some(words),None,false);
+    // The world consumer supplies identity-space local coordinates, so both
+    // context positions describe this affine world point. Finite-domain
+    // extinction bounds are a separate proof and do not use this gradient.
+    let (value,_)=evaluate(module,function,&[position.clone(),Value::Independent,Value::Integer(0),position,Value::Independent],0,true,Some(words),None,false);
     if !value.part(2).independent() || !value.part(3).independent() {return Ok(None);}
     let mut gradient=None;let mut coefficients=[[0f32;3];2];
     for (field,channels) in coefficients.iter_mut().enumerate() {
         for (channel,result) in channels.iter_mut().enumerate() {
             match value.part(field).part(channel) {
-                Value::Exponential(a,g) if a>=0. && a.is_finite() && (a as f32).is_finite() && (!constants || normal_f32(a))=> {
+                // A vanished positive amplitude is not vacuum: its field can
+                // become representable away from the origin. Refuse this
+                // certificate instead of erasing an exponential world tail.
+                Value::Exponential(a,g) if a>0. && (a as f32)>0. && a.is_finite() && (a as f32).is_finite() && (!constants || normal_f32(a))=> {
                     *result=a as f32;
                     if a>0. {if gradient.is_some_and(|previous|previous!=g) {return Ok(None);}gradient=Some(g);}
                 },
@@ -1470,7 +1521,7 @@ pub(super) fn composite_reads(wgsl: &str, entry: &str, abi: &Abi) -> Result<Opti
     if !image_call {return Ok(Some(Vec::new()));}
     let reads=std::sync::Arc::new(std::sync::Mutex::new(Some(BTreeSet::new())));
     let args=vec![Value::Unknown;function.arguments.len()];
-    evaluate_mode(&module,function,&args,0,false,None,None,false,false,Some(reads.clone()));
+    evaluate_mode(&module,function,&args,0,false,None,None,false,false,Some(reads.clone()),None,None);
     let result=reads.lock().unwrap().clone().map(|reads|reads.into_iter().collect());
     Ok(result)
 }
@@ -1494,6 +1545,48 @@ pub(super) fn displacement_reads(wgsl: &str, count: usize) -> Result<Vec<bool>> 
         .collect())
 }
 
+pub(super) fn calls_trace(wgsl: &str, entry: &str, abi: &Abi) -> Result<bool> {
+    let module = super::validated_module(wgsl, abi)?;
+    let function = module.functions.iter().find(|(_, f)| f.name.as_deref() == Some(entry)).map(|(_, f)|f)
+        .or_else(||module.entry_points.iter().find(|e|e.name==entry).map(|e|&e.function)).context("query analysis entry missing")?;
+    let mut pending=Vec::new(); calls(&function.body,&mut pending);
+    let mut visited=BTreeSet::new();
+    while let Some(handle)=pending.pop() {
+        if !visited.insert(handle.index()) {continue;}
+        let callee=&module.functions[handle];
+        if callee.name.as_deref()==Some("vork_trace_field") {return Ok(true);}
+        calls(&callee.body,&mut pending);
+    }
+    Ok(false)
+}
+
+pub(super) fn compute_query_filters(wgsl:&str,abi:&Abi)->Result<Vec<QueryFilter>> {
+    let module=super::validated_module(wgsl,abi)?;
+    let function=&module.entry_points.iter().find(|entry|entry.name=="vork_entry").context("compute query entry missing")?.function;
+    let reads=std::sync::Arc::new(std::sync::Mutex::new(QueryReads::default()));
+    let args=vec![Value::Unknown;function.arguments.len()];
+    let (_,state)=evaluate_mode(&module,function,&args,0,false,Some(Vec::<Option<u32>>::new().into()),Some(Live {texels:false,wavelength:true,query_bounds:true}),true,false,None,Some(reads.clone()),None);
+    let failures=state.proof_failures.lock().unwrap();
+    ensure!(!reads.lock().unwrap().incomplete && !failures.contains("loop count is not provably finite") && !failures.contains("query call depth is not provably finite"),
+        "compute trace requires provably finite loops and call depth; use constant loop bounds (at most 4095 iterations)");
+    let filters=reads.lock().unwrap().filters.iter().copied().collect();
+    Ok(filters)
+}
+
+/// Admission requires finite caller loops, independently of the runtime ray budget.
+pub(super) fn require_bounded_query_caller(wgsl: &str, entry: &str, abi: &Abi) -> Result<()> {
+    let module = super::validated_module(wgsl, abi)?;
+    let function = module.functions.iter().find(|(_, f)| f.name.as_deref() == Some(entry)).context("query entry missing")?.1;
+    let args = vec![Value::Unknown; function.arguments.len()];
+    // Signature stubs are not runtime values: inputs and image samples must
+    // remain unknown. The non-time live domain keeps fixed loop counters exact.
+    let (_, state) = evaluate(&module, function, &args, 0, false, Some(Vec::<Option<u32>>::new().into()), Some(Live {texels:false,wavelength:true,query_bounds:true}), true);
+    let failures = state.proof_failures.lock().unwrap();
+    ensure!(!failures.contains("loop count is not provably finite") && !failures.contains("query call depth is not provably finite"),
+        "trace callers require provably finite loops and call depth; use constant loop bounds (at most 4095 iterations)");
+    Ok(())
+}
+
 /// Follow compiler-resolved calls, including imported helpers and nested control
 /// flow. Retained calls count even when their result is unused: conservative.
 pub(super) fn program_dependencies(wgsl: &str, entry: &str, abi: &Abi) -> Result<ProgramDependencies> {
@@ -1512,6 +1605,7 @@ pub(super) fn program_dependencies(wgsl: &str, entry: &str, abi: &Abi) -> Result
             name if CAMERA_CALLS.contains(&name) => dependencies.camera = true,
             "vork_object_to_generated" | "vork_world_to_object" | "vork_world_normal_to_object" => dependencies.object_transforms = true,
             "vork_attribute" => dependencies.attributes = true,
+            "vork_trace_field" => dependencies.trace = true,
             name if name == SAMPLE_IMAGE => dependencies.images = true,
             _ => (),
         }
@@ -1604,7 +1698,7 @@ impl EffectProbe {
     /// Every closure contributes dispersion and wavelength summaries; weights
     /// contribute wavelength dependencies too.
     pub(super) fn needs_spectral(&self, words:&[Option<u32>]) -> bool {
-        let live=Some(Live {texels:false,wavelength:true});
+        let live=Some(Live {texels:false,wavelength:true,query_bounds:false});
         let (_,state)=evaluate(&self.module,&self.module.entry_points[self.entry].function,&[],0,false,Some(words.into()),live,false);
         [registry::EFFECT_SURFACE_DISPERSION,registry::EFFECT_LIT_DISPERSION].into_iter()
             .any(|index|state.effects.get(&(index as usize))!=Some(&Value::Number(0.)))
@@ -1617,7 +1711,7 @@ impl EffectProbe {
     /// `capabilities`: it reads the clock, the camera or,
     /// when `live_texels` (an image that can change), a texel. Unproven is true.
     pub fn coverage_varies(&self, words: &[Option<u32>], live_texels: bool) -> bool {
-        let live = Some(Live { texels: live_texels, wavelength:false });
+        let live = Some(Live { texels: live_texels, wavelength:false, query_bounds:false });
         let (_, state) = evaluate(&self.module, &self.module.entry_points[self.entry].function, &[], 0, false, Some(words.into()), live, false);
         state.effects.contains_key(&usize::MAX) || state.effects.get(&1).is_none_or(Value::time)
     }
@@ -1676,6 +1770,22 @@ mod tests {
         assert!(medium_exponential(&module,"point",&[None,Some(2f32.to_bits())])?.is_none());
         Ok(())
     }
+    #[test]
+    #[cfg(vork_private_tests)] // Uses the private compute-query fixture.
+    #[ignore = "requires pinned Slang"]
+    fn query_dependent_physical_hair_is_retained() -> Result<()> {
+        let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: openpbr_fields() };
+        let fixture:serde_json::Value=serde_json::from_str(include_str!("../../vork-render/tests/fixtures/compute-trace.json"))?;
+        let source=fixture["programs"]["bake"]["source"].as_str().unwrap();
+        let body=source.split_once("bool good=true;").unwrap().1.split_once("#endif").unwrap().0;
+        let helper=format!("bool query_contract(){{bool good=true;{body}\n#endif\nreturn good;}}\n");
+        let hair=module_source("std/hair").unwrap().replace("Hair surface",&format!("{helper}Hair surface")).replace("h.scattering = true;","h.scattering = query_contract();");
+        let program=Compiler::discover().compile_surface(&abi,&hair,Path::new("query_hair.slang"),"queryhair")?;
+        let capabilities=instance_capabilities(&program,serde_json::json!({"color":[0.5,0.3,0.1],"offset":0.}),&[])?;
+        assert!(capabilities.hair && capabilities.physical_hair,"{capabilities:?}");
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires pinned Slang"]
     fn physical_hair_follows_material_words() -> Result<()> {
@@ -2282,7 +2392,7 @@ pub(super) fn camera_calibration(module: &naga::Module, entry: &str, words: &[u3
     let args=[Value::Number(aspect.into()),Value::Number(focus.into()),Value::Number(time.into()),Value::Integer(0),
         Value::Parts(vec![Value::Parts(vec![Value::Number(0.);4]);4])];
     let words=words.iter().copied().map(Some).collect::<Vec<_>>();
-    let (_,state)=evaluate_mode(module,function,&args,0,false,Some(words.into()),None,false,true,None);
+    let (_,state)=evaluate_mode(module,function,&args,0,false,Some(words.into()),None,false,true,None,None,None);
     let mut result=[[0.;4];4];
     for row in 0..4 {for col in 0..4 {
         let Value::Number(v)=state.arguments[4].part(row).part(col) else {
@@ -2309,4 +2419,28 @@ pub(super) fn camera_unit_weight(module: &naga::Module, entry: &str, words: &[Op
     let function=module.functions.iter().find(|(_,f)|f.name.as_deref()==Some(entry)).context("camera stage bridge missing")?.1;
     let (_,state)=evaluate(module,function,&[Value::Unknown,Value::Integer(0),Value::Parts(vec![Value::Parts(vec![Value::Number(0.);4]);3])],0,false,Some(words.into()),None,false);
     Ok((0..3).all(|c|state.arguments[2].part(2).part(c)==Value::Number(1.)))
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+    #[test]
+    fn production_volume_helper_reaches_stage_discovery() -> Result<()> {
+        let abi=Abi {aov_count:0,context:Abi::spec_context(),closure:openpbr_fields()};
+        let source="import blender.volume; struct Inputs {}; MediumCoefficients medium(MediumContext c,Inputs i){MediumPoint p={};return principled_volume(p);}";
+        let (stages,_)=Compiler::discover().stages(&abi,source,Path::new("production-volume.slang"))?;
+        assert!(stages.contains("medium"));
+        Ok(())
+    }
+}
+
+/// Bound a point callback independently of its output ranges. No failed loop
+/// proof can be hidden by multiplying or clamping its result to a constant.
+pub(super) fn medium_work(module:&naga::Module,entry:&str,words:&[Option<u32>])->Result<u32> {
+    let (_,function)=module.functions.iter().find(|(_,f)|f.name.as_deref()==Some(entry)).context("medium coefficient bridge missing")?;
+    let proof=std::sync::Arc::new(std::sync::Mutex::new(WorkProof::default()));
+    evaluate_mode(module,function,&[Value::Position,Value::Time,Value::Integer(0),Value::Position,Value::Independent],0,false,Some(words.iter().copied().collect()),None,false,false,None,None,Some(proof.clone()));
+    let proof=proof.lock().unwrap();
+    ensure!(proof.failure.is_none(),"{}",proof.failure.as_deref().unwrap_or("medium work proof failed"));
+    Ok(proof.operations.max(1))
 }

@@ -96,7 +96,6 @@ fn main() {
         "src/programs.rs",
         "src/forward_variant.rs",
         "src/surface_native.rs",
-        "src/visibility_native.rs",
         "src/camera_native.rs",
         "../../libraries/std/openpbr_core.slang",
     ] {

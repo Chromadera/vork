@@ -1,5 +1,7 @@
 BUFFERS
 Use inline data for small geometry; binary files for large arrays.
+Inline data has one typed element per outer-array entry; vector/matrix entries
+contain the full component count (2/3/4/16), not a flat stream of scalar entries.
 Binary data is tightly packed, little-endian. Exact fields: buffers --all.
 <!-- all -->
 COMPUTED PLACEMENT REFERENCE

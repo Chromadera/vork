@@ -384,8 +384,9 @@ mod tests {
                 if early && samples == 2 {
                     assert_eq!(slot.view.sample_index, 1, "one streaming sample submitted before the abort");
                 }
-                assert!(other.collect(&r)?.linear_rgba.unwrap().iter().all(|p| *p == [1.,0.,0.,1.]),
-                    "an earlier submitted exposure can still be collected");
+                let queued = other.collect(&r).err().expect("queued publication must be refused");
+                assert!(format!("{queued:#}").contains("publication invalidated"),
+                    "aborted recording must discard queued images: {queued:#}");
                 for target in [&mut slot, &mut other] {
                     let retry = target.submit_outputs(&scene, &r, 1./24., outputs);
                     assert!(retry.is_err(), "aborted recording admitted another submission (early={early}, samples={samples})");
@@ -406,8 +407,6 @@ mod tests {
         Ok(())
     }
 
-    // This contract uses private corpus assets; private CI opts in explicitly.
-    #[cfg(vork_private_tests)]
     #[test]
     #[ignore = "requires a real GPU and pinned Slang"]
     fn aborted_first_tlas_recording_cannot_be_reused() -> Result<()> {

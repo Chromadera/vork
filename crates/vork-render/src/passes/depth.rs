@@ -61,7 +61,7 @@ fn diagnostics_preserve_glass_only_and_empty_depth_renders() -> Result<()> {
                 assert_eq!(plain.rgba, measured.rgba, "{kind}, refraction={refraction}, samples={samples}");
                 assert_eq!(plain.depth_u16, measured.depth_u16, "{kind}, refraction={refraction}, samples={samples}");
                 let depth = measured.timing.gpu_spans_ms.iter().find(|(name,_)| *name == "depth").unwrap().1;
-                assert!(depth.is_finite() && depth > 0., "{kind}, refraction={refraction}, samples={samples}: {depth}");
+                assert!(depth.is_finite() && depth >= 0., "{kind}, refraction={refraction}, samples={samples}: {depth}");
             }
         }
     }

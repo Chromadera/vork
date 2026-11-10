@@ -28,10 +28,13 @@ pub(crate) fn module(native: bool) -> String {
     output
 }
 
-pub(crate) fn validation_stubs() -> &'static str {
+pub(crate) fn validation_stubs() -> String {
+    let mut stubs = super::trace::validation_stubs().to_owned();
+    stubs.push_str(
     "fn vork_object_to_generated(i:u32,p:vec3<f32>)->vec3<f32>{return p+vec3(f32(i));}\n\
      fn vork_world_to_object(i:u32,p:vec3<f32>)->vec3<f32>{return p+vec3(f32(i));}\n\
      fn vork_world_normal_to_object(i:u32,p:vec3<f32>)->vec3<f32>{return p+vec3(f32(i));}\n\
      fn vork_world_to_camera(p:vec3<f32>)->vec3<f32>{return p;}\n\
-     fn vork_world_to_window(p:vec3<f32>)->vec3<f32>{return p;}\n"
+     fn vork_world_to_window(p:vec3<f32>)->vec3<f32>{return p;}\n");
+    stubs
 }

@@ -42,12 +42,16 @@ pub(crate) fn gi_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         ..pipelines::texture_entry(binding, wgpu::TextureSampleType::Float { filterable: false }, false)
     };
     let mut entries = pipelines::global_entries();
-    entries.extend([texture(10), texture(11), storage_entry(12,wgpu::TextureFormat::Rgba16Float), storage_entry(13,wgpu::TextureFormat::Rgba16Float)]);
+    entries.extend([texture(10), texture(11), storage_entry(12,wgpu::TextureFormat::Rgba32Float), storage_entry(13,wgpu::TextureFormat::Rgba32Float)]);
     entries.extend(layout_entries(14, compute));
     entries.push(storage_entry(16,wgpu::TextureFormat::Rgba32Float));
     entries.push(pipelines::buffer_entry(17,compute,wgpu::BufferBindingType::Uniform));
     entries.push(pipelines::buffer_entry(18,compute,wgpu::BufferBindingType::Storage {read_only:true}));
     entries.push(texture(19));
+    entries.push(wgpu::BindGroupLayoutEntry {
+        visibility: compute,
+        ..pipelines::texture_entry(21, wgpu::TextureSampleType::Uint, false)
+    });
     entries.push(pipelines::buffer_entry(20,compute,wgpu::BufferBindingType::Storage {read_only:true}));
     for e in &mut entries {
         e.visibility = compute;
@@ -75,6 +79,8 @@ pub(crate) fn gi_layout(
 pub(crate) fn gi_read_entries()->Vec<wgpu::BindGroupLayoutEntry> {
     let mut entries=vec![hit_buffers_entry(0,wgpu::ShaderStages::COMPUTE)];
     entries.push(pipelines::buffer_entry(1,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false}));
+    entries.push(pipelines::buffer_entry(2,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false}));
+    entries.push(pipelines::buffer_entry(3,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:true}));
     entries
 }
 pub(crate) fn gi_read_layout(d:&wgpu::Device)->wgpu::BindGroupLayout {
@@ -123,30 +129,24 @@ pub(crate) fn reflections_hits_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     }
     entries
 }
-pub(crate) fn reflections_hits_layout(d: &wgpu::Device, materials: &wgpu::BindGroupLayout, probes: bool, medium_pages: u32) -> wgpu::PipelineLayout {
+pub(crate) fn reflections_hits_layout(d: &wgpu::Device, materials: &wgpu::BindGroupLayout, probes: bool) -> wgpu::PipelineLayout {
     let group = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("ray reflection hits"),
         entries: &reflections_hits_entries(),
     });
     d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ray reflection hits layout"),
-        bind_group_layouts: &[Some(&group), Some(materials), probes.then(|| crate::probes::read_layout(d)).as_ref(), Some(&reflection_read_layout(d,medium_pages))],
+        bind_group_layouts: &[Some(&group), Some(materials), probes.then(|| crate::probes::read_layout(d)).as_ref(), Some(&reflection_read_layout(d))],
         immediate_size: 0,
     })
 }
 
-/// Optional current-view visibility pages share the hit-table group. With no
-/// scattering lights only geometry and reflection fields are bound.
-pub(crate) fn reflection_read_entries(medium_pages:u32)->Vec<wgpu::BindGroupLayoutEntry> {
-    let mut entries=vec![hit_buffers_entry(0,wgpu::ShaderStages::COMPUTE),crate::passes::reflections::record_fields_entry(1,true)];
-    if let Some(count)=std::num::NonZeroU32::new(medium_pages) {
-        let mut pages=pipelines::buffer_entry(2,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:true});
-        pages.count=Some(count);entries.push(pages);
-    }
-    entries
+/// Geometry and reflection records share the hit-table group.
+pub(crate) fn reflection_read_entries()->Vec<wgpu::BindGroupLayoutEntry> {
+    vec![hit_buffers_entry(0,wgpu::ShaderStages::COMPUTE),crate::passes::reflections::record_fields_entry(1,true)]
 }
-pub(crate) fn reflection_read_layout(d:&wgpu::Device,medium_pages:u32)->wgpu::BindGroupLayout {
-    d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("reflection hit and medium buffers"),entries:&reflection_read_entries(medium_pages)})
+pub(crate) fn reflection_read_layout(d:&wgpu::Device)->wgpu::BindGroupLayout {
+    d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("reflection hit buffers"),entries:&reflection_read_entries()})
 }
 
 /// Raster geometry buffers double as BLAS inputs only in scenes that trace rays.
@@ -371,7 +371,7 @@ pub(crate) fn resolve_indirect(scene:&mut Scene,features:wgpu::Features)->Result
     }
     if automatic_indirect_requested(scene) && scene.render.settings.integrator.probe_volume().is_some()
         && computed_mesh(scene, &scene.nodes) {
-        promote_indirect_to_path(scene);
+        promote_to_path(scene);
         return Ok(());
     }
     // An aggregate field cannot separate World receiver classes. Preserve the
@@ -396,12 +396,18 @@ pub(crate) fn resolve_indirect(scene:&mut Scene,features:wgpu::Features)->Result
 
 /// Keep the call's sample budget and denoise intent when retained transport
 /// cannot represent the scene. Never substitute an unoccluded World fill.
-pub(crate) fn promote_indirect_to_path(scene:&mut Scene) {
+pub(crate) fn promote_to_path(scene:&mut Scene) {
     let denoiser=scene.render.settings.integrator.raster().and_then(|r|r.denoiser.clone());
-    // Primary-surface reconstruction cannot describe transported detail. Preserve
-    // the call's OIDN opt-out when promoting glass or other path-only effects.
     scene.render.settings.reconstruct=false;
     scene.render.settings.integrator=vork_scene::Integrator::Path(vork_scene::PathIntegrator {denoiser,..Default::default()});
+}
+
+/// Only the newly owned effects change the default denoise policy. Existing
+/// dry camera/catcher promotions keep the resolved profile's denoiser unchanged.
+fn promote_transport_owner(scene:&mut Scene) {
+    let denoiser=scene.render.settings.promotion_denoise.unwrap_or(true).then(vork_scene::Denoiser::default);
+    if let Some(raster)=scene.render.settings.integrator.raster_mut() {raster.denoiser=denoiser;}
+    promote_to_path(scene);
 }
 
 pub(crate) fn automatic_indirect_requested(scene:&Scene)->bool {
@@ -510,14 +516,28 @@ pub(crate) fn ray_shadows(scene: &Scene) -> bool {
         || scene.render.settings.integrator.subsurface_method().is_some()
 }
 
-/// Production requires a ray-capable GPU. Test builds may exercise the same
-/// complete ray pipeline on software Vulkan; they never substitute screen transport.
+/// CPU rendering is explicit; never fall back from a GPU to software.
+pub(crate) fn cpu_requested() -> Result<bool> {
+    Ok(crate::selected_gpu()? == Some(crate::GpuSelection::Cpu))
+}
+
+pub(crate) fn adapter_help() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "No supported ray-tracing GPU; Apple Silicon is required on macOS."
+    } else if cfg!(target_os = "windows") {
+        "No supported ray-tracing GPU. For slow CPU rendering, install a Vulkan loader and a recent Mesa lavapipe Vulkan driver (with its ICD manifest), then set VORK_GPU=cpu (or --gpu cpu). Windows CPU rendering has not been qualified."
+    } else {
+        "No supported ray-tracing GPU. For slow CPU rendering, install recent Mesa Vulkan drivers (mesa-vulkan-drivers on Debian/Ubuntu; mesa-vulkan-drivers or vulkan-swrast elsewhere) and set VORK_GPU=cpu (or --gpu cpu)."
+    }
+}
+
 pub(crate) fn require_adapter(info: &wgpu::AdapterInfo, features: wgpu::Features) -> Result<()> {
-    let software_test = cfg!(any(test, feature = "test-support"));
+    let software = cfg!(any(test, feature = "test-support")) || cpu_requested()?;
     ensure!(features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES)
-        && (software_test || info.device_type != wgpu::DeviceType::Cpu),
-        "unsupported GPU: {} ({:?}, {:?}); missing capabilities: {:?}. vork requires hardware ray queries and storage buffer arrays; CPU adapters are permitted only in test builds. A compute-only GPU cannot gain missing graphics/ray capabilities from container flags; use supported graphics hardware such as an NVIDIA L4 or Apple Silicon",
-        info.name, info.backend, info.device_type, (wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES) - features);
+        && (software || info.device_type != wgpu::DeviceType::Cpu),
+        "{} Adapter {} ({:?}) requires ray queries and storage buffer arrays; missing {:?}.",
+        adapter_help(), info.name, info.backend,
+        (wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES) - features);
     Ok(())
 }
 
@@ -650,6 +670,59 @@ pub(crate) struct Rays {
     pub(crate) hit_buffers: Vec<HitBuffer>,
     pub(crate) implicit: [u32;4],
 }
+/// An immutable query snapshot for compute. Every potentially selected target must
+/// be static; simulation writers cannot create an implicit read/write AS cycle.
+pub(crate) struct ComputeSnapshot {
+    pub objects: wgpu::Buffer,
+    pub rays: Rays,
+    pub tlas: wgpu::Tlas,
+}
+impl ComputeSnapshot {
+    pub(crate) fn new(r:&Renderer,filters:&[vork_slang::QueryFilter],source:&vork_scene::v2::Scene,nodes:&[install::EvalNode],roots:&[install::MeshRoot],draws:&[install::Draw],objects:&[Object],materials:&[Material],integrator:&vork_scene::Integrator)->Result<Self> {
+        let mut selected=Vec::new();let mut masks=Vec::new();
+        let solids=crate::passes::path::solids(draws,roots,materials)?;
+        let absorbing:std::collections::BTreeSet<_>=draws.iter().filter(|d|d.implicit.is_none() && materials[d.material].solid_absorption)
+            .flat_map(|d|d.instances.clone()).filter_map(|object|solids.owners.get(object as usize).copied().filter(|&id|id!=u32::MAX)).collect();
+        for (draw_id,draw) in draws.iter().enumerate() {
+            for object in draw.instances.clone() {
+                let record=&objects[object as usize];
+                let public=record.opacity[1] as u32;
+                // An animated mask may enter any category; only exact identity
+                // proves that a changing object is outside the read set.
+                let reads=filters.iter().any(|f|f.mask!=0 && f.object.is_none_or(|id|id==public));
+                if !reads {continue;}
+                let node=&nodes[roots[object as usize].node];
+                ensure!(!node.dynamic && !draw.evaluated() && !crate::compute::places_instances(source,&node.node),
+                    "compute trace requires immutable target geometry; object {public} can change or depends on compute; select a static collider with object_id");
+                ensure!(draw.implicit.is_none(),"compute trace does not yet support implicit target geometry");
+                // Match transport's installed mask, including its auxiliary
+                // opaque/solid categories, without evaluating a hit material.
+                let determinant=record.model.determinant();
+                let mut mask=if determinant==0. || !determinant.is_finite() || !record.model.is_finite() {0} else {record.metadata[1]};
+                if !materials[draw.material].transparent && mask&constants::RAY_DIFFUSE!=0 {mask|=constants::RAY_GI_OCCLUDER;}
+                if solids.owners.get(object as usize).is_some_and(|id|absorbing.contains(id)) && mask&constants::RAY_SHADOW!=0 {mask|=constants::RAY_SHADOW_SOLID;}
+                if filters.iter().any(|f|f.mask as u32&mask!=0 && f.object.is_none_or(|id|id==public)) {
+                    selected.push((draw_id,object));masks.push(mask as u8);
+                }
+            }
+        }
+        let rays=Rays::new(r,draws,&selected,objects,&[],true,materials,integrator,&[],&[],&[],&[],false)?;
+        let packed=gpu_objects(objects);
+        let object_buffer=init(&r.device,"compute query objects",bytemuck::cast_slice(&packed),wgpu::BufferUsages::STORAGE);
+        let mut tlas=r.device.create_tlas(&wgpu::CreateTlasDescriptor {label:Some("compute query snapshot"),max_instances:selected.len().max(1) as u32,flags:BUILD_FLAGS,update_mode:wgpu::AccelerationStructureUpdateMode::Build});
+        for (slot,&(draw,object)) in selected.iter().enumerate() {
+            let record=&objects[object as usize];
+            let matrix=record.model.transpose().to_cols_array();
+            let transform=matrix[..12].try_into().unwrap();
+            tlas[slot]=Some(wgpu::TlasInstance::new(rays.blas[draw].as_ref().expect("static query BLAS"),transform,object,masks[slot]));
+        }
+        let mut encoder=r.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label:Some("compute query snapshot build")});
+        encoder.build_acceleration_structures(std::iter::empty(),std::iter::once(&tlas));
+        crate::command_finish::Segments::submit(&r.queue,encoder);
+        Ok(Self {objects:object_buffer,rays,tlas})
+    }
+}
+
 /// Visibility-only opaque geometry needs neither primitive material IDs nor hit
 /// attributes. Static instances with identical transforms, masks, groups and material sidedness can
 /// share one triangle hierarchy without changing the rays' intersection space.
@@ -805,10 +878,14 @@ fn alpha_table(
     if !subsurface_ids.is_empty() {
         words.extend(instances.iter().map(|&(_,object)|subsurface_ids[object as usize]));
     }
+    if !solids.is_empty() {words.push(solids.len() as u32);}
     let bounds_offset = words.len() as u32;
     words.extend(solids.iter().flat_map(|s| -> [u32; constants::PATH_SOLID_WORDS] {
         [s.lo.x.to_bits(), s.lo.y.to_bits(), s.lo.z.to_bits(), s.hi.x.to_bits(), s.hi.y.to_bits(), s.hi.z.to_bits(), s.row]
     }));
+    if solids.len()<=8 {
+        words.extend(solids.iter().flat_map(|s|s.contact_bounds.0.to_array().into_iter().chain(s.contact_bounds.1.to_array())).map(f32::to_bits));
+    }
     // The first slot publishes only potentially absorbing solid identities.
     // Clear/depth-zero interfaces need no occupancy query beyond an emitter.
     let eligible=instances.iter().zip(shadow_solids).filter_map(|(&(_,object),&absorbing)| {
@@ -1120,10 +1197,7 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
         // Static draws and aliases own no evaluated BLAS to invalidate.
         if rays.deformed[i].is_none() {return false;}
         let i = draw.displacement_leader.unwrap_or(i);
-        first || f.changes.dirty(values::ChangeKey::ComputedPositions(i))
-            || f.skin[i].as_ref().is_some_and(|d| uploaded(&d.params) || uploaded(&d.previous_params))
-            || f.subdivision_morphs[i].as_ref().is_some_and(uploaded)
-            || f.displacements.get(i).and_then(|frame| frame.as_ref()).is_some_and(|frame| frame.dirty(&f.changes))
+        first || f.geometry_chain.spatial_dirty(i,&f.changes)
     }).collect();
     let deform_changed = rays.deformed.iter().zip(&dirty_geometry).any(|(blas, dirty)| blas.is_some() && *dirty);
     let placement_changed = if rays.placement.is_some() {
@@ -1259,15 +1333,12 @@ fn surface_stages_required(nodes:&[Node], stages:&std::collections::BTreeMap<Str
 
 /// Resolve unsupported combinations from scene facts before resources or passes
 /// are chosen. Quality never controls admission; preserve the call budget.
-pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, base:&Path)->Result<()> {
+pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, _base:&Path, facts:crate::install::TransportFacts, stages:&std::collections::BTreeMap<String,crate::programs::Stages>)->Result<()> {
     fn nodes<'a>(roots:&'a [Node], out:&mut Vec<&'a Node>) {
         for node in roots {out.push(node); nodes(&node.children,out);}
     }
     let mut all=Vec::new(); nodes(&scene.nodes,&mut all);
-    let world=all.iter().find_map(|n|if let NodeKind::Light {shape:vork_scene::LightShape::Environment,medium,..}=&n.kind {medium.as_deref()} else {None});
-    let (varying_world,raster_world)=world.map(|name|crate::medium::compile(r,scene,name,base).map(|(program,_)|(!program.homogeneous,!program.homogeneous && program.exponential.is_none()))).transpose()?.unwrap_or((false,false));
     let ies=all.iter().any(|n|matches!(&n.kind,NodeKind::Light {shape,image:Some(_),..} if !matches!(shape,vork_scene::LightShape::Environment)));
-    let stages=crate::programs::mesh_stages(r,scene,base)?;
     // Mesh stage reflection is authoritative here, before automatic providers
     // and effect pipelines are selected. A medium boundary is not a receiver.
     if !surface_stages_required(&scene.nodes, &stages) {
@@ -1278,7 +1349,7 @@ pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, base:&Path)
             if raster.refraction==vork_scene::Refraction::Auto {raster.refraction=vork_scene::Refraction::Environment;}
         }
     }
-    let hair=stages.keys().any(|name|scene.materials[name].program=="std/hair");
+
     // The direct-only look uses ray camera visibility for authored table alpha.
     // This retains transparent emission without the indirect receiver stages.
     let mut previs_coverage=false;
@@ -1289,18 +1360,48 @@ pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, base:&Path)
             previs_coverage |= materials::openpbr_values(scene,Some(name),&inputs,|_|Ok(0))?.has_opacity;
         }
     }
-    let requires_path=ies || hair || previs_coverage || crate::catcher::has_mattes(scene);
-    ensure!(!(raster_world && requires_path),"effect unavailable: heterogeneous world media combined with IES lights, physical hair or compositing mattes need a finite medium domain; bind the medium to a closed mesh");
-    if (raster_world || !r.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES)) && !requires_path && scene.render.settings.integrator.is_path() {
-        let denoise=scene.render.settings.integrator.denoiser().is_some();
-        let mut fallback=vork_scene::Settings::for_level(1,vork_scene::RenderSettings {seed:scene.render.settings.seed,denoise,..Default::default()});
-        fallback.samples=scene.render.settings.samples;
-        scene.render.settings=fallback;
-    } else if requires_path && !scene.render.settings.integrator.is_path() {promote_indirect_to_path(scene);}
-    if varying_world && let Some(raster)=scene.render.settings.integrator.raster_mut() {
-        // Heterogeneous world transport uses per-receiver queries. Computed
-        // placements retain adaptive probe support over the camera clip region.
-        raster.probes=None;
+    let requires_path=facts.media || facts.hair || ies || previs_coverage || crate::catcher::has_mattes(scene);
+    if requires_path && !scene.render.settings.integrator.is_path() {
+        if facts.media || facts.hair {promote_transport_owner(scene);} else {promote_to_path(scene);}
     }
+    ensure!(!requires_path || r.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | HIT_BUFFER_FEATURES),
+        "effect unavailable: participating media, physical hair and complete-camera transport need hardware ray queries");
     Ok(())
+}
+
+#[cfg(test)]
+mod transport_owner_tests {
+    use super::*;
+
+    #[test]
+    fn dry_promotions_preserve_the_resolved_denoiser() -> Result<()> {
+        for profile in ["std/previs", "std/draft", "std/final"] {
+            let mut scene:Scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,"nodes":[{"type":"camera"}]}))?;
+            scene.render.settings=vork_scene::Profile::load(profile)?.resolve(&Default::default())?;
+            let denoiser=scene.render.settings.integrator.denoiser().cloned();
+            promote_to_path(&mut scene);
+            assert!(scene.render.settings.integrator.is_path());
+            assert_eq!(scene.render.settings.integrator.denoiser(),denoiser.as_ref());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn promoted_views_keep_budget_and_explicit_denoise_opt_out() -> Result<()> {
+        for profile in ["std/previs", "std/draft", "std/final"] {
+            for intent in [None, Some(false), Some(true)] {
+                let mut scene:Scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,"nodes":[{"type":"camera"}]}))?;
+                let mut explicit=serde_json::Map::new();
+                explicit.insert("samples".into(),serde_json::json!(17));
+                if let Some(denoise)=intent {explicit.insert("denoise".into(),serde_json::json!(denoise));}
+                scene.render.settings=vork_scene::Profile::load(profile)?.resolve(&explicit)?;
+                promote_transport_owner(&mut scene);
+                assert!(scene.render.settings.integrator.is_path());
+                assert!(!scene.render.settings.reconstruct);
+                assert_eq!(scene.render.settings.samples,17);
+                assert_eq!(scene.render.settings.integrator.denoiser().is_some(),intent.unwrap_or(true));
+            }
+        }
+        Ok(())
+    }
 }

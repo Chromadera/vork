@@ -1145,6 +1145,8 @@ impl super::CapabilitiesQuery {
         }
 
         features.set(F::EXPERIMENTAL_RAY_QUERY, self.supports_raytracing);
+        // Persistent pipeline caches are Metal binary archives.
+        features.set(F::PIPELINE_CACHE, self.supports_binary_archives);
 
         features
     }

@@ -231,7 +231,7 @@
                   "$ref": "#/$defs/InlineDataSchema"
                 }
               ],
-              "x-help": "number[]|number[][]; XOR file; mat4 column-major",
+              "x-help": "number[]|number[][]; XOR file; one typed element per outer entry; vector/matrix entries contain 2/3/4/16 scalar components, not a flat scalar stream; mat4 column-major",
               "x-help-path": "buffer.data",
               "x-source": "vork (explicit contract/technique choice)"
             },
@@ -350,7 +350,7 @@
                   "type": "null"
                 }
               ],
-              "x-help": "number[]|number[][]; XOR file; mat4 column-major",
+              "x-help": "number[]|number[][]; XOR file; one typed element per outer entry; vector/matrix entries contain 2/3/4/16 scalar components, not a flat scalar stream; mat4 column-major",
               "x-help-path": "buffer.data",
               "x-source": "vork (explicit contract/technique choice)"
             },
@@ -380,10 +380,10 @@
               "type": "integer"
             },
             "type": {
-              "enum": [
-                "f32",
-                "vec3"
-              ]
+              "$ref": "#/$defs/BufferType",
+              "x-help": "f32|i32|u32|vec2|vec3|vec4|uvec4|mat4",
+              "x-help-path": "buffer.type",
+              "x-source": "vork (explicit contract/technique choice)"
             }
           },
           "required": [
@@ -642,155 +642,202 @@
       ]
     },
     "Geometry": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attributes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/NameOr3"
+              },
+              "type": "object",
+              "x-help": "{name: buffer-name|inline buffer}; POSITION required (glTF names and types; COLOR_n: linear vec3/vec4, alpha defaults to 1); implicit: exactly one f32 dense grid, zero threshold; custom f32/vec2/vec3/vec4 bind to material inputs",
+              "x-help-path": "geometry.attributes",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "count": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr3"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Live point prefix within the installed POSITION/width capacity.",
+              "x-help": "one-element u32 buffer|null; points only; overflow rejects the exposure",
+              "x-help-path": "geometry.count",
+              "x-source": "vork"
+            },
+            "crease_edge": {
+              "description": "Endpoint vertex indices and OpenSubdiv/USD edge sharpness. Used by std subdivision.",
+              "items": {
+                "$ref": "#/$defs/EdgeCrease"
+              },
+              "type": "array",
+              "x-help": "{vertices:[u32,u32],crease:number}[]; OpenSubdiv sharpness, 0 smooth, ≥10 sharp",
+              "x-help-path": "geometry.crease_edge",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "curve_vertex_counts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr3"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "USD-style point counts, one u32 per polyline curve.",
+              "x-help": "u32 buffer; points per curve, ≥2; curves only",
+              "x-help-path": "geometry.curve_vertex_counts",
+              "x-source": "USD (polyline subset)"
+            },
+            "face_vertex_counts": {
+              "description": "Corners per polygon in the index buffer (USD/OpenSubdiv cage); absent means triangles.",
+              "items": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": [
+                "array",
+                "null"
+              ],
+              "x-help": "u32[]|null; polygon corner counts; absent = triangles",
+              "x-help-path": "geometry.face_vertex_counts",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "ids": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr3"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Temporal point identities; a changed identity is a birth, even when a row is reused.",
+              "x-help": "u32 buffer|null; points only; one unique identity per live point; matches previous poses across compact rows; births use current-pose motion placeholders",
+              "x-help-path": "geometry.ids",
+              "x-source": "vork"
+            },
+            "indices": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr3"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "x-help": "u32-buffer-name|inline buffer|null",
+              "x-help-path": "geometry.indices",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "material_ranges": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/MaterialRange"
+              },
+              "type": "array",
+              "x-help": "{start,count,material_index}[]; partition indices into node.materials slots; empty = one material",
+              "x-help-path": "geometry.material_ranges",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "morphs": {
+              "additionalProperties": {
+                "$ref": "#/$defs/Morph"
+              },
+              "default": {},
+              "type": "object",
+              "x-help": "{name:{POSITION,NORMAL?}}",
+              "x-help-path": "geometry.morphs",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "subdivision": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SubdivisionSurface"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Blender Subdivision Surface, evaluated after deformation and before displacement.",
+              "x-help": "{subdivision_type?,render_levels?,use_limit_surface?}|null; Blender Subdivision Surface; one material range",
+              "x-help-path": "geometry.subdivision",
+              "x-source": "Blender 5.2.1 (offline render subset)"
+            },
+            "topology": {
+              "$ref": "#/$defs/Topology",
+              "default": "triangles",
+              "x-help": "triangles|points|curves|implicit; points render as spheres",
+              "x-help-path": "geometry.topology",
+              "x-source": "glTF 2.0"
+            },
+            "widths": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr3"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "USD-style diameter in metres, one f32 per control point.",
+              "x-help": "f32 buffer; diameter per point; curves and points; required",
+              "x-help-path": "geometry.widths",
+              "x-source": "USD Points / BasisCurves"
+            }
+          },
+          "required": [
+            "attributes"
+          ],
+          "title": "BufferGeometry",
+          "type": "object"
+        },
+        {
+          "additionalProperties": true,
+          "description": "Authoring shorthand expanded by vork-std before kernel scene decoding.\nBuilder-specific options are validated by the selected standard-library builder.",
+          "not": {
+            "required": [
+              "name"
+            ]
+          },
+          "properties": {
+            "font": {
+              "description": "Text font path, resolved relative to the scene.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "std": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "std"
+          ],
+          "title": "StdGeometry",
+          "type": "object"
+        }
+      ]
+    },
+    "GeometryBinding": {
       "additionalProperties": false,
+      "description": "Read-only evaluated geometry of a named mesh object, sampled by the compute clock.",
       "properties": {
-        "attributes": {
-          "additionalProperties": {
-            "$ref": "#/$defs/NameOr3"
-          },
-          "type": "object",
-          "x-help": "{name: buffer-name|inline buffer}; POSITION required (glTF names and types; COLOR_n: linear vec3/vec4, alpha defaults to 1); implicit: exactly one f32 dense grid, zero threshold; custom f32/vec2/vec3/vec4 bind to material inputs",
-          "x-help-path": "geometry.attributes",
-          "x-source": "vork (explicit contract/technique choice)"
-        },
-        "count": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NameOr3"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Live point prefix within the installed POSITION/width capacity.",
-          "x-help": "one-element u32 buffer|null; points only; overflow rejects the exposure",
-          "x-help-path": "geometry.count",
-          "x-source": "vork"
-        },
-        "crease_edge": {
-          "description": "Endpoint vertex indices and OpenSubdiv/USD edge sharpness. Used by std subdivision.",
-          "items": {
-            "$ref": "#/$defs/EdgeCrease"
-          },
-          "type": "array",
-          "x-help": "{vertices:[u32,u32],crease:number}[]; OpenSubdiv sharpness, 0 smooth, ≥10 sharp",
-          "x-help-path": "geometry.crease_edge",
-          "x-source": "vork (explicit contract/technique choice)"
-        },
-        "curve_vertex_counts": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NameOr3"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "USD-style point counts, one u32 per polyline curve.",
-          "x-help": "u32 buffer; points per curve, ≥2; curves only",
-          "x-help-path": "geometry.curve_vertex_counts",
-          "x-source": "USD (polyline subset)"
-        },
-        "face_vertex_counts": {
-          "description": "Corners per polygon in the index buffer (USD/OpenSubdiv cage); absent means triangles.",
-          "items": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": [
-            "array",
-            "null"
-          ],
-          "x-help": "u32[]|null; polygon corner counts; absent = triangles",
-          "x-help-path": "geometry.face_vertex_counts",
-          "x-source": "vork (explicit contract/technique choice)"
-        },
-        "ids": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NameOr3"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Temporal point identities; a changed identity is a birth, even when a row is reused.",
-          "x-help": "u32 buffer|null; points only; one unique identity per live point; matches previous poses across compact rows; births use current-pose motion placeholders",
-          "x-help-path": "geometry.ids",
-          "x-source": "vork"
-        },
-        "indices": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NameOr3"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "x-help": "u32-buffer-name|inline buffer|null",
-          "x-help-path": "geometry.indices",
-          "x-source": "vork (explicit contract/technique choice)"
-        },
-        "material_ranges": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MaterialRange"
-          },
-          "type": "array",
-          "x-help": "{start,count,material_index}[]; partition indices into node.materials slots; empty = one material",
-          "x-help-path": "geometry.material_ranges",
-          "x-source": "vork (explicit contract/technique choice)"
-        },
-        "morphs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Morph"
-          },
-          "default": {},
-          "type": "object",
-          "x-help": "{name:{POSITION,NORMAL?}}",
-          "x-help-path": "geometry.morphs",
-          "x-source": "vork (explicit contract/technique choice)"
-        },
-        "subdivision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SubdivisionSurface"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Blender Subdivision Surface, evaluated after deformation and before displacement.",
-          "x-help": "{subdivision_type?,render_levels?,use_limit_surface?}|null; Blender Subdivision Surface; one material range",
-          "x-help-path": "geometry.subdivision",
-          "x-source": "Blender 5.2.1 (offline render subset)"
-        },
-        "topology": {
-          "$ref": "#/$defs/Topology",
-          "default": "triangles",
-          "x-help": "triangles|points|curves|implicit; points render as spheres",
-          "x-help-path": "geometry.topology",
-          "x-source": "glTF 2.0"
-        },
-        "widths": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NameOr3"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "USD-style diameter in metres, one f32 per control point.",
-          "x-help": "f32 buffer; diameter per point; curves and points; required",
-          "x-help-path": "geometry.widths",
-          "x-source": "USD Points / BasisCurves"
+        "geometry": {
+          "type": "string",
+          "x-help": "mesh-node name; read-only geometry at the program's canonical sample time",
+          "x-help-path": "material.geometry.geometry",
+          "x-source": "vork geometry chain"
         }
       },
       "required": [
-        "attributes"
+        "geometry"
       ],
       "type": "object"
     },
@@ -996,6 +1043,9 @@
         },
         {
           "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/GeometryBinding"
         },
         {
           "$ref": "#/$defs/TextureBinding"
@@ -1281,7 +1331,7 @@
           },
           "default": {},
           "type": "object",
-          "x-help": "{name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}}",
+          "x-help": "{name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}|{geometry}}",
           "x-help-extra": "material.inputs (transmission): transmission_depth 0 = sqrt(tint) per solid interface; thin sheets = full tint; positive-depth solids = Beer absorption\nmaterial.inputs (animation): numeric scalar/vector/colour inputs on surface/environment/compute/compositor/display programs use ordinary tracks; geometry_thin_walled is structural; an omitted animated program input has a zero blend baseline (author inputs for another baseline)\nmaterial.inputs.subsurface: thick: radius × radius_scale; thin: diffuse reflection/transmission split by scatter_anisotropy",
           "x-help-path": "material.inputs",
           "x-source": "OpenPBR Surface 1.1.1 defaults (spec table)"
@@ -1300,6 +1350,15 @@
           "x-help": "coverage|transmittance|null; null = coverage, transmittance for transmitting surfaces; coverage = occupied area fraction; transmittance = continuous attenuation by 1 - geometry_opacity; renderer chooses integration",
           "x-help-path": "material.opacity",
           "x-source": "vork surface presence semantics"
+        },
+        "priority": {
+          "default": 0,
+          "description": "Highest priority owns an overlapping dielectric region. Equal priorities\nuse the most recently entered solid; simultaneous entries use solid order.",
+          "format": "int32",
+          "type": "integer",
+          "x-help": "integer; highest owns overlapping solid media; equal priorities: last entered wins, simultaneous entries: later solid order wins; lower-priority boundaries change membership only",
+          "x-help-path": "material.priority",
+          "x-source": "vork (dielectric medium ownership)"
         },
         "program": {
           "$ref": "#/$defs/NameOr2",
@@ -2365,6 +2424,20 @@
               "x-help-path": "light.material",
               "x-source": "vork (explicit contract/technique choice)"
             },
+            "medium": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NameOr"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Physical world fog material on an environment light.",
+              "x-help": "material-name|inline material|null; environment only; authored medium program for world fog",
+              "x-help-path": "light.medium",
+              "x-source": "vork (physical medium)"
+            },
             "name": {
               "default": "",
               "type": "string",
@@ -2850,6 +2923,7 @@
             "double_sided": true,
             "inputs": {},
             "opacity": null,
+            "priority": 0,
             "program": "std/agx"
           },
           "x-help": "material-name|inline material; display program; EXR stays scene-linear",
@@ -3209,7 +3283,7 @@
       "type": "string"
     }
   },
-  "$id": "https://voyager.so/vork/schema/scene.schema.json",
+  "$id": "https://raw.githubusercontent.com/voyager-so/vork/v0.4.0/packages/ts/scene.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -3316,6 +3390,7 @@
           "double_sided": true,
           "inputs": {},
           "opacity": null,
+          "priority": 0,
           "program": "std/agx"
         },
         "duration": "125/12",
@@ -3391,7 +3466,7 @@
     "animation.track.keys: [[time, value], ...] | {times: buffer, values: buffer}; time increasing; CUBICSPLINE [time, value, in_tangent, out_tangent] (tangents per second) or [time, value] (zero tangents); rotation values as in node.rotation",
     "animation.track.path: string[]; [\"nodes\",node,property...] | [\"nodes\",asset,\"nodes\",imported-name|#index,property...] | [\"materials\",material,\"inputs\",input] | [\"animation\",layer,\"weight\"] | [\"render\",property...]",
     "buffer.count: u32|null; file only",
-    "buffer.data: number[]|number[][]; XOR file; mat4 column-major",
+    "buffer.data: number[]|number[][]; XOR file; one typed element per outer entry; vector/matrix entries contain 2/3/4/16 scalar components, not a flat scalar stream; mat4 column-major",
     "buffer.dims: [u32,u32,u32]|null; positive dense typed array dimensions; non-file; x contiguous; field cell centres span local [-1,1]³",
     "buffer.file: file-path; little-endian, or .vdb/.nvdb with grid; XOR data",
     "buffer.grid: name|null; .vdb/.nvdb only; f32 or vec3 voxels",
@@ -3441,6 +3516,7 @@
     "node.illuminates (light): light-link-tag[]|null; receivers with any tag; null=all; []=none",
     "node.image (light): image-name|inline image|null; LM-63 Type C IES (path only); non-environment lights; emits -Z, no peak normalization",
     "node.material (light): material-name|inline material|null; environment program",
+    "node.medium (light): material-name|inline material|null; environment only; authored medium program for world fog",
     "node.radius (light): number; point/spot emitter radius (shadow softness); default 0",
     "node.shadowed_by (light): light-link-tag[]|null; casters with any tag; null=all; []=none",
     "node.shape (light): sun|point|spot|rectangle|ellipse|environment",
@@ -3455,8 +3531,9 @@
     "material.attribute.factor: number|vector; omitted = 1",
     "material.channel.channel: color|depth|view_normal|object_index|motion|shadow_catcher; compositor programs",
     "material.double_sided: bool; false culls back faces; default true",
+    "material.geometry.geometry: mesh-node name; read-only geometry at the program's canonical sample time",
     "material.grid.grid: buffer-name|inline buffer; buffer with a grid",
-    "material.inputs: {name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}}; default {}",
+    "material.inputs: {name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}|{geometry}}; default {}",
     "material.inputs (std/openpbr): OpenPBR Surface; shaded inputs: base_weight base_color base_metalness specular_weight specular_color specular_roughness specular_roughness_anisotropy specular_ior transmission_weight transmission_color transmission_depth subsurface_weight subsurface_color subsurface_radius subsurface_radius_scale subsurface_scatter_anisotropy coat_weight coat_color coat_roughness coat_ior coat_darkening fuzz_weight fuzz_color fuzz_roughness emission_luminance emission_color thin_film_weight thin_film_thickness thin_film_ior geometry_opacity geometry_thin_walled geometry_normal geometry_tangent geometry_coat_normal transmission_dispersion_scale transmission_dispersion_abbe_number alpha_cutoff",
     "material.inputs.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1] per channel; units dimensionless; constant|texture|attribute; animatable; default -1",
     "material.inputs.base_color: color3; Base reflection albedo (dielectric); F0 colour at normal incidence (metal); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
@@ -3497,6 +3574,7 @@
     "material.inputs.transmission_weight: number; Mix weight between translucent base and opaque base slabs; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.node.node: earlier compositor entry name; clamped bilinear image sampling",
     "material.opacity: coverage|transmittance|null; null = coverage, transmittance for transmitting surfaces; coverage = occupied area fraction; transmittance = continuous attenuation by 1 - geometry_opacity; renderer chooses integration; default null",
+    "material.priority: integer; highest owns overlapping solid media; equal priorities: last entered wins, simultaneous entries: later solid order wins; lower-priority boundaries change membership only; default 0",
     "material.program: program-name|inline program|<library>/<module>; std/openpbr, std/hair (curves only), or custom; default std/openpbr",
     "material.texture.image: image-name|inline image; the program owns sampling and UV transforms",
     "node.file (asset): file-path",
@@ -3604,6 +3682,6 @@
     "node [type=\"mesh\"]: {\"type\":\"mesh\", …}; flat sibling fields: geometry, instances, materials, morph_weights, skin; no variant wrapper",
     "node [type=\"asset\"]: {\"type\":\"asset\", …}; flat sibling fields: file, materials, nodes; no variant wrapper",
     "node [type=\"camera\"]: {\"type\":\"camera\", …}; flat sibling fields: focus_object, material; no variant wrapper",
-    "node [type=\"light\"]: {\"type\":\"light\", …}; flat sibling fields: angle, color, energy, illuminates, image, material, radius, shadowed_by, shape, size, size_y, spot_blend, spot_size, temperature; no variant wrapper"
+    "node [type=\"light\"]: {\"type\":\"light\", …}; flat sibling fields: angle, color, energy, illuminates, image, material, medium, radius, shadowed_by, shape, size, size_y, spot_blend, spot_size, temperature; no variant wrapper"
   ]
 }

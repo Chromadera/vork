@@ -7,7 +7,7 @@ const args = process.argv.slice(2);
 const metadata = require.resolve('@voyager-so/vork/package.json');
 const cli = path.join(path.dirname(metadata), 'cli.cjs');
 function run(command, argv, cwd, stdio = 'inherit') {
-  const result = spawnSync(command, argv, {stdio, cwd});
+  const result = spawnSync(command, argv, {stdio, cwd, env: {...process.env, VORK_NPM_CONTEXT: '1'}});
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
   return result;
@@ -40,4 +40,4 @@ if (!fs.existsSync(path.join(project, 'package.json'))) {
 // npm create has already cached this exact dependency and its selected native package.
 // Never fetch during initialization; propagate the caller's private registry settings.
 run(process.execPath, [process.env.npm_execpath, 'install', `@voyager-so/vork@${version}`, '--save-exact', '--offline', '--ignore-scripts', '--no-audit', '--no-fund'], project);
-process.stdout.write(initialized.stdout.toString().replace(/^  vork /gm, '  npm exec --no --package=@voyager-so/vork -- vork '));
+process.stdout.write(initialized.stdout);

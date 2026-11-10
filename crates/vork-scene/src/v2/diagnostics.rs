@@ -681,3 +681,92 @@ mod upgrade_tests {
         assert!(!super::unknown("program", "std/typo", ["std/openpbr"]).contains("was removed"));
     }
 }
+
+/// Resolve normalized resource identifiers in preparation and validation failures.
+/// Origins are runtime metadata and do not participate in resource/cache identity.
+pub fn authored_error(origins: &BTreeMap<String, Vec<String>>, error: anyhow::Error) -> anyhow::Error {
+    let original = format!("{error:#}");
+    let mut text = original.clone();
+    let mut locations = Vec::new();
+    fn mentions(text: &str, label: &str) -> bool {
+        text.match_indices(label).any(|(i, _)| text[i + label.len()..].chars().next()
+            .is_none_or(|c| !c.is_alphanumeric() && !matches!(c, '_' | '-' | '/' | '.')))
+    }
+    for (key, paths) in origins {
+        let (table, name) = key.split_once('.').unwrap();
+        let kind = table.trim_end_matches('s');
+        let unique_generated = name.starts_with('~') && origins.keys()
+            .filter(|key| key.split_once('.').is_some_and(|(_, n)| n == name)).count() == 1;
+        let relevant = unique_generated && mentions(&text, name)
+            || mentions(&text, key)
+            || [format!("{kind} {name}"), format!("{kind} {name:?}")].iter().any(|label| mentions(&text, label));
+        if relevant {
+            let users = paths.join(", ");
+            if name.starts_with('~') {
+                // Compiler virtual filenames include the scene directory. Replace
+                // that entire filename before expanding its resource key.
+                if table == "programs" {
+                    for path in paths {
+                        if let Some((file, _)) = path.split_once(": scene.") {
+                            let parent = std::path::Path::new(file).parent().unwrap_or(std::path::Path::new(""));
+                            let virtual_file = parent.join(key).to_string_lossy().into_owned();
+                            text = text.replace(&virtual_file, &users).replace(&virtual_file.replace('\\', "/"), &users);
+                        }
+                    }
+                }
+                text = text.replace(key, &users)
+                    .replace(&format!("{kind} {name:?}"), &format!("{kind} {users}"))
+                    .replace(&format!("{kind} {name}"), &format!("{kind} {users}"));
+                if unique_generated { text = text.replace(name, &users); }
+            } else { locations.push(format!("{table}: {users}")); }
+        }
+    }
+    if text == original {
+        if locations.is_empty() { error } else { error.context(locations.join("; ")) }
+    } else {
+        let text = if locations.is_empty() { text } else { format!("{}: {text}", locations.join("; ")) };
+        // Filesystem failure classification must survive identifier rewriting.
+        match error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()) {
+            Some(io) => std::io::Error::new(io.kind(), text).into(),
+            None => anyhow::anyhow!(text),
+        }
+    }
+}
+
+#[cfg(test)]
+mod provenance_io_tests {
+    #[test]
+    fn compiler_virtual_paths_do_not_duplicate_the_scene_directory() {
+        let origins = [("programs.~abc".into(), vec!["/shots/caption.json: scene.materials[\"ink\"].program (line 4)".into()])].into();
+        let error = super::authored_error(&origins, anyhow::anyhow!("/shots/programs.~abc:3:1: missing semicolon"));
+        assert_eq!(error.to_string(), "/shots/caption.json: scene.materials[\"ink\"].program (line 4):3:1: missing semicolon");
+    }
+
+    #[test]
+    fn program_name_prefixes_do_not_add_unrelated_origins() {
+        let origins = [("programs.ink".into(), vec!["unrelated".into()]),
+            ("programs.ink-blue".into(), vec!["authored program".into()])].into();
+        let error = super::authored_error(&origins, anyhow::anyhow!("programs.ink-blue:3: bad syntax"));
+        assert!(error.to_string().contains("authored program"));
+        assert!(!error.to_string().contains("unrelated"));
+    }
+
+    #[test]
+    fn equal_hashes_in_different_resource_tables_keep_their_owners() {
+        let origins = [("buffers.~abc".into(), vec!["buffer slot".into()]),
+            ("materials.~abc".into(), vec!["authored material slot".into()])].into();
+        let error = super::authored_error(&origins, anyhow::anyhow!("material ~abc: invalid input"));
+        assert_eq!(error.to_string(), "material authored material slot: invalid input");
+    }
+
+    #[test]
+    fn resource_rewriting_keeps_filesystem_failure_category() {
+        let origins = [("programs.~abc".into(), vec!["shot.json: scene.materials[\"ink\"].program (line 4)".into()])].into();
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("program ~abc: read missing.slang");
+        let error = super::authored_error(&origins, error);
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::NotFound);
+        assert!(!error.to_string().contains("~abc"));
+        assert!(error.to_string().contains("shot.json"));
+    }
+}

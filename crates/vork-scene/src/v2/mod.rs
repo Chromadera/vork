@@ -62,6 +62,9 @@ pub enum NameOr<T> {
 #[serde(deny_unknown_fields)]
 #[schemars(extend("x-help-extra" = "coordinates: glTF right-handed Y-up; cameras look along local -Z"))]
 pub struct Scene {
+    /// Authored locations for diagnostics; never scene content or resource identity.
+    #[serde(skip)]
+    pub origins: std::collections::BTreeMap<String, Vec<String>>,
     /// Editor JSON Schema address; metadata only, never fetched by the renderer.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-help-path" = "scene.$schema", "x-help" = "string; editor schema URL"))]
@@ -113,10 +116,16 @@ pub struct Propagation {
 }
 impl Scene {
     pub fn load(path: &Path) -> Result<Self> {
-        Self::from_json(&std::fs::read(path)?)
+        let bytes = std::fs::read(path).with_context(|| format!("read scene {}", path.display()))?;
+        Self::from_json_with_source(&bytes, &bytes, Some(path))
+            .with_context(|| format!("load scene {}", path.display()))
     }
     /// A scene document; a leading UTF-8 byte-order mark (PowerShell 5.1 writes one) is ignored.
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        Self::from_json_with_source(bytes, bytes, None)
+    }
+    /// Decode expanded geometry while retaining the original document's locations.
+    pub fn from_json_with_source(bytes: &[u8], authored: &[u8], file: Option<&Path>) -> Result<Self> {
         let bytes = diagnostics::without_bom(bytes);
         let mut value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| diagnostics::decode_error(bytes, error))?;
@@ -124,14 +133,28 @@ impl Scene {
             "render.settings: render settings are not scene content; choose them with --profile (vork help profiles)");
         ensure!(value.pointer("/render/integrator").is_none() && value.pointer("/render/samples").is_none(),
             "render.integrator and render.samples are render settings, not scene content; choose --profile std/draft, std/final or std/path (vork help profiles)");
-        inline::lower(&mut value);
-        let scene: Self = serde_json::from_value(value)
+        let mut origins = inline::lower(&mut value);
+        inline::locate(diagnostics::without_bom(authored), &mut origins);
+        if let Some(file) = file {
+            for path in origins.values_mut().flatten() { *path = format!("{}: {path}", file.display()); }
+        }
+        let mut scene: Self = serde_json::from_value(value)
             .map_err(|error| diagnostics::decode_error(bytes, error))?;
         ensure!(!scene.materials.keys().any(|name| name.starts_with("__vork_")),
             "material names starting with __vork_ are reserved for the renderer");
-        scene.validate()?;
+        scene.origins = origins;
+        scene.validate().map_err(|error| scene.authored_error(error))?;
         Ok(scene)
     }
+    /// Add authored users to errors without changing normalized resource identity.
+    pub fn authored_error(&self, error: anyhow::Error) -> anyhow::Error {
+        let text = format!("{error:#}");
+        let programs = self.materials.iter().filter(|(name, _)| text.contains(&format!("material {name}:")) || text.contains(&format!("material {name} ")))
+            .map(|(_, material)| format!("program {}", material.program)).collect::<Vec<_>>();
+        let error = if programs.is_empty() { error } else { error.context(programs.join("; ")) };
+        diagnostics::authored_error(&self.origins, error)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if let Some(p) = &self.propagation {
             ensure!(self.programs.contains_key(&p.program), "unknown propagation program {}", p.program);
@@ -271,10 +294,12 @@ mod tests {
     use super::*;
     #[test]
     fn editor_schema_is_optional_metadata() {
-        let input = serde_json::json!({"version": 2, "nodes": [], "$schema": "https://voyager.so/vork/schema/scene.schema.json"});
-        let scene: Scene = serde_json::from_value(input).unwrap();
-        assert_eq!(scene.schema.as_deref(), Some("https://voyager.so/vork/schema/scene.schema.json"));
-        assert_eq!(serde_json::to_value(scene).unwrap()["$schema"], "https://voyager.so/vork/schema/scene.schema.json");
+        for url in [crate::SCHEMA_URL, "https://voyager.so/vork/schema/scene.schema.json", "custom editor metadata"] {
+            let input = serde_json::json!({"version": 2, "nodes": [], "$schema": url});
+            let scene: Scene = serde_json::from_value(input).unwrap();
+            assert_eq!(scene.schema.as_deref(), Some(url));
+            assert_eq!(serde_json::to_value(scene).unwrap()["$schema"], url);
+        }
         assert!(serde_json::from_value::<Scene>(serde_json::json!({"version": 2, "nodes": [], "$schem": "typo"})).is_err());
     }
 
@@ -589,12 +614,12 @@ mod light_link_tests {
 #[cfg(test)]
 mod launch_api_tests {
     #[test]
-    fn legacy_world_medium_decodes_but_is_not_an_api_field() {
+    fn world_medium_is_a_public_inline_material_field() {
         let scene=super::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"},{"type":"light","shape":"environment","medium":{"program":{"source":"struct Inputs {}; MediumCoefficients medium(MediumContext c, Inputs i) { return MediumCoefficients(); }"}}}]}"#).unwrap();
         assert!(matches!(&scene.nodes[1].kind,super::NodeKind::Light {medium:Some(_),..}));
         let schema=super::schema().to_value().to_string();
-        assert!(!schema.contains("light.medium"));
-        assert!(!schema.contains("\"medium\":"));
+        assert!(schema.contains("light.medium"));
+        assert!(schema.contains("\"medium\":"));
         assert!(!schema.contains("\"volume\""));
     }
 }

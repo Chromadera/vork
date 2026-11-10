@@ -10,6 +10,7 @@ mod constants;
 mod init;
 mod gpu_diagnostics;
 mod progress;
+mod interrupt;
 mod setup;
 mod help;
 mod std_command;
@@ -43,8 +44,14 @@ enum Command {
         /// Check tools without warming shaders; renders compile on demand.
         #[arg(long, conflicts_with = "all")]
         skip_warmup: bool,
+        /// Include raw encoder probe diagnostics.
+        #[arg(long)]
+        verbose: bool,
         #[arg(long, hide = true)]
         warmup_worker: bool,
+        /// Hardware GPU index in PCI bus order, or cpu for software rendering; default the high-performance GPU. Also VORK_GPU.
+        #[arg(long, value_name = "N|cpu")]
+        gpu: Option<vork_render::GpuSelection>,
     },
     /// Compile portable release shaders without opening a GPU driver.
     #[command(hide = true)]
@@ -105,6 +112,10 @@ enum Command {
         /// Adapter/cache/GPU timings; default false.
         #[arg(long)]
         diagnostics: bool,
+        /// Hardware GPU index in PCI bus order, or cpu for software rendering; default the high-performance GPU. Also VORK_GPU. On a multi-GPU machine,
+        /// run one render per GPU on separate --frame-start/--frame-end ranges.
+        #[arg(long, value_name = "N|cpu")]
+        gpu: Option<vork_render::GpuSelection>,
     },
 }
 fn channel(value: &str) -> Result<String, String> {
@@ -141,13 +152,16 @@ fn run() -> Result<()> {
             start.elapsed().as_secs_f64() * 1000.
         );
     }
+    if let Command::Setup { gpu: Some(index), .. } | Command::Render { gpu: Some(index), .. } = &command {
+        vork_render::select_gpu(*index);
+    }
     if let Command::PrepareReleaseShaders { scenes } = &command {
         return vork_render::Renderer::prepare_release_shaders(scenes);
     }
-    if let Command::Setup { all, skip_warmup, warmup_worker } = &command {
+    if let Command::Setup { all, skip_warmup, verbose, warmup_worker, gpu } = &command {
         // Supervise required checks even when warming is skipped. Only time
         // spent warming shaders may expire successfully.
-        if !warmup_worker { return setup::bounded(*all, *skip_warmup); }
+        if !warmup_worker { return setup::bounded(*all, *skip_warmup, *verbose, *gpu); }
         output!("vork {}", env!("VORK_VERSION"));
         output!("OS: {} ({})", std::env::consts::OS, std::env::consts::ARCH);
         setup::stage("checking FFmpeg")?;
@@ -168,13 +182,13 @@ fn run() -> Result<()> {
                 None => error,
             };
             eprintln!("GPU: {error:#}");
-            eprintln!("Rendering requires hardware Vulkan ray queries and storage buffer arrays, or Apple Silicon Metal. A container needs host graphics-driver libraries and device access; Docker does not provide a GPU on its own. On your own NVIDIA Linux machine, use the Docker runtime: docs/REMOTE-GPU.md. Scene authoring and `vork help` work without a GPU.");
+            eprintln!("Rendering requires ray queries and storage buffer arrays; see the platform-specific device diagnostic above. A container needs host graphics-driver libraries and device access; Docker does not provide a GPU on its own. On your own NVIDIA Linux machine, use the Docker runtime: docs/REMOTE-GPU.md. Scene authoring and `vork help` work without a GPU.");
             error.context(vork_render::failure::FailureKind::Device)
         })?;
         let device_s = start.elapsed().as_secs_f64();
         let tools_start = std::time::Instant::now();
         setup::stage("checking tools")?;
-        renderer.setup_report(&mut std::io::stdout().lock()).map_err(|error| {
+        renderer.setup_report_verbose(&mut std::io::stdout().lock(), *verbose).map_err(|error| {
             if error.downcast_ref::<std::io::Error>().is_some() { output::context(error) }
             else { error.context(vork_render::failure::FailureKind::Setup) }
         })?;
@@ -207,9 +221,11 @@ fn run() -> Result<()> {
     let (rendered, out) = match command {
         Command::Render {
             scene: scene_path, outputs, out, exr_codec, at, frame_start, frame_end,
-            profile, set, no_write, gpu_only, diagnostics,
+            profile, set, no_write, gpu_only, diagnostics, ..
         } => {
+            let stop = interrupt::install()?;
             let rendered = Shot {
+                stop,
                 scene: scene_path,
                 outputs: if outputs == ["all"] { Vec::new() } else { outputs.iter().map(|s| s.parse()).collect::<Result<Vec<Output>, _>>().map_err(|e| anyhow::anyhow!(e).context(vork_render::failure::FailureKind::Usage))? },
                 out: out.clone(),
@@ -254,12 +270,22 @@ fn run() -> Result<()> {
         eprintln!("\nWARNING: {} REQUESTED EFFECT(S) DROPPED: {}. Review the detailed warnings above and in render metadata before accepting this render.",
             warnings.len(), warnings.iter().filter_map(|warning| warning["code"].as_str()).collect::<Vec<_>>().join(", "));
     }
+    if let Some(line) = interruption_line(report, &out) { eprintln!("{line}"); }
     // Shot::render has joined file writers, reaped input decoders, finished muxing, saved idle caches and
     // written reports. Keep GPU owners alive: process exit discards unused variants
     // and reclaims resources without driver teardown. Errors still unwind.
     std::io::stdout().flush().map_err(output::error)?;
     std::io::stderr().flush()?;
     rendered.exit_process()
+}
+
+fn interruption_line(report: &serde_json::Value, paths: &[PathBuf]) -> Option<String> {
+    if report["interrupted"] != true { return None; }
+    Some(if report["sidecars"].as_array().is_some_and(|paths| !paths.is_empty()) {
+        format!("Interrupted: saved {} frame(s) to {}; output files closed cleanly. Exiting 130.", report["frames"], paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))
+    } else {
+        format!("Interrupted after {} rendered frame(s); no output files were written. Exiting 130.", report["frames"])
+    })
 }
 
 /// Parse values only after resolving their writable schema field.
@@ -361,6 +387,19 @@ mod help_tests {
             let Command::Render { outputs, .. } = Args::try_parse_from(args).unwrap().command else { panic!() };
             assert_eq!(outputs, expected);
         }
+    }
+
+    #[test]
+    fn setup_and_render_take_a_gpu_index() {
+        for args in [vec!["vork", "setup", "--gpu", "cpu"], vec!["vork", "render", "s.json", "--out", "a.png", "--gpu", "cpu"]] {
+            let command = Args::try_parse_from(args).unwrap().command;
+            assert!(matches!(command, Command::Setup { gpu: Some(vork_render::GpuSelection::Cpu), .. } | Command::Render { gpu: Some(vork_render::GpuSelection::Cpu), .. }));
+        }
+        let Command::Render { gpu, .. } = Args::try_parse_from(["vork", "render", "s.json", "--out", "a.mp4", "--gpu", "1"]).unwrap().command else { panic!() };
+        assert_eq!(gpu, Some(vork_render::GpuSelection::Hardware(1)));
+        let Command::Setup { gpu, .. } = Args::try_parse_from(["vork", "setup", "--gpu", "3"]).unwrap().command else { panic!() };
+        assert_eq!(gpu, Some(vork_render::GpuSelection::Hardware(3)));
+        assert!(Args::try_parse_from(["vork", "setup", "--gpu", "-1"]).is_err());
     }
 
     #[test]
@@ -512,5 +551,22 @@ mod exposure_tests {
         assert_eq!(exposure_line(&e), "exposure: 0% clipped, 0% near-black, mean 0.50 of covered pixels");
         e["coverage"] = serde_json::json!(0.);
         assert_eq!(exposure_line(&e), "exposure: undefined (no covered pixels)");
+    }
+}
+
+#[cfg(test)]
+mod interruption_tests {
+    use super::*;
+    #[test]
+    fn interruption_reports_saved_files_without_claiming_no_write_outputs() {
+        let paths = [PathBuf::from("my shot/frames")];
+        let mut report = serde_json::json!({"interrupted":true,"frames":3,"sidecars":[]});
+        let text = interruption_line(&report, &paths).unwrap();
+        assert!(text.contains("no output files were written"));
+        assert!(!text.contains("saved"));
+        report["sidecars"] = serde_json::json!(["my shot/frames/meta.json"]);
+        assert!(interruption_line(&report, &paths).unwrap().contains("saved 3 frame(s) to my shot/frames"));
+        report["interrupted"] = false.into();
+        assert!(interruption_line(&report, &paths).is_none());
     }
 }

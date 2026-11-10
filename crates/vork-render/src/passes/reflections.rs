@@ -13,7 +13,7 @@ pub(crate) fn record_fields(buffer:&wgpu::Buffer, bytes:u64)->Vec<wgpu::BufferBi
 }
 /// One retained hit-shading specialization for the complete installed scene.
 pub(crate) fn pipeline(r: &Renderer, cached: &std::sync::Arc<crate::pipelines::CachedPipelines>, features: crate::forward_variant::FeatureMask, probes: bool, mode: &crate::pipelines::VariantCompile) -> Result<crate::pipelines::Drawn<wgpu::ComputePipeline>> {
-    let layout=crate::rt::reflections_hits_layout(&r.device,&cached.mat_layout,probes,cached.resolve_native.as_ref().map_or(0,|n| if n.visibility_lights>0 {n.sample_pages} else {0}));
+    let layout=crate::rt::reflections_hits_layout(&r.device,&cached.mat_layout,probes);
     cached.install_hit(r, crate::pipelines::ProgramKernel::Reflections { features }, mode, layout, "hardware reflections")
 }
 
@@ -36,7 +36,6 @@ impl Resources {
         cluster_lights: &wgpu::Buffer,
         rays: Option<&crate::rt::FrameRays>,
         material: &wgpu::BindGroup,
-        volume_samples: &[wgpu::Buffer],
         enabled: bool,
         recorder: &mut crate::graph::Recorder,
     ) -> Result<Self> {
@@ -53,24 +52,31 @@ impl Resources {
         let v=decoupled.context("reflections need decoupled receiver guides")?;
         let (slots,reflection_records,reflection_guides)=(&v.slots,&v.reflection_records,&v.reflection_guides);
         let record_fields=record_fields(reflection_records,v.reflection_field_bytes);
-        let batch=if s.pipelines.resolve_native.is_some() {vork_slang::registry::MEDIUM_REFLECTION_RAY_BATCH} else {constants::REFLECTION_BATCH_SAMPLES};
+        let batch=constants::REFLECTION_BATCH_SAMPLES;
         let samples=v.samples();
         let chunks=samples.div_ceil(batch);
-        let spans=(w*h).div_ceil(constants::REFLECTION_DISPATCH_PIXELS);
-        let mut ranges=vec![0u32;(chunks*spans) as usize*64];
-        for chunk in 0..chunks {
-            for span in 0..spans {
-                let at=((chunk*spans+span)*64) as usize;
-                ranges[at]=chunk*batch;
-                ranges[at+1]=((chunk+1)*batch).min(samples);
-                ranges[at+2]=s.rays.as_ref().map_or(0,|r| r.emitters);
-                // The high bit distinguishes merged transparent slots from the
-                // implicit opaque-only record, independently of sample count.
-                ranges[at+3]=span*constants::REFLECTION_DISPATCH_PIXELS | if crate::passes::decoupled::direct_visibility(samples,s.plan.transparent,s.plan.effects.subsurface) {0} else {constants::REFLECTION_MERGED_SLOTS};
+        let packet_pixels=if v.packets {w*v.band_rows} else {0};
+        let packet_count=if v.packets {v.bands} else {1};
+        let mut owners=Vec::new();
+        let mut ranges=Vec::<u32>::new();
+        for packet in 0..packet_count {
+            let first=if v.packets {packet*packet_pixels} else {0};
+            let end=if v.packets {((packet+1)*packet_pixels).min(w*h)} else {w*h};
+            let spans=(end-first).div_ceil(constants::REFLECTION_DISPATCH_PIXELS);
+            for chunk in 0..chunks {
+                for span in 0..spans {
+                    let at=ranges.len();ranges.resize(at+64,0);
+                    ranges[at]=chunk*batch;
+                    ranges[at+1]=((chunk+1)*batch).min(samples);
+                    ranges[at+2]=s.rays.as_ref().map_or(0,|r|r.emitters);
+                    ranges[at+3]=first+span*constants::REFLECTION_DISPATCH_PIXELS | if crate::passes::decoupled::direct_visibility(samples,s.plan.transparent,s.plan.effects.subsurface) {0} else {constants::REFLECTION_MERGED_SLOTS};
+                    ranges[at+4]=packet_pixels;ranges[at+5]=end;ranges[at+6]=first;
+                    owners.push(packet as usize);
+                }
             }
         }
         let ranges=crate::init(d,"reflection sample ranges",bytemuck::cast_slice(&ranges),wgpu::BufferUsages::UNIFORM);
-        let range=|chunk|wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&ranges,offset:u64::from(chunk)*256,size:std::num::NonZeroU64::new(16)});
+        let range=|item|wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&ranges,offset:item as u64*256,size:std::num::NonZeroU64::new(32)});
         let accumulation=s.transients.buffer(d,"reflection accumulation",u64::from(w)*u64::from(h)*u64::from(constants::REFLECTION_CLASSES)*16,wgpu::BufferUsages::STORAGE);
 
         let mut dispatches=Vec::new();
@@ -84,14 +90,11 @@ impl Resources {
             .alpha;
         let pipeline = s.reflections.as_ref().map(|pipeline|pipeline.current(false))
             .context("incomplete installed ray reflection plan")?;
-        let medium_pages=s.pipelines.resolve_native.as_ref().map_or(0,|n| if n.visibility_lights>0 {n.sample_pages} else {0});
         let geometry=frame_rays.hit_bindings();
-        let pages:Vec<_>=volume_samples.iter().map(|buffer|wgpu::BufferBinding {buffer,offset:0,size:None}).collect();
-        let mut field_entries=vec![entry(0,wgpu::BindingResource::BufferArray(&geometry)),entry(1,wgpu::BindingResource::BufferArray(&record_fields))];
-        if medium_pages>0 {field_entries.push(entry(2,wgpu::BindingResource::BufferArray(&pages)));}
+        let field_entries=vec![entry(0,wgpu::BindingResource::BufferArray(&geometry)),entry(1,wgpu::BindingResource::BufferArray(&record_fields))];
         let field_bind=d.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("reflection fields, geometry and medium"),layout:&pipeline.get_bind_group_layout(3),entries:&field_entries});
         // rt::reflections_hits_entries: the scene globals, then the trace's images and rays.
-        for item in 0..chunks*spans {
+        for item in 0..owners.len() {
         let entries = vec![
             entry(0, uniform.as_entire_binding()),
             entry(1, objects.as_entire_binding()),
@@ -127,6 +130,11 @@ impl Resources {
         let dispatch = dispatch.with_hits(field_bind.clone()).with_read_table(s.probes.as_ref().map(|p| p.read_bind(d)));
         // The ray-traced trace binds the material table for its alpha tests and hit surfaces.
         dispatches.push(dispatch);
+        }
+        if v.packets {
+            let mut packets=vec![Vec::new();packet_count as usize];
+            for (owner,dispatch) in owners.into_iter().zip(dispatches.drain(..)) {packets[owner].push(dispatch);}
+            ensure!(v.packet_reflections.set(packets).is_ok(),"camera packet reflections installed twice");
         }
         recorder.compute(
             crate::graph::Pass::Reflections,
@@ -407,70 +415,7 @@ float3 evaluate(Closure c,float3 view,float3 light) {
         Ok(())
     }
 
-    #[test]
-    fn reflection_batches_visit_each_of_1024_covered_samples_once() -> Result<()> {
-        let Some(r)=crate::test_renderer()? else {return Ok(());};
-        for batch in [1u32,4,7,32] {
-        let source=r#"
-import reflection_receiver;
-import vork_prelude;
-import vork_constants;
-[[vk::binding(0,0)]] StructuredBuffer<uint> slots;
-#ifdef VORK_METAL
-struct BatchReflectionFields {StructuredBuffer<uint> buffers[REG_VISIBILITY_REFLECTION_WORDS];};
-[[vk::binding(1,0)]] ParameterBlock<BatchReflectionFields> record_fields;
-#define records record_fields.buffers
-#else
-[[vk::binding(1,0)]] StructuredBuffer<uint> record_fields[REG_VISIBILITY_REFLECTION_WORDS];
-#define records record_fields
-#endif
-[[vk::binding(2,0)]] StructuredBuffer<uint> film;
-// Scalar words, four per sample: MSL has no atomics on vector components.
-[[vk::binding(3,0)]] RWStructuredBuffer<uint> result;
-[shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 group:SV_GroupID) {
-    Frame f={};f.sampling.w=1024u;f.post.z=1.;f.flags.x=1.;f.projection.xy=1.;
-    f.view=float4x4(1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.);f.vp=f.view;
-    var iterator=ReflectionSlots(slots,uint2(1u),int2(0),f,0u,group.x*BATCHu,(group.x+1u)*BATCHu);
-    ReflectionSite site;uint index;
-    while(iterator.next(slots,records,film,f,site,index)) {
-        InterlockedAdd(result[index*4u],1u);
-        result[index*4u+1u]=0u;result[index*4u+2u]=group.x;result[index*4u+3u]=asuint(site.position.z);
-    }
-}
-"#.replace("BATCH",&batch.to_string());
-        let mut entries=[0,1,2,3].map(|binding|pipelines::buffer_entry(binding,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:binding!=3}));
-        entries[1]=record_fields_entry(1,true);
-        let pipeline=crate::medium::test_pipeline_defines(&r,&source,&crate::medium::Native::default(),&entries,(1,1,1),&["-DVORK_REFLECTION_MEDIUM"])?;
-        let stride=(VISIBILITY_KEY_WORDS+32) as usize;
-        let mut slots=vec![0u32;VISIBILITY_SLOTS as usize*stride+1];
-        let mut records=vec![0u32;VISIBILITY_SLOTS as usize*VISIBILITY_REFLECTION_WORDS as usize];
-        let half2=|a,b|u32::from(half::f16::from_f32(a).to_bits())|(u32::from(half::f16::from_f32(b).to_bits())<<16);
-        // Alternate triangles within every batch: no batch may borrow another
-        // slot's coverage, skip a mask word, or normalize its own hit count.
-        for slot in 0..2 {
-            let at=slot*stride;slots[at]=1;
-            for word in 0..32 {slots[at+VISIBILITY_KEY_WORDS as usize+word]=if slot==0 {0x55555555} else {0xaaaaaaaa};}
-            let base=slot*VISIBILITY_REFLECTION_WORDS as usize;
-            records[base+2]=1f32.to_bits();records[base+3]=(0.5f32+slot as f32*0.25).to_bits();records[base+5]=half2(31.,0.);
-        }
-        let slots=crate::init(&r.device,"batch coverage",bytemuck::cast_slice(&slots),wgpu::BufferUsages::STORAGE);
-        let count=records.len()/VISIBILITY_REFLECTION_WORDS as usize;
-        let field_bytes=(count as u64*4).div_ceil(256)*256;
-        let mut fields=vec![0u32;field_bytes as usize/4*VISIBILITY_REFLECTION_WORDS as usize];
-        for record in 0..count {for word in 0..VISIBILITY_REFLECTION_WORDS as usize {fields[word*field_bytes as usize/4+record]=records[record*VISIBILITY_REFLECTION_WORDS as usize+word];}}
-        let records=crate::init(&r.device,"batch records",bytemuck::cast_slice(&fields),wgpu::BufferUsages::STORAGE);
-        let record_fields=record_fields(&records,field_bytes);
-        let film=crate::init(&r.device,"batch film",&vec![0u8;1024*8],wgpu::BufferUsages::STORAGE);
-        let output=crate::init(&r.device,"batch visits",&vec![0u8;1024*16],wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
-        let bind=r.device.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
-            entry(0,slots.as_entire_binding()),entry(1,wgpu::BindingResource::BufferArray(&record_fields)),entry(2,film.as_entire_binding()),entry(3,output.as_entire_binding())]});
-        let values=compute_vec4_count(&r,&pipeline,&bind,&output,1024u32.div_ceil(batch),1024)?;
-        for (index,value) in values.iter().enumerate() {
-            assert_eq!(value.map(f32::to_bits),[1,0,index as u32/batch,(0.5+(index%2) as f32*0.25).to_bits()],"sample {index} was duplicated, lost, or assigned another slot");
-        }
-        }
-        Ok(())
-    }
+
 
     /// A tiny bright source must be integrated by both proposals, without a
     /// radiance clamp or a persistent bias when its guide is much broader.

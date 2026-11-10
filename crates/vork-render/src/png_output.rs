@@ -93,6 +93,10 @@ enum Input {
         pixels: Result<Arc<FrameOutput>>,
         lease: Option<Arc<crate::ring::Lease>>,
     },
+    /// A refused frame: its output orders complete with no files.
+    Skip {
+        frame: usize,
+    },
     Finish,
 }
 enum Job {
@@ -368,6 +372,11 @@ impl FrameOutputWriter {
                             }
                         }
                     }
+                    Input::Skip { frame } => {
+                        for i in 0..plane_count {
+                            done.send(((frame - first_frame) * plane_count + i, frame, Ok(Files::new()), None))?;
+                        }
+                    }
                     Input::Finish => finished = true,
                 }
                 if finished && unpacking == 0 {
@@ -428,6 +437,12 @@ impl FrameOutputWriter {
     pub fn push(&self, frame: usize, pixels: FrameReadback) -> Result<()> {
         self.jobs
             .send(Input::Frame { frame, pixels })
+            .map_err(|_| anyhow!("frame output workers stopped"))
+    }
+    /// Write nothing for a refused frame, keeping later frames in order.
+    pub fn skip(&self, frame: usize) -> Result<()> {
+        self.jobs
+            .send(Input::Skip { frame })
             .map_err(|_| anyhow!("frame output workers stopped"))
     }
     pub fn finish(self) -> Result<()> {
@@ -505,7 +520,9 @@ mod exr_tests {
                 denoise_upload_ms: 0.,
                 gpu_ms: 0.,
                 nonfinite: None,
+                dropped_light_samples: 0,
                 gpu_elapsed_ms: 0.,
+                timing_source: "unmeasured",
                 gpu_spans_ms: vec![],
                 sample_count: 1,
             },

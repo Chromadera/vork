@@ -322,6 +322,9 @@ pub enum CreatePipelineCacheError {
     Validation(#[from] PipelineCacheValidationError),
     #[error(transparent)]
     MissingFeatures(#[from] MissingFeatures),
+    /// The backend refused the cache data (for example a Metal binary archive it cannot load).
+    #[error("Pipeline cache data rejected by the backend: {0}")]
+    Rejected(String),
 }
 
 impl WebGpuError for CreatePipelineCacheError {
@@ -330,6 +333,7 @@ impl WebGpuError for CreatePipelineCacheError {
             Self::Device(e) => e.webgpu_error_type(),
             Self::Validation(e) => e.webgpu_error_type(),
             Self::MissingFeatures(e) => e.webgpu_error_type(),
+            Self::Rejected(_) => ErrorType::Validation,
         }
     }
 }

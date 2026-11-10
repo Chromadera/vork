@@ -17,6 +17,7 @@ fn document(topic: &str) -> Option<&'static str> {
         "nodes" => include_str!("../../../docs/help/nodes.md"),
         "cameras" => include_str!("../../../docs/help/cameras.md"),
         "lights" => include_str!("../../../docs/help/lights.md"),
+        "fog" => include_str!("../../../docs/help/fog.md"),
         "materials" => include_str!("../../../docs/help/materials.md"),
         "geometry" => include_str!("../../../docs/help/geometry.md"),
         "buffers" => include_str!("../../../docs/help/buffers.md"),
@@ -149,6 +150,17 @@ fn serve(topic: Option<&str>, field: Option<&str>, all: bool) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn resource_binding_fields_show_authorable_map_values() {
+        for path in ["program.bindings", "mesh.instances.attributes"] {
+            let lines = field_lines(path);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].contains("JSON shape: {name: string|Buffer object}"), "{}", lines[0]);
+        }
+        assert!(topic_lines("programs").any(|line| line.starts_with("program.bindings:") && line.contains("JSON shape:")));
+        assert!(topic_lines("nodes").any(|line| line.starts_with("node.instances.attributes (mesh):") && line.contains("JSON shape:")));
+    }
+
+    #[test]
     fn camera_fields_and_heading_paths_resolve() {
         for name in ["lens", "sensor_width", "shift", "use_dof", "aperture_blades", "projection"] {
             assert_eq!(field_lines(&format!("std/camera.{name}")).len(), 1);
@@ -180,7 +192,8 @@ mod tests {
         assert!(field_lines("std/text.align_y")[0].contains("default top_baseline"));
         let upgrade = document("upgrade").unwrap();
         assert!(!upgrade.contains("lane x"));
-        assert!(!upgrade.contains("material.priority"));
+        assert!(upgrade.contains("material.priority"));
+        assert!(field_lines("material.priority")[0].contains("default 0"));
         assert!(!upgrade.contains("Fog returns"));
     }
     #[test]
@@ -188,7 +201,7 @@ mod tests {
         assert!(field_lines("node.target")[0].contains("structural, not animatable"));
         let animation = document("animation").unwrap();
         assert!(animation.contains("including [x,y,z]"));
-        assert!(animation.contains("[\"nodes\",\"aim\",\"translation\"]"));
+        assert!(animation.contains("evaluated translation track"));
     }
     #[test]
     fn png_alpha_is_documented() {
@@ -260,7 +273,7 @@ mod tests {
     }
     #[test]
     fn every_public_topic_has_a_source() {
-        for topic in constants::HELP_TOPICS {
+        for topic in constants::HELP_TOPICS.iter() {
             assert!(*topic == "field" || document(topic).is_some() || vork_scene::libraries::library(topic).is_some(), "{topic}");
         }
     }

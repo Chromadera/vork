@@ -134,8 +134,6 @@ registry! {
     // Froxel scan dispatch ABI: adjacent columns and ordered depth blocks per group.
     // Froxel storage ABI: aligned float4 source and transmission plane elements.
     /// Compactified world lattice for per-light medium visibility.
-    MEDIUM_VISIBILITY_SIDE: u32 => u32, "REG_MEDIUM_VISIBILITY_SIDE" = 32;
-    FROXEL_ELEMENT_BYTES: u64 => u32, "REG_FROXEL_ELEMENT_BYTES" = 16;
     // GPU ABI: render reflection technique codes, matching constants.wgsl.
     REFLECTIONS_OFF: f32 => f32, "REG_REFLECTIONS_OFF" = 0.;
     REFLECTIONS_RAY: f32 => f32, "REG_REFLECTIONS_RAY" = 2.;
@@ -144,7 +142,12 @@ registry! {
     // GPU-published view capacity feedback in the existing shader diagnostics binding.
     CAMERA_VISIBILITY_OVERFLOW_WORD: u32 => u32, "REG_CAMERA_VISIBILITY_OVERFLOW_WORD" = 4;
     CAMERA_FRAGMENT_OVERFLOW_WORD: u32 => u32, "REG_CAMERA_FRAGMENT_OVERFLOW_WORD" = 5;
-    SHADER_DIAGNOSTICS_WORDS: u32 => u32, "REG_SHADER_DIAGNOSTICS_WORDS" = 6;
+    TRACE_RAYS_WORD: u32 => u32, "REG_TRACE_RAYS_WORD" = 6;
+    // Offline exposure safety ceiling, independent of future real-time profile admission.
+    TRACE_RAY_LIMIT: u32 => u32, "REG_TRACE_RAY_LIMIT" = 0x7fffffff;
+    TRACE_TRAVERSAL_LIMIT: u32 => u32, "REG_TRACE_TRAVERSAL_LIMIT" = 65536;
+    DROPPED_LIGHT_SAMPLES_WORD: u32 => u32, "REG_DROPPED_LIGHT_SAMPLES_WORD" = 8;
+    SHADER_DIAGNOSTICS_WORDS: u32 => u32, "REG_SHADER_DIAGNOSTICS_WORDS" = 10;
     // Requested output stores in the frame projection's reserved mask component.
     OUTPUT_GPU_COLOR: u32 => u32, "REG_OUTPUT_GPU_COLOR" = 1;
     OUTPUT_COLOR_PLANE: u32 => u32, "REG_OUTPUT_COLOR_PLANE" = 2;
@@ -245,21 +248,30 @@ registry! {
     /// One u32 visibility mask word per pixel invocation.
     REFLECTION_BATCH_SAMPLES: u32 => u32, "REG_REFLECTION_BATCH_SAMPLES" = 32;
     /// Diffuse GI retains all samples across bounded invocations, with or without media.
-    GI_RAY_BATCH: u32 => u32, "REG_GI_RAY_BATCH" = 1;
+    GI_RAY_BATCH: u32 => u32, "REG_GI_RAY_BATCH" = 16;
+    /// Bound the reconstruction footprint as a fraction of the view extent.
+    GI_FILTER_MAX_STEP: u32 => u32, "REG_GI_FILTER_MAX_STEP" = 16;
+    GI_FILTER_EXTENT_PER_STEP: u32 => u32, "REG_GI_FILTER_EXTENT_PER_STEP" = 64;
     MEDIUM_REFLECTION_RAY_BATCH: u32 => u32, "REG_MEDIUM_REFLECTION_RAY_BATCH" = 1;
     /// Retain boundary cursors only across a short primary-lighting depth batch.
-    MEDIUM_LIGHTING_DEPTH_BATCH: u32 => u32, "REG_MEDIUM_LIGHTING_DEPTH_BATCH" = 4;
     /// High bit of reflection dispatch pixel offset: merged slots exist even at one sample.
     REFLECTION_MERGED_SLOTS: u32 => u32, "REG_REFLECTION_MERGED_SLOTS" = 1 << 31;
     // Material-error buffer sentinels: larger than any supported Blend lobe count.
     PATH_BOUNDARY_OVERFLOW: u32 => u32, "REG_PATH_BOUNDARY_OVERFLOW" = u32::MAX;
     PATH_BOUNDARY_AMBIGUOUS: u32 => u32, "REG_PATH_BOUNDARY_AMBIGUOUS" = u32::MAX - 1;
     PATH_MEDIUM_MAJORANT: u32 => u32, "REG_PATH_MEDIUM_MAJORANT" = u32::MAX - 3;
+    PATH_MEDIUM_WORK: u32 => u32, "REG_PATH_MEDIUM_WORK" = u32::MAX - 10;
+    PATH_MEDIUM_INVALID: u32 => u32, "REG_PATH_MEDIUM_INVALID" = u32::MAX - 4;
+    PATH_MEDIUM_DISTANCE: u32 => u32, "REG_PATH_MEDIUM_DISTANCE" = u32::MAX - 12;
+    // InterlockedMax retains the highest diagnostic. Nonfinite output from an
+    // incomplete reservation may be retried, so both output diagnostics must
+    // rank below every independent failure that must refuse the attempt.
     /// Invalid scene-linear radiance refuses the exposure before publication.
-    RADIANCE_NONFINITE: u32 => u32, "REG_RADIANCE_NONFINITE" = u32::MAX - 9;
-    DISPLAY_NONFINITE: u32 => u32, "REG_DISPLAY_NONFINITE" = u32::MAX - 4;
+    RADIANCE_NONFINITE: u32 => u32, "REG_RADIANCE_NONFINITE" = u32::MAX - 14;
+    DISPLAY_NONFINITE: u32 => u32, "REG_DISPLAY_NONFINITE" = u32::MAX - 13;
     /// Invalid authored segment or exhaustion of a free-flight work reservation.
     /// Invalid generated camera ray or visibility interval.
+    TRACE_EXHAUSTED: u32 => u32, "REG_TRACE_EXHAUSTED" = u32::MAX - 11;
     CAMERA_RAY_INVALID: u32 => u32, "REG_CAMERA_RAY_INVALID" = u32::MAX - 8;
     PATH_PROPAGATION_ERROR: u32 => u32, "REG_PATH_PROPAGATION_ERROR" = u32::MAX - 7;
     /// Refuse unresolved invocations; never classify work exhaustion as absorption.
@@ -271,6 +283,8 @@ registry! {
     MATERIAL_TAP_INDEX_MASK: u32 => u32, "REG_MATERIAL_TAP_INDEX_MASK" = 0x0fff_ffff;
     /// Invalid implicit scalar publication.
     IMPLICIT_INVALID: u32 => u32, "REG_IMPLICIT_INVALID" = u32::MAX - 5;
+    /// A stateless geometry prefix produced nonfinite positions or frames.
+    GEOMETRY_NONFINITE: u32 => u32, "REG_GEOMETRY_NONFINITE" = u32::MAX - 9;
     // GPU ABI: words per texture tap in the material word buffer (table word, flags, a 2x2
     // UV matrix and offset). Matches REG_MATERIAL_TAP_WORDS.
     MATERIAL_TAP_WORDS: usize => u32, "REG_MATERIAL_TAP_WORDS" = 9;
@@ -364,8 +378,20 @@ registry! {
 mod diagnostic_tests {
     use super::*;
     #[test]
+    fn independent_failures_outrank_retryable_output_diagnostics() {
+        let independent = [TRACE_EXHAUSTED, PATH_MEDIUM_DISTANCE, PATH_MEDIUM_INVALID,
+            PATH_MEDIUM_WORK, PATH_BOUNDARY_OVERFLOW, PATH_BOUNDARY_AMBIGUOUS,
+            PATH_MEDIUM_MAJORANT, PATH_PROPAGATION_ERROR, CAMERA_RAY_INVALID,
+            PATH_MEDIUM_DIVERGENT, CAMERA_COVERAGE_INVALID, IMPLICIT_INVALID,
+            GEOMETRY_NONFINITE];
+        for code in independent {
+            assert!(code > RADIANCE_NONFINITE && code > DISPLAY_NONFINITE,
+                "independent diagnostic {code} must survive concurrent nonfinite output");
+        }
+    }
+    #[test]
     fn frame_diagnostics_are_distinct() {
-        let codes=[PATH_BOUNDARY_OVERFLOW,PATH_BOUNDARY_AMBIGUOUS,PATH_MEDIUM_MAJORANT,DISPLAY_NONFINITE,RADIANCE_NONFINITE,PATH_PROPAGATION_ERROR,CAMERA_RAY_INVALID,PATH_MEDIUM_DIVERGENT,CAMERA_COVERAGE_INVALID,IMPLICIT_INVALID];
+        let codes=[TRACE_EXHAUSTED,PATH_MEDIUM_DISTANCE,PATH_MEDIUM_INVALID,PATH_MEDIUM_WORK,PATH_BOUNDARY_OVERFLOW,PATH_BOUNDARY_AMBIGUOUS,PATH_MEDIUM_MAJORANT,DISPLAY_NONFINITE,RADIANCE_NONFINITE,PATH_PROPAGATION_ERROR,CAMERA_RAY_INVALID,PATH_MEDIUM_DIVERGENT,CAMERA_COVERAGE_INVALID,IMPLICIT_INVALID,GEOMETRY_NONFINITE];
         assert_eq!(std::collections::BTreeSet::from(codes).len(),codes.len());
     }
 }

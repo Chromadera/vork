@@ -4,7 +4,7 @@ use crate::*;
 use std::sync::Arc;
 
 pub(crate) struct Mesh {
-    source: wgpu::Buffer,
+    pub(crate) source: wgpu::Buffer,
     attributes: wgpu::Buffer,
     topology: wgpu::Buffer,
     count: u32,
@@ -96,6 +96,7 @@ pub(crate) struct Pipeline {
     finish: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     capacity: usize,
+    attribute_poses: bool,
 }
 impl Pipeline {
     pub(crate) fn new(
@@ -103,6 +104,7 @@ impl Pipeline {
         native_programs: &programs::Native,
         materials: &wgpu::BindGroupLayout,
         attributes: usize,
+        attribute_poses: bool,
     ) -> Result<Self> {
         ensure!(
             r.device.limits().max_storage_buffers_per_shader_stage >= 11,
@@ -149,6 +151,7 @@ impl Pipeline {
             .chain(["-fp-mode", "precise"])
             .chain(forward_variant::SLANG_FLAGS.iter().copied())
             .chain(flags.iter().copied())
+            .chain(attribute_poses.then_some("-DVORK_ATTRIBUTE_POSES=1"))
             .chain([
                 define.as_str(),
                 "-DVORK_MATERIAL_RECORDS_REGISTER=t0",
@@ -170,8 +173,7 @@ impl Pipeline {
         let compile = |entry: &str| -> Result<wgpu::ComputePipeline> {
             let compiler=vork_slang::Compiler::discover();
             let (identity,prepared)=crate::programs::native_input_identity(
-                &|key|r.disk_cache.path("material-displacement",1,key),&compiler,&modules,"displacement",&[(entry,"compute")],&args,&native_programs.identities)?;
-            for input in &native_programs.inputs {identity.verify(input)?;}
+                &|key|r.disk_cache.path("material-displacement",1,key),&compiler,&modules,"displacement",&[(entry,"compute")],&args,&native_programs.identities,&native_programs.inputs)?;
             let mut key = blake3::Hasher::new();
             for part in [target, entry, define.as_str()] {
                 key.update(part.as_bytes());
@@ -179,21 +181,20 @@ impl Pipeline {
             for argument in &args {
                 key.update(argument.as_bytes());
             }
-            key.update(&identity.identity);
-            let path = r
-                .disk_cache
-                .path("material-displacement", 1, key.finalize());
-            let code = if let Some(code) = disk_cache::read(&path) {
-                code
-            } else {
-                let start=std::time::Instant::now();
-                let prepared=match prepared {Some(input)=>input,None=>compiler.prepare_identified_modules(&modules,"displacement",&[(entry,"compute")],&args,&native_programs.identities)?};
-                anyhow::ensure!(prepared.identity()==identity.identity,"Slang inputs changed during cache lookup; retry the command");
+            let prefix = key.clone();
+            let receipt_path = crate::programs::native_input_receipt_path(
+                &|key| r.disk_cache.path("material-displacement", 1, key), &compiler,
+                &modules, "displacement", &[(entry, "compute")], &args, &native_programs.identities)?;
+            let code = crate::programs::native_code(&identity, prepared, &native_programs.inputs, &receipt_path, |identity| {
+                let mut key = prefix.clone();
+                key.update(identity);
+                r.disk_cache.path("material-displacement", 1, key.finalize())
+            }, || compiler.prepare_identified_modules(&modules, "displacement", &[(entry, "compute")], &args, &native_programs.identities), |prepared| {
+                let start = std::time::Instant::now();
                 let code = prepared.compile()?;
                 crate::timing::creation(&r.device,entry,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
-                let _ = disk_cache::write(&path, &code);
-                code
-            };
+                Ok(code)
+            })?;
             let threads = if entry == "initialize" {
                 (1, 1, 1)
             } else {
@@ -226,6 +227,7 @@ impl Pipeline {
             }))
         };
         Ok(Self {
+            attribute_poses,
             initialize: compile("initialize")?,
             evaluate: compile("evaluate")?,
             finish: compile("finish")?,
@@ -297,7 +299,7 @@ pub(crate) fn page_layout(
 pub(crate) fn resources(
     r: &Renderer,
     s: &InstalledScene,
-    skin: &[Option<FrameDeform>],
+    inputs: &[Option<EvaluatedGeometry>],
 ) -> Result<Vec<Option<Frame>>> {
     let Some(pipeline) = &s.displacement else {
         return Ok(Vec::new());
@@ -330,30 +332,42 @@ pub(crate) fn resources(
     // A batch owns its control resources. Jobs retain only their logical identity
     // and output range. Equal source/topology and destination pages share bindings.
     let mut groups: std::collections::HashMap<_, Vec<usize>> = std::collections::HashMap::new();
+    let mut converters=std::collections::HashMap::new();
     for (i, draw) in s.draws.iter().enumerate() {
         let Some(mesh) = &draw.displacement else { continue };
         if draw.displacement_leader.is_some_and(|leader| leader != i) { continue; }
         let (leader, _) = ranges[i].unwrap();
-        let source = skin[i].as_ref().map_or(&mesh.source, |s| &s.output.buffer);
-        let previous = skin[i].as_ref().map_or(&mesh.source, |s| &s.previous_output);
-        let (source_offset, source_size) = skin[i].as_ref().map_or((0, source.size()),
+        let source = inputs[i].as_ref().map_or(&mesh.source, |s| &s.output.buffer);
+        let previous = inputs[i].as_ref().map_or(&mesh.source, |s| &s.previous_output.buffer);
+        let (source_offset, source_size) = inputs[i].as_ref().map_or((0, source.size()),
             |s| (s.output.offset, s.output.size));
-        groups.entry((source.clone(), source_offset, source_size, previous.clone(), mesh.attributes.clone(),
-            mesh.topology.clone(), leader)).or_default().push(i);
+        let (previous_offset,previous_size)=inputs[i].as_ref().map_or((0,previous.size()),|s|(s.previous_output.offset,s.previous_output.size));
+        let mut attributes=mesh.attributes.clone();
+        if let Some(input)=inputs[i].as_ref().filter(|_|draw.layout.custom!=0) {
+            if let Some(current)=&input.attributes {
+                ensure!(pipeline.attribute_poses,"displacement pipeline omitted historical attribute inputs");
+                ensure!(mesh.point_vertices==0,"computed point displacement needs a point-domain producer; use triangle geometry or compute the offsets in the producer");
+                let converter=Arc::new(crate::geometry_stage_source::AttributeRows::new(r,current,input.previous_attributes.as_ref(),&mesh.attributes,mesh.count,draw.layout)?);
+                attributes=converter.buffer.clone();converters.insert(attributes.clone(),converter);
+            }
+        }
+        groups.entry((source.clone(), source_offset, source_size, previous.clone(),previous_offset,previous_size,attributes,
+            mesh.topology.clone(), leader,inputs[i].is_some())).or_default().push(i);
     }
     let mut frames: Vec<Option<Frame>> = (0..s.draws.len()).map(|_| None).collect();
-    for ((source, source_offset, source_size, previous, attributes, topology, leader), jobs) in groups {
+    for ((source, source_offset, source_size, previous,previous_offset,previous_size,attributes, topology, leader,evaluated), jobs) in groups {
         let (current, endpoints) = &streams[&leader];
         for jobs in jobs.chunks(pipeline.capacity) {
             let mesh = s.draws[jobs[0]].displacement.as_ref().unwrap();
             let batch = Arc::new(Batch::new(r, pipeline, mesh, jobs, &source, source_offset, source_size, &previous,
-                &attributes, &topology, current, endpoints));
+                previous_offset,previous_size,&attributes, &topology, current, endpoints,evaluated,converters.get(&attributes).cloned()));
             for (slot, &i) in jobs.iter().enumerate() {
                 let (_, offset) = ranges[i].unwrap();
                 let size = u64::from(mesh.count) * 40;
                 frames[i] = Some(Frame {
                     geometry: EvaluatedGeometry {
                         attributes: None,
+                        previous_attributes: None,
                         output: geometry::VertexStream { buffer: current.clone(), offset, size },
                         previous_output: geometry::VertexStream {
                             buffer: endpoints.clone(), offset: offset * 2, size: size * 2,
@@ -369,6 +383,8 @@ pub(crate) fn resources(
 
 /// Retained control and scratch storage for evaluations with compatible bindings.
 struct Batch {
+    evaluated: bool,
+    attributes: Option<Arc<crate::geometry_stage_source::AttributeRows>>,
     bind: wgpu::BindGroup,
     params: wgpu::Buffer,
     scratch: wgpu::Buffer,
@@ -397,8 +413,9 @@ impl Frame {
 impl Batch {
     fn new(r: &Renderer, pipeline: &Pipeline, mesh: &Mesh, jobs: &[usize],
         source: &wgpu::Buffer, source_offset: u64, source_size: u64,
-        previous: &wgpu::Buffer, attributes: &wgpu::Buffer,
+        previous: &wgpu::Buffer, previous_offset:u64, previous_size:u64, attributes: &wgpu::Buffer,
         topology: &wgpu::Buffer, current: &wgpu::Buffer, endpoints: &wgpu::Buffer,
+        evaluated:bool, attribute_input:Option<Arc<crate::geometry_stage_source::AttributeRows>>,
     ) -> Self {
         let buffer = |label, size, usage| gpu_memory::buffer(&r.device, &wgpu::BufferDescriptor {
             label: Some(label), size, usage, mapped_at_creation: false,
@@ -421,16 +438,73 @@ impl Batch {
                     buffer: source, offset: source_offset,
                     size: std::num::NonZeroU64::new(source_size),
                 })),
-                entry(2, previous.as_entire_binding()), entry(3, attributes.as_entire_binding()),
+                entry(2, wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer:previous,offset:previous_offset,size:std::num::NonZeroU64::new(previous_size),
+                })), entry(3, attributes.as_entire_binding()),
                 entry(4, topology.as_entire_binding()), entry(5, scratch.as_entire_binding()),
                 entry(6, current.as_entire_binding()), entry(7, endpoints.as_entire_binding()),
             ],
         });
         let count = mesh.count.div_ceil(constants::DEFORM_GROUP);
         let width = count.min(r.device.limits().max_compute_workgroups_per_dimension);
-        Self { bind, params, scratch, bounds_offset, readback, jobs: jobs.to_vec(), count: mesh.count,
+        Self { evaluated,attributes:attribute_input,bind, params, scratch, bounds_offset, readback, jobs: jobs.to_vec(), count: mesh.count,
             groups: [width, count.div_ceil(width)], timed: mesh.timed,
             point_vertices: mesh.point_vertices }
+    }
+}
+
+/// A stateless prefix evaluated by the existing compute clock. Only pose zero
+/// executes; presentation history belongs to the downstream frame chain.
+pub(crate) struct Canonical {
+    diagnostics:wgpu::ComputePipeline,
+    pipeline: [wgpu::ComputePipeline;3],
+    batch: Batch,
+    pub geometry: EvaluatedGeometry,
+    material: u32,
+    object_header: u32,
+}
+impl Canonical {
+    pub(crate) fn new(r:&Renderer,pipeline:&Pipeline,mesh:&Mesh,source:Option<&wgpu::Buffer>,material:u32,object_header:u32,object:u32)->Self {
+        let size=u64::from(mesh.count)*40;
+        let allocate=|bytes|gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {
+            label:Some("canonical displacement stream"),size:bytes,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false,
+        });
+        let output=allocate(size);
+        let previous=allocate(size*2);
+        let unused_history=allocate(size*2);
+        let source=source.unwrap_or(&mesh.source);
+        let batch=Batch::new(r,pipeline,mesh,&[0],source,0,size,&unused_history,0,size*2,
+            &mesh.attributes,&mesh.topology,&output,&previous,false,None);
+        let code=format!("@group(0) @binding(0) var<storage,read> bounds:array<u32>; @group(0) @binding(1) var<storage,read_write> errors:array<atomic<u32>>; @compute @workgroup_size(1) fn main() {{if(bounds[{}u]!=0u) {{atomicMax(&errors[0],{}u);atomicMin(&errors[1],{object}u);}}}}",batch.bounds_offset/4+6,vork_slang::registry::GEOMETRY_NONFINITE);
+        let diagnostics=compute::pipeline_layout(r,&code,"canonical geometry diagnostics",&[Some(true),Some(false)],"main");
+        Self {diagnostics,pipeline:[pipeline.initialize.clone(),pipeline.evaluate.clone(),pipeline.finish.clone()],batch,
+            geometry:EvaluatedGeometry {output:geometry::VertexStream {buffer:output,offset:0,size},
+                previous_output:geometry::VertexStream {buffer:previous,offset:0,size:size*2},attributes:None,previous_attributes:None},
+            material,object_header}
+    }
+    pub(crate) fn encode(&self,device:&wgpu::Device,encoder:&mut wgpu::CommandEncoder,materials:&materials::FrameMaterials,time:f32,to_stream:Mat4)->Result<()> {
+        let from_stream=crate::inverse_or_identity(to_stream);
+        ensure!(from_stream.is_finite(),"canonical displacement requires an invertible mesh frame");
+        let mut poses=[Parameters::zeroed();3];
+        poses[0]=Parameters {count:self.batch.count,material:self.material,time,previous_time:time,
+            dispatch_width:self.batch.groups[0]*constants::DEFORM_GROUP,object_header:[self.object_header,1,0,0],
+            to_stream,from_stream,addresses:[0,0,0,(self.batch.bounds_offset/4) as u32],..Parameters::zeroed()};
+        let upload=init(device,"canonical displacement parameters",bytemuck::cast_slice(&poses),wgpu::BufferUsages::COPY_SRC);
+        encoder.copy_buffer_to_buffer(&upload,0,&self.batch.params,0,upload.size());
+        for (i,pipeline) in self.pipeline.iter().enumerate() {
+            let mut pass=encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(1,&materials.bind,&[]);
+            pass.set_bind_group(2,&self.batch.bind,&[]);
+            let groups=if i==0 {[1,1]} else {self.batch.groups};
+            pass.dispatch_workgroups(groups[0],groups[1],1);
+        }
+        let bind=device.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("canonical geometry diagnostics"),layout:&self.diagnostics.get_bind_group_layout(0),entries:&[
+            entry(0,self.batch.scratch.as_entire_binding()),entry(1,materials.shader_errors.as_entire_binding()),
+        ]});
+        let mut pass=encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.diagnostics);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(1,1,1);
+        Ok(())
     }
 }
 
@@ -450,6 +524,8 @@ pub(crate) fn evaluate(
     time: f32,
     previous_time: f32,
     next_time: f32,
+    predecessor_inputs: Option<&[Vec<u8>]>,
+    encode_predecessors: impl FnOnce(&mut wgpu::CommandEncoder),
 ) -> Result<Vec<Option<(Vec3, Vec3)>>> {
     let Some(pipeline) = &s.displacement else {
         return Ok(Vec::new());
@@ -483,8 +559,8 @@ pub(crate) fn evaluate(
                 point_vertices: batch.point_vertices,
                 pose: pose as u32,
                 dispatch_width: batch.groups[0] * constants::DEFORM_GROUP,
-                reserved: u32::from(s.draws[i].deform.is_some()),
-                object_header: [objects[s.draws[i].object as usize].metadata[2], 0, 0, 0],
+                reserved: u32::from(batch.evaluated),
+                object_header: [objects[s.draws[i].object as usize].metadata[2], 0, batch.attributes.as_ref().map_or(0,|a|a.pose_stride), 0],
                 to_stream,
                 from_stream,
                 addresses: [
@@ -498,10 +574,14 @@ pub(crate) fn evaluate(
         }
         // Logical jobs own dirty state, not the shared parameter table. A skin
         // update invalidates only its consumers, even when descriptors share a page.
-        let changed = changes.changed(values::ChangeKey::Displacement(i),
-            bytemuck::cast_slice(&parameters[i]));
+        let changed = if let Some(inputs)=predecessor_inputs {
+            let mut key=bytemuck::cast_slice(&parameters[i]).to_vec();
+            key.extend_from_slice(&inputs[i]);
+            if let Some(materials)=materials {changes.append_buffer_inputs(&materials.records,&mut key);}
+            changes.changed(values::ChangeKey::Displacement(i),&key)
+        } else {changes.changed(values::ChangeKey::Displacement(i),bytemuck::cast_slice(&parameters[i]))};
         active[i] = cached_bounds[i].is_none() || changed
-            || skin[i].as_ref().is_some_and(|skin|
+            || skin.get(i).and_then(Option::as_ref).is_some_and(|skin|
                 changes.buffer_dirty(&skin.params) || changes.buffer_dirty(&skin.previous_params));
         if active[i] { changes.publish(values::ChangeKey::DisplacedPositions(i)); }
     }
@@ -549,7 +629,8 @@ pub(crate) fn evaluate(
             end_of_pass_write_index: None,
         }),
     }));
-    passes::deform::dispatch(&mut encoder, s, skin, None);
+    encode_predecessors(&mut encoder);
+    for batch in &batches {if let Some(attributes)=&batch.attributes {attributes.encode(&mut encoder);}}
     for stage in [&pipeline.initialize, &pipeline.evaluate, &pipeline.finish] {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("material geometry stage"),

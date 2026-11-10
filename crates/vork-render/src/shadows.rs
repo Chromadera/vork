@@ -5,7 +5,6 @@ pub(crate) struct Persistent {
     _fibre: Option<std::sync::Arc<crate::fibre_transport::Storage>>,
     _probes: Option<std::sync::Arc<crate::probes::Storage>>,
     pub(crate) sequence: wgpu::Buffer,
-    pub(crate) volume_bind: wgpu::BindGroup,
     sequence_offsets: std::collections::BTreeMap<usize,u32>,
     pub(crate) changes: std::sync::Arc<std::sync::Mutex<values::LightingTracker>>,
 }
@@ -40,11 +39,9 @@ impl Persistent {
 
         ensure!(words.len() as u64*4<=r.device.limits().max_storage_buffer_binding_size.min(r.device.limits().max_buffer_size),"shadow sampling rows exceed the device storage binding limit");
         let sequence=init(&r.device,"shadow sampling rows",bytemuck::cast_slice(&words),wgpu::BufferUsages::STORAGE);
-        let volume_bind=r.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:Some("volume sampling"),layout:&volume_layout(&r.device),entries:&[entry(0,sequence.as_entire_binding())]});
         let mut changes=values::LightingTracker::default();
         if s.environment.animated() {changes.changed(values::LightingKey::EnvironmentInputs,&s.environment.sample_key(0.)?);}
-        Ok(Self {_fibre:s.fibre.as_ref().map(|p|p.storage()),_probes:s.probes.as_ref().map(|p|p.storage()),sequence,volume_bind,sequence_offsets,changes:std::sync::Arc::new(std::sync::Mutex::new(changes))})
+        Ok(Self {_fibre:s.fibre.as_ref().map(|p|p.storage()),_probes:s.probes.as_ref().map(|p|p.storage()),sequence,sequence_offsets,changes:std::sync::Arc::new(std::sync::Mutex::new(changes))})
     }
     /// Camera-budget parameters live above the independent transport flag bits.
     pub(crate) fn ray_sequence_word(&self, exposure: usize) -> u32 {
@@ -98,9 +95,7 @@ impl Persistent {
     }
 }
 
-pub(crate) fn volume_layout(d:&wgpu::Device)->wgpu::BindGroupLayout {
- d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("volume sampling"),entries:&pipelines::shadow_entries()})
-}
+
 #[cfg(all(test, vork_private_tests))]
 include!("shadows_tests_private.rs");
 

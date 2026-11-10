@@ -10,7 +10,12 @@ import decoupled_slots;
 [[vk::binding(0,0)]] Texture2D<float4> correction : register(t0);
 [[vk::binding(1,0)]] Texture2D<float4> ambient_correction : register(t1);
 [shader("vertex")]
+// Full-screen draws need Vulkan's raw vertex index, as in mip.slang.
+#ifdef VORK_METAL
 float4 subsurface_vs(uint id : SV_VertexID) : SV_Position {
+#else
+float4 subsurface_vs(uint id : SV_VulkanVertexID) : SV_Position {
+#endif
     return float4(float2(float((id<<1u)&2u),float(id&2u))*float2(2.,-2.)+float2(-1.,1.),0.,1.);
 }
 struct Correction {float4 color : SV_Target0;float4 ambient : SV_Target1;};

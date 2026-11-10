@@ -1,0 +1,5 @@
+[advisories]
+# paste is used only by pulp's SIMD proc macros (via our vendored exr).
+# RUSTSEC-2024-0436 reports maintenance status, not a known vulnerability.
+# Keep until pulp replaces paste; no vulnerability/severity class is exempted.
+ignore = ["RUSTSEC-2024-0436"]

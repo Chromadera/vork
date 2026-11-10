@@ -3,6 +3,13 @@ use super::*;
 
 use std::collections::BTreeMap;
 
+// Qualified stage 1 convex carrier admission.
+#[path = "medium_convex_spike.rs"]
+mod convex_spike;
+#[cfg(test)]
+#[path = "medium_work.rs"]
+mod work_contract;
+
 pub(crate) struct Installed {
     names: BTreeMap<String, (u32, u32)>,
     programs: BTreeMap<String, (vork_slang::MediumProgram, Vec<u32>)>,
@@ -46,43 +53,19 @@ pub(super) fn install(
     let mut words = vec![0, 0, u32::MAX, 0];
     let mut input_bindings = Vec::new();
     let animated = crate::materials::animated_inputs(scene)?;
-    let mut native = Native {steps:constants::VOLUME_SAMPLES,..Native::default()};
-    native.dense_grids_only=scene.buffers.values().any(|b|b.dims.is_some()) && scene.buffers.values().all(|b|b.grid.is_none());
-    native.identity.push(u8::from(native.dense_grids_only));
-    native.ray_shadows=crate::rt::ray_shadows(scene);
-    native.identity.push(u8::from(native.ray_shadows));
-    configure(&mut native);
-    #[cfg(test)]
-    if let Some((tile,slices,distribution))=r.reference_medium_grid {
-        native.tile=tile; native.slices=slices; native.steps=slices; native.distribution=distribution;
-    }
-    let mut native_code = String::from("import vork_medium_bounds;\n");
+    let mut native = Native::default();
     let mut native_dispatch = String::from(
         "export MediumSample volume_coefficients(uint id,float3 p,MediumTransportContext context) {switch(id) {\n",
     );
-    let mut interval_dispatch=String::from("export MediumSample volume_interval_coefficients(uint id,float3 o,float3 d,float distance,float fraction,MediumTransportContext context) {switch(id) {\n");
-    let mut emitting_dispatch=String::from("export bool volume_emitting(uint input) {switch(input-medium_frame().medium.x) {\n");
-    let mut homogeneous_dispatch=String::from("export bool volume_homogeneous(uint id) {switch(id) {\n");
     let mut programs = BTreeMap::new();
     // A majorant is stored beside its existing input words only when a sampled
     // consumer needs heterogeneous tracking. Homogeneous/raster installs retain
     // their original layout and allocate no tracking metadata.
     let compiled=names.keys().map(|name|Ok((name.clone(),compile(r,scene,name,base)?))).collect::<Result<BTreeMap<_,_>>>()?;
     native.world_only=stages.values().all(|s|!s.medium);
-    if native.world_only {
-        if let Some(name)=world {
-            let (program,inputs)=&compiled[name];
-            let dynamic=animated.get(name).cloned().unwrap_or_default();
-            let proof=program.inputs.varying_words(inputs,&dynamic);
-            if let Some((a,b,g))=program.connection_profile_for_inputs(&programs::abi(),&proof)? {
-                native.surface_connection=Some(words.len() as u32);
-                words.extend(a.into_iter().chain(b).chain(g).map(f32::to_bits));
-            }
-        }
-    }
-    native.identity.push(u8::from(native.surface_connection.is_some()));
     native.homogeneous=compiled.values().all(|(p,_)|p.homogeneous);
     native.scattering_free=compiled.values().all(|(p,_)|p.scattering_free);
+    native.emission_free=compiled.values().all(|(p,_)|p.emission_free);
     native.time_dependent=compiled.values().any(|(p,_)|p.time_dependent);
     let tracking=!native.homogeneous && scene.render.settings.integrator.is_path();
     native.tracking=tracking;
@@ -99,7 +82,7 @@ pub(super) fn install(
         let (program,inputs)=&compiled[name];
 
         if !program.homogeneous {
-            if Some(name.as_str())==world && program.exponential.is_none() {native.sampled_error=Some(format!("sampled heterogeneous world medium {name} needs a finite domain; bind it to a closed mesh boundary for sampled transport; unbounded varying world media require raster transport (vork help profiles)"));}
+            if Some(name.as_str())==world && program.exponential.is_none() {native.sampled_error=Some(format!("sampled heterogeneous world medium {name} needs a finite domain; bind it to a closed mesh boundary for sampled transport; unbounded varying world media are unsupported (vork help profiles)"));}
         }
         if tracking {words.push(0);}
         let base = words.len() as u32;
@@ -107,7 +90,6 @@ pub(super) fn install(
         // Input bases also identify instances in emitting dispatch. Empty layouts
         // must own a word so the next instance cannot reuse this identity.
         if inputs.is_empty() { words.push(0); }
-        emitting_dispatch.push_str(&format!("case {base}u: return {};\n",!program.emission_free));
         if animated.contains_key(name) {
             input_bindings.push((name.clone(), base as usize, program.inputs.clone(), 0.));
         }
@@ -119,30 +101,23 @@ pub(super) fn install(
         programs.insert(program.native_point.clone(), id);
         *offsets = (id, base);
         let point=native_coefficients(&program,id,true,&mut native);
-        native.point.push_str(&point);native_code.push_str(&point);
+        native.point.push_str(&point);
         path_homogeneous.push_str(&format!("case {id}u: return {};\n",program.homogeneous));
-        interval_dispatch.push_str(&format!("case {id}u: return volume_{id}_interval_point(o,d,distance,fraction,context);\n"));
-        homogeneous_dispatch.push_str(&format!("case {id}u: return {};\n",program.homogeneous));
         native_dispatch.push_str(&format!(
             "case {id}u: return volume_{id}_medium_point(p,context);\n"
         ));
     }
     path_homogeneous.push_str("default: return true;}}\n");native.point.push_str(&path_homogeneous);
     native.identity.push(u8::from(native.homogeneous));
+    if !native.homogeneous {
+        native.identity.extend([u8::from(native.scattering_free),u8::from(native.emission_free)]);
+    }
     if let Some(world) = world {
         (words[2], words[3]) = names[world];
     }
-    native_code.push_str(&world.map(|name|tail_closure(&compiled[name].0)).unwrap_or_else(||"export float medium_world_tail_start(float3 o,float3 d) {return 0.;}\nexport MediumSample medium_world_tail_coefficients(float3 o,float3 d) {return MediumSample();}\nexport void medium_world_exponential(out float3 a,out float3 b,out float3 g) {a=0.;b=0.;g=0.;}\n".to_owned()));
     native_dispatch.push_str("default: return MediumSample();}}\n");
     native.point.push_str(&native_dispatch.replace("export MediumSample volume_coefficients","public MediumSample path_medium_coefficients"));
-    native_code.push_str(&native_dispatch);
-    interval_dispatch.push_str("default: return MediumSample();}}\n");native_code.push_str(&interval_dispatch);
-    native_code.push_str("export MediumSample medium_world_coefficients(float3 p) {let base=medium_frame().medium.x;MediumTransportContext context={};context.input_base=base+medium_word(base+3u);context.inverse=float4x4(float4(1.,0.,0.,0.),float4(0.,1.,0.,0.),float4(0.,0.,1.,0.),float4(0.,0.,0.,1.));return volume_coefficients(medium_word(base+2u),p,context); }\nexport MediumTransport medium_transport_unbounded(float3 o,float3 d,float scale,float fraction) {return medium_transport_infinity(o,d,scale,fraction); }\n");
-    homogeneous_dispatch.push_str("default: return false;}}\n");native_code.push_str(&homogeneous_dispatch);
-    emitting_dispatch.push_str("default: return true;}}\n");native_code.push_str(&emitting_dispatch);
-    native.transport=native_code.clone();
     Ok(super::Installed {
-        shader: pipelines::replace_hook(RESOLVE, HOOK, &format!("{NATIVE_ACCESSORS}\n{native_code}"))?,
         native,
         words,
         instances: Installed { names, programs: compiled },
@@ -151,11 +126,6 @@ pub(super) fn install(
 }
 
 impl super::Installed {
-    pub(crate) fn domain_count(&self, draws: &[install::Draw], materials: &BTreeMap<String, usize>) -> usize {
-        let bindings: std::collections::BTreeSet<_> = materials.iter()
-            .filter_map(|(name,index)|self.instances.names.contains_key(name).then_some(*index)).collect();
-        draws.iter().filter(|draw|bindings.contains(&draw.material)).map(|draw|draw.instances.len()).sum()
-    }
     pub(crate) fn mesh_words(
         &mut self,
         _r: &Renderer,
@@ -173,6 +143,7 @@ impl super::Installed {
             .collect();
         let count=draws.iter().filter(|draw|bindings.contains_key(&draw.material))
             .map(|draw|draw.instances.len()).sum();
+        if self.native.convex { ensure!(count <= 8, "stage 1 fog supports at most eight finite carriers; combine carriers or render the volume externally"); }
         admit_domains(count)?;
         let animated = crate::materials::animated_inputs(scene)?;
         if self.native.tracking {
@@ -186,7 +157,7 @@ impl super::Installed {
                 if bounds.0.is_finite() {
                     let dynamic=animated.get(name).cloned().unwrap_or_default();
                     let proof=grid_proof_words(program,inputs,&dynamic).0;
-                    self.words[*base as usize-1]=bound::certify(program,&proof,bounds,bound::certification_times(scene)).with_context(||format!("medium shader {:?} (material {name:?}): cannot certify extinction majorant; use supported shader operations or the raster integrator",scene.materials[name].program))?.to_bits();
+                    self.words[*base as usize-1]=bound::certify(program,&proof,bounds,bound::certification_times(scene)).with_context(||format!("medium shader {:?} (material {name:?}): cannot certify extinction majorant; use supported shader operations",scene.materials[name].program))?.to_bits();
                 }
             }
         }
@@ -198,16 +169,16 @@ impl super::Installed {
             };
             ensure!(
                 !draw.evaluated(),
-                "deformed volume boundaries are not supported yet"
+                "stage 1 fog does not support deformed carrier boundaries; bake a closed convex mesh first"
             );
             let geometry = draw
                 .exit_geometry
                 .as_ref()
-                .context("volume requires retained mesh geometry")?;
+                .context("unsupported stage 1 fog carrier geometry; use a closed convex triangle mesh, or render the volume externally")?;
             validate_boundary(geometry)?;
             ensure!(
                 draw.count as usize == geometry.indices.len(),
-                "volume boundaries require one closed material group"
+                "stage 1 fog needs one closed material group per carrier; split carriers into separate meshes"
             );
             let start = draw.primitive_start as usize * 3;
             let root = self.words.len() as u32;
@@ -216,7 +187,18 @@ impl super::Installed {
                     .chunks_exact(3)
                     .map(|indices| [indices[0], indices[1], indices[2]].map(|i| Vec3::from_array(geometry.vertices[i as usize].POSITION)))
                     .collect();
-                boundary_bvh(&mut self.words, &mut triangles);
+                if self.native.convex {
+                    let faces = triangles.iter().map(|t| t.map(|v| v.to_array())).collect::<Vec<_>>();
+                    let carrier = convex_spike::Convex::certify(&faces).map_err(anyhow::Error::msg).context("unsupported stage 1 fog carrier; use a closed convex mesh of at most 32 triangles, or render the volume externally")?;
+                    // One record and a bounded plane array; reuse the domain descriptor.
+                    self.words.extend([0; 8]);
+                    self.words[root as usize + 7] = carrier.planes.len() as u32;
+                    for (normal, anchor) in carrier.planes {
+                        let magnitude = normal.iter().map(|v|v*v).sum::<f64>().sqrt();
+                        self.words.extend(normal.map(|v| (v / magnitude) as f32).map(f32::to_bits));
+                        self.words.extend(anchor.map(|v|v as f32).map(f32::to_bits));
+                    }
+                } else { boundary_bvh(&mut self.words, &mut triangles); }
             }
             let end = self.words.len() as u32;
             for object in draw.instances.clone() {
@@ -246,7 +228,6 @@ impl super::Installed {
         }
         self.words[0] = self.words.len() as u32;
         self.words[1] = (descriptors.len() / constants::MEDIUM_BOUND_WORDS) as u32;
-        self.native.domains = self.words[1] as usize;
         self.words.extend(descriptors);
         Ok(())
     }
@@ -493,240 +474,9 @@ mod tests {
         mesh.vertices[8].POSITION[2] += 1e-7;
         assert!(validate_boundary(&mesh).is_err());
     }
-    #[test]
-    #[ignore = "requires pinned Slang and GPU; lavapipe works"]
-    fn bounded_transport_matches_beer_lambert_for_inside_clipped_scaled_and_overlapping_meshes()
-    -> Result<()> {
-        let renderer = Renderer::new()?;
-        let device = &renderer.device;
-        let mut scene: v2::Scene =
-            vork_scene::v2::from_test_value(vork_scene::v2::with_test_settings(include_str!("../tests/fixtures/volume-glass-box.json"), include_str!("../tests/presets/volume-glass-box-c5ca7d6d.json"))?)?;
-        scene.materials.get_mut("smoke").unwrap().program = "std/fog".into();
-        let stages = programs::mesh_stages(&renderer, &scene, Path::new("."))?;
-        scene.materials.get_mut("smoke").unwrap().inputs = serde_json::from_value(
-            serde_json::json!({"density":0.5,"scattering":[0.2,0.4,0.6],"absorption":[0.8,0.6,0.39999998],"emission":[2,0,0]}),
-        )?;
-        scene
-            .materials
-            .insert("world_test".into(), scene.materials["smoke"].clone());
-        let multiple = install(&renderer, &scene, Some("world_test"), Path::new("."), &stages)?;
-        assert_eq!(
-            multiple.instances.names["smoke"].0,
-            multiple.instances.names["world_test"].0,
-            "instances share one compiled medium program"
-        );
-        for metal in [false, true] {
-            passes::resolve::compile_native(
-                &multiple.shader,
-                &multiple.native,
-                "volume_lighting",
-                metal,
-            )?;
-        }
-        scene.materials.get_mut("world_test").unwrap().inputs.insert("height_falloff".into(),serde_json::from_value(serde_json::json!(0.1))?);
-        let mixed=install(&renderer,&scene,Some("world_test"),Path::new("."),&stages)?;
-        assert!(multiple.native.homogeneous);
-        assert!(!mixed.native.homogeneous);
-        assert_ne!(mixed.instances.names["smoke"].0,mixed.instances.names["world_test"].0,
-            "homogeneous and varying instances share source but need distinct kernel variants");
-        for metal in [false,true] {passes::resolve::compile_native(&mixed.shader,&mixed.native,"volume_lighting",metal)?;}
-        // Exercise both specializations of the shared kernel, including the
-        // camera cursor module and an independently traversed light connection.
-        for installed in [&multiple,&mixed] {
-            let mut native=installed.native.clone();native.self_shadows=true;native.boundaries=2;
-            for metal in [false,true] {
-                passes::resolve::compile_native(&installed.shader,&native,"volume_lighting",metal)?;
-            }
-        }
-        scene.programs.insert("world_points".into(), serde_json::from_value(serde_json::json!({"source":"import blender.volume; struct Inputs {}; MediumCoefficients medium(MediumContext ctx, Inputs inputs) { MediumPoint m;m.density=0.01;return principled_volume(m);}"}))?);
-        scene.materials.get_mut("world_test").unwrap().program = "world_points".into();
-        scene
-            .materials
-            .get_mut("world_test")
-            .unwrap()
-            .inputs
-            .clear();
-        let distinct = install(&renderer, &scene, Some("world_test"), Path::new("."), &stages)?;
-        for metal in [false, true] {
-            passes::resolve::compile_native(
-                &distinct.shader,
-                &distinct.native,
-                "volume_lighting",
-                metal,
-            )?;
-        }
-        // The varying variant is constant along these y=0 rays, giving the same
-        // independent oracle while exercising its per-cell integration path.
-        for (density, height_falloff) in [(0.5_f64, 0.), (1e-7, 0.), (1e-7, 0.1)] {
-        for (name,value) in [("density",density),("height_falloff",height_falloff)] {
-            scene.materials.get_mut("smoke").unwrap().inputs.insert(name.into(),serde_json::from_value(serde_json::json!(value))?);
-        }
-        let mut installed = install(&renderer, &scene, None, Path::new("."), &stages)?;
-        installed.native.boundaries = 2;
-        // Lighting takes one point step per froxel cell. Keep the original
-        // 64-step segment oracle too, without multiplying its discretization
-        // into 4096 substeps when checking column composition.
-        let segment_steps = installed.native.steps;
-        for steps in [1, segment_steps] {
-        installed.native.steps = steps;
-        let (program, inputs) = installed.instances.names["smoke"];
-        let mesh = cube();
-        let mut words = Vec::new();
-        let mut stride = 0;
-        for case in 0..8 {
-            let mut table = installed.words.clone();
-            let triangle_offset = table.len() as u32;
-            let mut triangles: Vec<_> = mesh.indices.chunks_exact(3).map(|i|
-                [i[0], i[1], i[2]].map(|v| Vec3::from_array(mesh.vertices[v as usize].POSITION))).collect();
-            boundary_bvh(&mut table, &mut triangles);
-            let boundary_end = table.len() as u32;
-            table[0] = table.len() as u32;
-            table[1] = if case == 5 || case == 7 { 2 } else { 1 };
-            table.extend([
-                u32::from(case == 4),
-                triangle_offset,
-                boundary_end,
-                program,
-                inputs,
-            ]);
-            table.extend([u32::from(case == 7), triangle_offset, boundary_end, program, inputs]);
-            stride = table.len();
-            words.extend(table);
-        }
-        let code=installed.shader.split_once(NATIVE_ACCESSORS).unwrap().1
-            .strip_suffix(RESOLVE.split_once(HOOK).unwrap().1).unwrap();
-        let source = format!(r#"
-import vork;
-import vork_constants;
-import vork_prelude;
-import vork_medium;
-static Frame frame={{}};
-[[vk::binding(0,0)]] StructuredBuffer<uint> words;
-[[vk::binding(1,0)]] StructuredBuffer<Object> objects;
-[[vk::binding(2,0)]] RWStructuredBuffer<float4> values;
-export float3 medium_visibility(float3 position,uint light_index) {{return 1.;}}
-export Frame medium_frame() {{return frame;}}
-export uint medium_word(uint index) {{return words[index];}}
-export Light medium_light(uint index) {{Light light={{}};return light;}}
-export uint medium_light_list(float3 position,out uint base) {{base=0u;return 0u;}}
-export uint medium_light_index(uint base,uint next) {{return next;}}
-export uint native_material_word(uint index) {{return words[index];}}
-{code}
-[shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID) {{
-frame.medium.x=id.x*{stride}u;frame.medium.w=1u;frame.radiance=float4(2.,3.,4.,0.);
-float3 origin=float3(0.,0.,2.);float distance=4.;
-if(id.x==1u) {{origin=float3(0.);}}if(id.x==2u) {{origin.x=2.;}}if(id.x==3u) {{distance=1.75;}}if(id.x>=6u) {{origin=float3(0.);distance=.25;}}
-var m=MediumTransport();
-if(id.x>=6u) {{m=medium_transport_segment(origin,float3(0.,0.,-1.),medium_receiver(distance),.5,0u);}}
-else {{m=medium_transport_segment(origin,float3(0.,0.,-1.),medium_receiver(distance),.5,0xffffffffu);}}
-values[id.x*3u]=float4(m.transmission,0.);values[id.x*3u+1u]=float4(m.source,0.);
-#if VORK_MEDIUM_STEPS == 1
-if(id.x<6u) {{
-    medium_column_begin(origin);
-    var prefix=MediumTransport(float3(0.),float3(1.),float3(0.));
-    for(uint cell=0u;cell<64u;cell++) {{
-        let part=medium_transport_range(origin,float3(0.,0.,-1.),distance*float(cell)/64.,distance*float(cell+1u)/64.,.5);
-        prefix.source+=prefix.transmission*part.source;prefix.transmission*=part.transmission;
-    }}
-    values[id.x*3u+2u]=float4(max(abs(prefix.transmission-m.transmission),abs(prefix.source-m.source)),0.);
-}}
-#endif
-}}"#);
-        let entries: Vec<_> = (0..3).map(|binding| pipelines::buffer_entry(binding,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only: binding!=2})).collect();
-        let pipeline = test_pipeline(&renderer,&source,&installed.native,&entries, (1, 1, 1))?;
-        let objects = [
-            Object::new(Mat4::IDENTITY).gpu(),
-            Object::new(Mat4::from_scale(Vec3::new(2., 1., 3.))).gpu(),
-        ];
-        let input = init(
-            device,
-            "volume cases",
-            bytemuck::cast_slice(&words),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let objects = init(
-            device,
-            "volume transforms",
-            bytemuck::cast_slice(&objects),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let bytes = 8 * 3 * 16;
-        let output = crate::gpu_memory::buffer(
-            &device,
-            &wgpu::BufferDescriptor {
-                label: None,
-                size: bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            },
-        );
-        let readback = crate::gpu_memory::buffer(
-            &device,
-            &wgpu::BufferDescriptor {
-                label: None,
-                size: bytes,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            },
-        );
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                entry(0, input.as_entire_binding()),
-                entry(1, objects.as_entire_binding()),
-                entry(2, output.as_entire_binding()),
-            ],
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(8, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, bytes);
-        let submission = renderer.queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        readback.map_async(wgpu::MapMode::Read, .., move |result| {
-            let _ = tx.send(result);
-        });
-        device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        })?;
-        rx.recv()??;
-        let mapped = readback.get_mapped_range(..);
-        let results: &[[f32; 4]] = bytemuck::cast_slice(&mapped);
-        for (case, length) in [1.0f32, 0.5, 0., 0.25, 3., 2., 0.25, 0.5].into_iter().enumerate() {
-            if case < 6 && steps == 1 {
-                assert!(results[case*3+2][..3].iter().all(|v| *v < 0.0002), "streamed intervals case {case}: {:?}", results[case*3+2]);
-            }
-            let t = (-density * f64::from(length)).exp() as f32;
-            for channel in 0..3 {
-                assert!(
-                    (results[case * 3][channel] - t).abs() < 0.0001,
-                    "case {case}: {:?} != {t}",
-                    results[case * 3]
-                );
-            }
-            // Combined extinction weights both emission and coloured scattering,
-            // including two coincident media and nonuniform world transforms.
-            let integral = -(-density * f64::from(length)).exp_m1() / density;
-            for (channel, scattering) in [0.2*2., 0.4*3., 0.6*4.].into_iter().enumerate() {
-                let source = (if channel == 0 {2.} else {0.}) + density * scattering;
-                assert!((results[case * 3 + 1][channel] - (source * integral) as f32).abs() < 0.0002,
-                    "case {case}, channel {channel}: {:?}", results[case * 3 + 1]);
-            }
-        }
-        }
-        }
-        Ok(())
-    }
 }
 
-// Column cursors and coefficient dispatch scale with the total installed domain
-// count, even when the boundaries are disjoint. Admit the worst case explicitly.
+
 fn admit_domains(count: usize) -> Result<()> {
     ensure!(count <= 256, "media require {count} bounded domains; the supported work budget is 256 (including possible overlaps); reduce or combine medium boundaries");
     Ok(())
@@ -826,6 +576,27 @@ mod empty_input_tests {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+impl super::Installed {
+    pub(crate) fn certified_world_exponential(&self,world:&str)->bool {
+        self.instances.programs.iter().all(|(name,(program,_))|
+            if name==world {program.exponential.is_some()} else {program.homogeneous})
+    }
+
+    pub(crate) fn prepare_point_work(&mut self,scene:&v2::Scene)->Result<()> {
+        let animated=crate::materials::animated_inputs(scene)?;
+        let bounded=&self.instances;
+            for (name,(program,inputs)) in &bounded.programs {
+                let dynamic=animated.get(name).cloned().unwrap_or_default();
+                let words=program.inputs.varying_words(&inputs[..program.inputs.words],&dynamic);
+                let work=program.bounded_work_for_inputs(&programs::abi(),&words)
+                    .with_context(||format!("medium program {:?} (material {name:?}) has no bounded callback work proof; use a bounded physical coefficient program, or render the volume externally",scene.materials[name].program))?;
+                self.native.point_work=self.native.point_work.max(work);
+            }
+            self.native.identity.extend_from_slice(&self.native.point_work.to_le_bytes());
         Ok(())
     }
 }

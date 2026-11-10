@@ -1,0 +1,49 @@
+[
+  {
+    "source": "LICENSE",
+    "destination": "LICENSE"
+  },
+  {
+    "source": "NOTICE",
+    "destination": "NOTICE"
+  },
+  {
+    "source": "README.md",
+    "destination": "README.md"
+  },
+  {
+    "source": "dist/licenses",
+    "destination": "licenses"
+  },
+  {
+    "source": "libraries/blender/filmic.exr",
+    "destination": "libraries/blender/filmic.exr"
+  },
+  {
+    "source": "packages/ts/dist",
+    "destination": "sdk"
+  },
+  {
+    "source": "packages/ts/scene.schema.json",
+    "destination": "sdk/scene.schema.json"
+  },
+  {
+    "source": "LICENSE",
+    "destination": "sdk/LICENSE"
+  },
+  {
+    "source": "packages/python",
+    "destination": "python",
+    "ignore": [
+      "generate.py",
+      "test_*.py",
+      "__pycache__",
+      "*.egg-info",
+      "build"
+    ]
+  },
+  {
+    "source": "LICENSE",
+    "destination": "python/LICENSE"
+  }
+]

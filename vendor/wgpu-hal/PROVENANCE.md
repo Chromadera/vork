@@ -137,3 +137,18 @@ The no-op backend executes no shader or acceleration structure operation; the
 mock reference is never dereferenced. Real Metal/Vulkan descriptors are unchanged.
 Regression: GPU-free `scripts/prepare-shaders`; remove when upstream's no-op
 backend supplies equivalent native descriptor construction.
+
+Local patch: Metal `PipelineCache` is an `MTLBinaryArchive` (`src/metal/{mod,device,adapter}.rs`).
+`PIPELINE_CACHE` is advertised where binary archives are supported. Cache data is a
+serialized archive staged in a temporary file for Metal to load; the validation key
+hashes the GPU name and the OS build that supplies the Metal compiler. Pipeline
+creation first asks the archive with `FailOnBinaryArchiveMiss`; a miss compiles as
+without an archive and then records the pipeline. Mesh render pipelines are not
+archived. Data Metal cannot open is `PipelineCacheError::Rejected` (`src/lib.rs`),
+a validation error, never device loss. Apple's shared shader cache evicts large
+pipelines, so it is not a dependable warm path. Regression:
+`metal::device::binary_archive_tests`. Remove when upstream persists Metal
+pipelines through `PipelineCache`. `metal::release_archive_files_for_exit` removes
+live caches' backing files for a process exit that skips destructors (vork's
+one-shot `_exit`) and stops new ones; regression `exit_release_removes_backing_files_and_stops_new_ones`
+and vork-cli `tests/metal_archive.rs`.

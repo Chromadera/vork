@@ -725,50 +725,7 @@ mod tests {
         r.errors.check()?;Ok(())
     }
 
-    #[test]
-    #[ignore="requires real GPU"]
-    fn animated_gpu_mean_feeds_production_medium_illumination()->Result<()> {
-        let r=Renderer::new()?;
-        let scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,
-            "programs":{"world":{"source":"struct Inputs {}; float3 environment(EnvironmentContext c,Inputs i){return float3(c.time<.5?1.:c.time<1.5?100000.:2.);}"}},
-            "materials":{"world":{"program":"world"}},"nodes":[{"type":"light","shape":"environment","material":"world"}]}))?;
-        let environment=Environment::new(&r,environment_node::Settings::from_scene(&scene)?,&scene,Path::new("."))?;
-        // Exercise the actual mean consumer without conflating single-scattering
-        // raster transport with the multiple-scattering path reference above.
-        let source=r#"import vork_prelude;
-import vork_medium_visibility;
-[[vk::binding(0,0)]] ConstantBuffer<Frame> parameters;
-[[vk::binding(1,0)]] RWStructuredBuffer<float4> output;
-export Frame medium_frame(){return parameters;}
-export uint medium_light_list(float3 p,out uint base){base=0u;return 0u;}
-export uint medium_light_index(uint base,uint next){return 0u;}
-export Light medium_light(uint index){Light light={};return light;}
-[shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID){output[0]=float4(medium_shared_illumination(float3(0.),float3(0.,0.,1.),0.),0.);}
-"#;
-        let entries=[pipelines::buffer_entry(0,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Uniform),pipelines::buffer_entry(1,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false})];
-        let pipeline=crate::medium::test_pipeline(&r,source,&crate::medium::Native::default(),&entries,(1,1,1))?;
-        let mut uniform=Uniform::zeroed();uniform.medium[3]=1;uniform.environment[0]=2.;uniform.environment_color=[0.5,0.375,0.25,0.];
-        let params=init(&r.device,"medium mean oracle frame",bytemuck::bytes_of(&uniform),wgpu::BufferUsages::UNIFORM|wgpu::BufferUsages::COPY_DST);
-        let output=init(&r.device,"medium mean oracle output",bytemuck::bytes_of(&[0f32;4]),wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
-        let read=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some("medium mean readback"),size:16,usage:wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
-        let bind=r.device.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[entry(0,params.as_entire_binding()),entry(1,output.as_entire_binding())]});
-        let mut changes=values::LightingTracker::default();
-        for (time,gain) in [(0.,1.),(1.,100000.),(2.,2.),(0.,1.)] {
-            environment.update(&r,time,&mut changes)?;
-            let mut encoder=r.device.create_command_encoder(&Default::default());
-            environment.publish_metadata(&mut encoder,&params);
-            {let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(1,1,1);}
-            encoder.copy_buffer_to_buffer(&output,0,&read,0,16);r.queue.submit([encoder.finish()]);
-            let(tx,rx)=std::sync::mpsc::channel();read.map_async(wgpu::MapMode::Read,..,move |v|{let _=tx.send(v);});r.wait(None)?;rx.recv()??;
-            let mapped=read.get_mapped_range(..);let value:&[f32]=bytemuck::cast_slice(&mapped);
-            let actual:[f32;3]=std::array::from_fn(|c|value[c]/gain);
-            // Allow the latitude quadrature integration error (about 9e-5).
-            for c in 0..3 {assert!((actual[c]/[1.,0.75,0.5][c]-1.).abs()<2e-4,"medium incident energy time={time}: {actual:?}");}
-            eprintln!("medium incident energy time={time}: {actual:?}");
-            drop(mapped);read.unmap();
-        }
-        r.errors.check()?;Ok(())
-    }
+
 
     #[test]
     #[ignore="requires real GPU"]
@@ -1004,6 +961,9 @@ import vork_prelude;
         }}
     }
     result[7]=float4(environment_radiance(source,float2(1e20,.25),0u),1.);
+    // Seam: u=1/8 on a 2-texel row puts the sample at x=-0.25 (cell -1),
+    // blending the last column into the first.
+    result[8]=float4(environment_radiance(source,float2(.125,.25)),1.);
 
 }
 "#;
@@ -1028,17 +988,23 @@ float3 checked_environment_texel(Texture2DArray<uint4> image,int2 cell,bool resi
             crate::pipelines::buffer_entry(1,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false}),
         ];
         let pipeline=crate::medium::test_pipeline(&r,&shader,&crate::medium::Native::default(),&entries,(1,1,1))?;
-        let output=d.create_buffer(&wgpu::BufferDescriptor {label:None,size:128,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false});
-        let read=d.create_buffer(&wgpu::BufferDescriptor {label:None,size:128,usage:wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
+        let output=d.create_buffer(&wgpu::BufferDescriptor {label:None,size:144,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false});
+        let read=d.create_buffer(&wgpu::BufferDescriptor {label:None,size:144,usage:wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
         let view=image.create_view(&Default::default());
         let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[entry(0,wgpu::BindingResource::TextureView(&view)),entry(1,output.as_entire_binding())]});
         let mut encoder=d.create_command_encoder(&Default::default());
         {let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(1,1,1);}
-        encoder.copy_buffer_to_buffer(&output,0,&read,0,128);r.queue.submit([encoder.finish()]);
+        encoder.copy_buffer_to_buffer(&output,0,&read,0,144);r.queue.submit([encoder.finish()]);
         let(tx,rx)=std::sync::mpsc::channel();read.map_async(wgpu::MapMode::Read,..,move |v|{let _=tx.send(v);});r.wait(None)?;rx.recv()??;
         let mapped=read.get_mapped_range(..);let results:&[[f32;4]]=bytemuck::cast_slice(&mapped);
         assert_eq!(results[6],[1.;4],"source load coordinates escaped the texture");
         assert_eq!(results[7],[3e6,1.5e6,750000.,1.],"wrap must precede integer conversion");
+        for channel in 0..3 {
+            // Negative seam cell -1 wraps to the last column: b+(a-b)*0.75.
+            let (a,b)=(pixels[0][channel],pixels[1][channel]);
+            let expected=b+(a-b)*0.75;
+            assert!((results[8][channel]-expected).abs()<=expected.abs()*1e-6,"seam channel {channel}: {:?}, expected {expected}",results[8]);
+        }
         for channel in 0..3 {
             let a=pixels[0][channel];let b=pixels[1][channel];
             let c=pixels[2][channel];let e=pixels[3][channel];

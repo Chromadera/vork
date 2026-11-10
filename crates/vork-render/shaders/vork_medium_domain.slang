@@ -1,7 +1,7 @@
 #ifndef VORK_MEDIUM_WORLD_ONLY
 #define VORK_MEDIUM_WORLD_ONLY 0
 #endif
-// One physical domain for raster and sampled consumers. World distances survive
+// Physical boundary domains for sampled camera transport. World distances survive
 // the inverse object transform. Nonzero signed forward winding means occupied;
 // reversing all faces preserves membership, disconnected shells remain additive.
 import vork_constants;
@@ -11,32 +11,10 @@ import frame;
 internal extern Frame medium_frame();
 // The ray parameter remains metres in world space, including under nonuniform scale.
 public float3 volume_vec3(uint at) {return float3(asfloat(medium_word(at)),asfloat(medium_word(at+1u)),asfloat(medium_word(at+2u)));}
-#ifndef VORK_MEDIUM_BOUNDARIES
-#define VORK_MEDIUM_BOUNDARIES 0
-#endif
-#if VORK_MEDIUM_BOUNDARIES > 0
-// One ordered interval per boundary, private to a camera-column invocation.
-// Intervals stream without a crossing array or a fixed crossing capacity.
-static bool volume_column=false;
-static float3 volume_column_origin;
-static float volume_column_offset=0.;
-public void medium_column_offset(float offset) {volume_column_offset=offset;}
-static float3 volume_intervals[VORK_MEDIUM_BOUNDARIES];
-public export void medium_column_end() {volume_column=false;}
-public export void medium_column_begin(float3 origin) {
-    volume_column=true;volume_column_origin=origin;
-    for(uint i=0u;i<VORK_MEDIUM_BOUNDARIES;i++) {volume_intervals[i]=float3(-1.,-1.,0.);}
-}
-#endif
-// The next ray distance a boundary query distinguishes from `start`. A column
-// resolves distances after adding its offset, so a boundary within one float
-// there rounds back to `start`; interval walks advance at least this far.
+// Advance boundary queries by a representable world distance.
 public float volume_interval_successor(float start) {
     // Never a denormal: Metal flushes them to zero.
     var next=max(screen_next_float(start,true),asfloat(0x00800000u));
-#if VORK_MEDIUM_BOUNDARIES > 0
-    if(volume_column) {next=max(next,screen_next_float(start+volume_column_offset,true)-volume_column_offset);}
-#endif
     return next;
 }
 // Slabs handle parallel axes explicitly: 0*infinity must not discard a ray
@@ -86,17 +64,29 @@ public float2 volume_boundary(uint at,float3 o,float3 d,float after,float limit,
     let object=objects[medium_word(at)];
     if ((camera_ray && (object.metadata.y&REG_RAY_CAMERA)==0u) || (object.metadata.y&REG_RAY_VOLUME)==0u) {return float2(limit,0.);}
     var offset=0.;
-#if VORK_MEDIUM_BOUNDARIES > 0
-    let cached=volume_column && camera_ray;
-    let slot=(at-base-medium_word(base))/REG_MEDIUM_BOUND_WORDS;
-    if(cached) {
-        offset=volume_column_offset;after+=offset;o=volume_column_origin;
-        let interval=volume_intervals[slot];
-        if(after>=interval.x && after<interval.y) {return float2(min(limit,interval.y-offset),interval.z);}
-    }
-#endif
     let inverse=transpose(object_normal(medium_word(at)));
     let origin=(mul(float4(o,1.),inverse)).xyz;let direction=(mul(float4(d,0.),inverse)).xyz;
+#ifdef VORK_MEDIUM_CONVEX
+    // Internal Decision D admission guarantees a single convex interval, at most
+    // 32 supporting faces. Local directions retain world-distance parameters.
+    let planes=base+medium_word(at+1u);
+    let count=medium_word(planes+7u);
+    var enter=0.;var exit=REG_FP32_MAX;
+    for(uint face=0u;face<count;face++) {
+        let plane=planes+8u+face*6u;
+        let normal=volume_vec3(plane);let anchor=volume_vec3(plane+3u);
+        let numerator=dot(normal,anchor-origin);let denominator=dot(normal,direction);
+        if(denominator==0.) {if(numerator<0.) {return float2(limit,0.);}}
+        else {
+            let crossing=numerator/denominator;
+            if(denominator<0.) {enter=max(enter,crossing);} else {exit=min(exit,crossing);}
+            if(enter>=exit) {return float2(limit,0.);}
+        }
+    }
+    if(after>=exit) {return float2(limit,0.);}
+    if(after>=enter) {return float2(min(limit,exit),1.);}
+    return float2(min(limit,enter),0.);
+#else
     var nearest=REG_FP32_MAX;var winding=0.;
     var node=base+medium_word(at+1u);let end=base+medium_word(at+2u);
     while(node<end) {
@@ -117,10 +107,8 @@ public float2 volume_boundary(uint at,float3 o,float3 d,float after,float limit,
         }
         node=escape;
     }
-#if VORK_MEDIUM_BOUNDARIES > 0
-    if(cached) {volume_intervals[slot]=float3(after,nearest,winding);}
-#endif
     return float2(min(limit,nearest-offset),winding);
+#endif
 }
 // Refraction has already found the next exit from its current solid. This
 // interval is inside that boundary; only overlapping boundaries need tracing.
@@ -185,42 +173,5 @@ public uint volume_domain_count() {
     return 0u;
 #else
     return medium_word(medium_frame().medium.x+1u);
-#endif
-}
-
-#ifndef VORK_MEDIUM_DOMAINS
-#define VORK_MEDIUM_DOMAINS 0
-#endif
-// The next crossing and forward winding come from the same boundary query.
-// Retain one occupancy bit per domain for this interval, rather than walking
-// each BVH again for extinction and again for source integration. This state
-// belongs to the caller: nested light connections cannot overwrite it.
-public struct MediumBoundaryInterval {
-    public float end;
-#if VORK_MEDIUM_DOMAINS > 0
-    uint occupied[(VORK_MEDIUM_DOMAINS+31)/32];
-#endif
-};
-public MediumBoundaryInterval volume_boundary_interval(float3 o,float3 d,float after,float limit,uint inside_object,bool camera_ray) {
-    MediumBoundaryInterval result={};result.end=limit;
-    let base=medium_frame().medium.x;let count=volume_domain_count();
-    for(uint i=0u;i<count;i++) {
-        let at=base+medium_word(base)+i*REG_MEDIUM_BOUND_WORDS;
-        let boundary=camera_ray ? volume_interval_boundary(at,o,d,after,limit,inside_object) : volume_boundary(at,o,d,after,limit,false);
-        result.end=min(result.end,boundary.x);
-#if VORK_MEDIUM_DOMAINS > 0
-        if(boundary.y!=0.) {result.occupied[i/32u]|=1u<<(i%32u);}
-#endif
-    }
-    result.end=max(result.end,after);
-    return result;
-}
-public MediumInstance volume_interval_instance(uint index,MediumBoundaryInterval interval,float3 o,float3 d,float midpoint,float limit,uint inside_object,bool camera_ray) {
-#if VORK_MEDIUM_DOMAINS > 0
-    var occupied=true;
-    if(index<volume_domain_count()) {occupied=(interval.occupied[index/32u]&(1u<<(index%32u)))!=0u;}
-    return volume_instance_binding(index,occupied);
-#else
-    return volume_instance(index,o,d,midpoint,limit,inside_object,camera_ray);
 #endif
 }

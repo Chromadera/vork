@@ -525,6 +525,9 @@ pub enum PipelineError {
 pub enum PipelineCacheError {
     #[error(transparent)]
     Device(#[from] DeviceError),
+    /// The backend refused the supplied cache data; the device is unaffected.
+    #[error("pipeline cache data rejected: {0}")]
+    Rejected(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]

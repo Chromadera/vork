@@ -248,7 +248,6 @@ pub(crate) mod tests {
         }
         assert_eq!(CONTROL_GENERICS.iter().map(|p| p.0 as usize).max(), Some(crate::constants::PRECOMPILED_ATTRIBUTE_SLOTS));
         assert_eq!(STREAMS.iter().map(|s|s.0 as usize).max(), Some(crate::constants::PRECOMPILED_ATTRIBUTE_SLOTS));
-        assert_eq!(VOLUME_VISIBILITY.iter().map(|s|s.1 as usize).max(), Some(crate::constants::PRECOMPILED_ATTRIBUTE_SLOTS));
         for &(count,module,entry,vertex) in STREAMS.iter().filter(|s|s.3.stage=="vertex") {
             // Fibre captures compile their material fragment at install time.
             if entry=="shadow_vs" {
@@ -456,34 +455,7 @@ pub(crate) mod tests {
         slots
     }
 
-    #[test]
-    fn reflection_medium_pages_preserve_native_binding_slots() {
-        let globals=crate::rt::reflections_hits_entries();
-        // Vulkan passthrough bindings must match wgpu's dense native numbering.
-        let mut bindings:Vec<_>=globals.iter().map(|entry|entry.binding).collect();
-        bindings.sort_unstable();
-        assert_eq!(bindings,(0..globals.len() as u32).collect::<Vec<_>>());
 
-        let materials=crate::pipelines::material_entries(true);
-        for probes in [false,true] {
-            let read=if probes {crate::probes::read_entries(0,ShaderStages::COMPUTE).to_vec()} else {vec![]};
-            let registers=crate::forward_variant::hit_kernel_registers("reflections_hits",false,probes);
-            for pages in [0,1,2,9] {
-                let hits=crate::rt::reflection_read_entries(pages);
-                let slots=metal_slots(&[&globals,&materials,&read,&hits],ShaderStages::COMPUTE);
-                let hit=slots.iter().find(|s|s.0==3 && s.1==0).unwrap().3;
-                assert!(registers.contains(&format!("-DVORK_HIT_REGISTER=b{hit}")));
-                assert_eq!(hits.len(),if pages==0 {2} else {3});
-                let fields=slots.iter().find(|s|s.0==3 && s.1==1).unwrap().3;
-                assert!(registers.contains(&format!("-DVORK_REFLECTION_FIELDS_REGISTER=b{fields}")));
-                if pages>0 {
-                    let grid=slots.iter().find(|s|s.0==3 && s.1==2).unwrap().3;
-                    assert!(registers.contains(&format!("-DVORK_REFLECTION_MEDIUM_REGISTER=b{grid}")));
-                    assert_eq!(hits[2].count.unwrap().get(),pages);
-                }
-            }
-        }
-    }
 
     #[test]
     fn gi_accumulation_preserves_native_binding_slots() {
@@ -493,9 +465,13 @@ pub(crate) mod tests {
             let hits=crate::rt::gi_read_entries();
             let slots=metal_slots(&[&globals,&materials,&read,&hits],ShaderStages::COMPUTE);
             let registers=crate::forward_variant::hit_kernel_registers("gi_ray",false,probes);
-            assert_eq!(hits.len(),2);
+            assert_eq!(hits.len(),4);
             let slot=slots.iter().find(|s|s.0==3 && s.1==1).unwrap().3;
             assert!(registers.contains(&format!("-DVORK_GI_QUERY_REGISTER=u{slot}")));
+            let guide=slots.iter().find(|s|s.0==3 && s.1==2).unwrap().3;
+            assert!(registers.contains(&format!("-DVORK_GI_GUIDE_REGISTER=u{guide}")));
+            let light=slots.iter().find(|s|s.0==3 && s.1==3).unwrap().3;
+            assert!(registers.contains(&format!("-DVORK_GI_LIGHT_REGISTER=t{light}")));
         }
     }
 
@@ -642,6 +618,104 @@ pub(crate) mod tests {
         }
     }
 
+    /// Runtime controls have imports that the shipped generic entries do not.
+    /// Compile their generated modules on Linux and inspect the actual MSL ABI,
+    /// using Vulkan reflection only to recover each resource's group/binding.
+    #[test]
+    fn runtime_metal_resources_match_pipeline_layouts() -> anyhow::Result<()> {
+        use crate::forward_variant::{ForwardKey, Stage, METAL_TARGET, SPIRV_TARGET, SLANG_FLAGS};
+        let compiler = vork_slang::Compiler::discover();
+        let directory = std::env::temp_dir().join(format!("vork-runtime-metal-layout-{}", std::process::id()));
+        std::fs::create_dir_all(&directory)?;
+        let reflection_path = directory.join("reflection.json");
+        let global = crate::pipelines::global_entries();
+        let material = crate::pipelines::material_entries(true);
+        let fragments = crate::passes::decoupled::fragments_entries();
+        let geometry = crate::passes::decoupled::fragments_geometry_entries();
+        let depth = [&global[..], &material[..]];
+        let retained = [&global[..], &material[..], &fragments[..], &geometry[..]];
+        let check = |name: &str, source: &str, entry: (&str, &str), defines: &[&str],
+                     groups: &[&[BindGroupLayoutEntry]], required: &[&str]| -> anyhow::Result<()> {
+            let mut modules = SOURCES.to_vec();
+            modules.push((name, source));
+            let mut outputs = Vec::new();
+            for (_, target, flags) in [SPIRV_TARGET, METAL_TARGET] {
+                let mut args = vec!["-target", target];
+                args.extend_from_slice(SLANG_FLAGS);
+                args.extend_from_slice(flags);
+                args.extend(["-reflection-json", reflection_path.to_str().unwrap()]);
+                args.extend_from_slice(defines);
+                let code = compiler.compile_modules(&modules, name, &[entry], &args)?;
+                outputs.push((code, std::fs::read_to_string(&reflection_path)?));
+            }
+            let msl = std::str::from_utf8(&outputs[1].0)?;
+            let declarations: Value = serde_json::from_str(&outputs[0].1)?;
+            let slots = metal_slots(groups, ShaderStages::FRAGMENT);
+            let mut checked = Vec::new();
+            for kind in ["buffer", "texture", "sampler"] {
+                let marker = format!("[[{kind}(");
+                for (prefix, _) in msl.match_indices(&marker) {
+                    let parameter = msl[..prefix].split_whitespace().next_back().unwrap()
+                        .trim_start_matches(['&', '*']);
+                    let index: u32 = msl[prefix + marker.len()..].split(')').next().unwrap().parse()?;
+                    let declaration = declarations["parameters"].as_array().unwrap().iter()
+                        .find(|p| {
+                            let name = p["name"].as_str().unwrap();
+                            parameter == name || parameter.strip_prefix(name)
+                                .and_then(|suffix| suffix.strip_prefix('_'))
+                                .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+                        }).unwrap_or_else(|| panic!("{name}: emitted {kind} parameter {parameter} has no descriptor declaration"));
+                    let binding = &declaration["binding"];
+                    let group = binding["space"].as_u64().unwrap_or(0) as u32;
+                    let binding = binding["index"].as_u64().unwrap() as u32;
+                    let expected = slots.iter().find(|s| (s.0,s.1) == (group,binding))
+                        .unwrap_or_else(|| panic!("{name}: {parameter} ({group},{binding}) absent from pipeline layout"));
+                    assert_eq!((kind,index), (expected.2,expected.3),
+                        "{name}: emitted {parameter} ({group},{binding}) must match wgpu-hal's fragment slot map");
+                    checked.push(declaration["name"].as_str().unwrap().to_owned());
+                }
+            }
+            assert!(!checked.is_empty(), "{name}: no emitted resources checked");
+            for resource in required {
+                assert!(checked.iter().any(|name| name == resource), "{name}: runtime path must consume {resource}");
+            }
+            Ok(())
+        };
+        for field in [true, false] {
+            for stage in [Stage::OpaqueControls, Stage::Controls] {
+                for hashed in [false, true] {
+                    let key = ForwardKey::generic(stage, hashed);
+                    let name = format!("runtime_{}_field_{field}", key.name());
+                    let defines: &[&str] = if field {&["-DVORK_IMPLICIT_CONTROLS", "-DVORK_FIELD_OUTLINE"]} else {&["-DVORK_NO_IMPLICIT"]};
+                    let groups: &[&[BindGroupLayoutEntry]] = if field {&retained} else {&depth};
+                    let required: &[&str] = if field {&["frame", "fragment_hit_buffers", "fragment_draw_table", "fragment_object_draws"]} else {&["frame"]};
+                    check(&name, &key.module_with(None), key.entry(), defines, groups, required)?;
+                }
+            }
+        }
+        check("runtime_masked", r#"
+            import decoupled_fragments;
+            import surface;
+            import stream;
+            [shader("fragment")]
+            VisibilityOutput masked_fs(Varying v, bool front : SV_IsFrontFace, uint primitive : SV_PrimitiveID) {
+                return masked_visibility<NoPrograms>(v,front,primitive);
+            }
+        "#, ("masked_fs", "fragment"), &[], &retained,
+            &["fragments", "fragment_hit_buffers", "fragment_draw_table", "fragment_object_draws", "fragment_camera_samples"])?;
+        let fibre = crate::fibre_transport::capture_entries();
+        check("runtime_fibre", r#"
+            import fibre_capture;
+            [shader("fragment")]
+            float4 accumulate_fs(Varying v, bool front : SV_IsFrontFace) : SV_Target0 {
+                return fibre_accumulate<NoPrograms>(v,front);
+            }
+        "#, ("accumulate_fs", "fragment"), &["-DVORK_NO_IMPLICIT"], &[&global, &material, &fibre],
+            &["fibre_first", "fibre_last"])?;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
     /// The Slang ABI structs read the Rust `#[repr(C)]` uploads field by field.
     #[test]
     fn slang_abi_structs_match_the_uploads() {
@@ -700,6 +774,7 @@ pub(crate) mod tests {
         }
     }
 
+
     #[test]
     fn every_shader_matches_its_layout() {
         use crate::pipelines::{global_entries, material_entries};
@@ -727,7 +802,7 @@ pub(crate) mod tests {
         let path = crate::passes::path::layout_entries(true);
         let hits = [crate::rt::hit_buffers_entry(0, ShaderStages::COMPUTE)];
         let path_groups: &[&[BindGroupLayoutEntry]] = &[&path, &tables[1], &[], &hits];
-        let mut checked = vec![(&CLUSTERS_CULL, cluster_groups), (&MIP_VS, mip), (&MIP_FS, mip), (&DEFORM_EVALUATE, deform)];
+        let mut checked = vec![(&CLUSTERS_CULL, cluster_groups), (&MIP_VS, mip), (&MIP_FS, mip), (&DEFORM_EVALUATE, deform), (&DEFORM_CHAIN_EVALUATE, deform)];
         for shader in [&DENOISE_PACK, &DENOISE_UNPACK] {checked.push((shader,denoise_groups));}
         let indirect_args = crate::passes::decoupled::indirect_arguments_entries();
         let indirect_args_groups: &[&[BindGroupLayoutEntry]] = &[&indirect_args];
@@ -744,7 +819,7 @@ pub(crate) mod tests {
         let camera_cull_groups: &[&[BindGroupLayoutEntry]] = &[&camera_cull];
         for shader in [&CAMERA_CULL_CLASSIFY,&CAMERA_CULL_OFFSETS,&CAMERA_CULL_COMPACT] {checked.push((shader,camera_cull_groups));}
         checked.push((&RENDER_IMAGES_PUBLISH, images));
-        let fragments = crate::passes::decoupled::fragments_entries(0);
+        let fragments = crate::passes::decoupled::fragments_entries();
         let fragments_geometry = crate::passes::decoupled::fragments_geometry_entries();
         let fragments_groups: Vec<Vec<&[BindGroupLayoutEntry]>> = tables.iter().map(|m| vec![&global[..], &m[..], &fragments[..], &fragments_geometry[..]]).collect();
         let decoupled_merge = crate::passes::decoupled::merge_entries();
@@ -785,6 +860,9 @@ pub(crate) mod tests {
         for shader in CONTROL_GENERICS.iter().map(|s| s.4) {
             for groups in &depth { checked.push((shader, &groups[..])); }
         }
+        let demand = crate::passes::ao::demand_entries();
+        let demand_groups: &[&[BindGroupLayoutEntry]] = &[&demand];
+        checked.push((&GI_DEMAND_BUILD, demand_groups));
         let blur = crate::passes::ao::slang_entries();
         let blur_groups: &[&[BindGroupLayoutEntry]] = &[&blur];
         checked.extend([
@@ -801,7 +879,7 @@ pub(crate) mod tests {
         let probe_groups: &[&[BindGroupLayoutEntry]] = &[&probe_update, &ray_material, &probe_read, &hits];
         checked.extend([(&PROBE_UPDATE_TRACE, probe_groups), (&PROBE_UPDATE_GATHER, probe_groups), (&PROBE_UPDATE_CHOOSE,probe_groups), (&PROBE_UPDATE_DIRECTIONAL_TRACE,probe_groups), (&PROBE_UPDATE_DIRECTIONAL_GATHER,probe_groups), (&PROBE_UPDATE_FILTER,probe_groups)]);
         let reflection_hits = crate::rt::reflections_hits_entries();
-        let reflection_fields=crate::rt::reflection_read_entries(0);
+        let reflection_fields=crate::rt::reflection_read_entries();
         let reflection_hit_groups: &[&[BindGroupLayoutEntry]] = &[&reflection_hits, &ray_material, &[], &reflection_fields];
         checked.push((&REFLECTIONS_HITS_COMPUTE, reflection_hit_groups));
         let bc7: &[&[BindGroupLayoutEntry]] = &[&crate::gpu_bc7::LAYOUT];
@@ -851,10 +929,6 @@ pub(crate) mod tests {
         }).collect();
         let surface_groups:Vec<Vec<&[BindGroupLayoutEntry]>>=surface_layouts.iter().map(|groups|groups.iter().map(Vec::as_slice).collect()).collect();
         for ((_,_,_,_,_,shader),groups) in SURFACES.iter().zip(&surface_groups) {checked.push((*shader,&groups[..]));}
-        let volume_layouts:Vec<_> = VOLUME_VISIBILITY.iter().map(|&(pages,_,_,_)|
-            vec![global.clone(),crate::pipelines::material_entries(false),crate::passes::decoupled::fragments_entries(pages),crate::passes::decoupled::fragments_geometry_entries()]).collect();
-        let volume_groups:Vec<Vec<&[BindGroupLayoutEntry]>> = volume_layouts.iter().map(|groups|groups.iter().map(Vec::as_slice).collect()).collect();
-        for ((_,_,_,shader),groups) in VOLUME_VISIBILITY.iter().zip(&volume_groups) {checked.push((*shader,&groups[..]));}
         for &(shader, groups) in &checked {
             check(shader, groups);
         }

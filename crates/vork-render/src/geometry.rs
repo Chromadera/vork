@@ -30,11 +30,15 @@ pub(crate) struct EvaluatedGeometry {
     pub(crate) output: VertexStream,
     pub(crate) previous_output: VertexStream,
     pub(crate) attributes: Option<wgpu::Buffer>,
+    /// Two interleaved attribute rows per vertex, matching previous_output.
+    /// Absent historical storage means the attributes are unchanged.
+    pub(crate) previous_attributes: Option<wgpu::Buffer>,
 }
 impl From<&FrameDeform> for EvaluatedGeometry {
     fn from(frame: &FrameDeform) -> Self {
         Self {
             attributes: None,
+            previous_attributes: None,
             output: frame.output.clone(),
             previous_output: VertexStream { buffer: frame.previous_output.clone(), offset: 0, size: frame.previous_output.size() },
         }

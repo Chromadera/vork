@@ -2,8 +2,3 @@ post: white balance colour adaptation. Inputs: post --all.
 <!-- all -->
 Program: "program":"post/white_balance" in render.compositor.
 post/white_balance: source white to D65; temperature 6500 K (1800..100000), tint 10 (-500..500); preserves alpha, affects linear outputs.
-Authored glare, vignette and chromatic dispersion: examples/compositor-effects/.
-
-Copy the entire examples/compositor-effects directory; glare needs highlight.slang
-next to it. The shipped glare-streaks.json demonstrates the additive merge graph.
-See vork help upgrade for 0.1 program and Slang-import replacements.

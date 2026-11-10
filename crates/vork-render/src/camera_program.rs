@@ -183,17 +183,11 @@ pub(crate) fn promote(r: &Renderer, scene: &mut v2::Scene, base: &Path, initial_
     }
     let requires_path=uncalibrated || programs.iter().any(|p|p.spectral || !p.unit_weight || p.program.sensor_entry.is_some());
     if !scene.render.settings.integrator.is_path() {
-        // Aperture tracing is a quality choice, not permission to reject a scene
-        // represented by raster transport. Use the medium compiler's same bound
-        // input proof as sampled-world admission; no scene/program-name exception.
-        let aperture_path = if aperture && !requires_path && !scene.render.settings.previs
-            && r.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | crate::rt::HIT_BUFFER_FEATURES)
-        {
-            let world=crate::environment_node::Settings::from_scene(scene)?;
-            world.medium.as_deref().map(|name|crate::medium::compile(r,scene,name,base)
-                .map(|(program,_)|program.homogeneous || program.exponential.is_some())).transpose()?.unwrap_or(true)
-        } else {false};
-        if requires_path || aperture_path {crate::rt::promote_indirect_to_path(scene);}
+        // Media ownership is already resolved. Dry aperture tracing remains a
+        // quality choice and preserves its existing denoise policy.
+        let aperture_path = aperture && !requires_path && !scene.render.settings.previs
+            && r.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | crate::rt::HIT_BUFFER_FEATURES);
+        if requires_path || aperture_path {crate::rt::promote_to_path(scene);}
     }
     Ok(uncalibrated)
 }

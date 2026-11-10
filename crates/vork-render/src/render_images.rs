@@ -116,7 +116,7 @@ pub(crate) fn plan(
                 let id=s.materials[draw.material].program;
                 consumed && id!=0 && s.surface_dependencies[id as usize-1].time
             });
-            let time_dependent = surface_time || s.plan.volume
+            let time_dependent = surface_time || s.has_media
                 || s.camera_programs.iter().any(|p|p.node==camera && p.uses_time)
                 || s.environment.primary.as_ref().is_some_and(|p|p.uses_time)
                 || s.scene.propagation.is_some() || settings.settings.integrator.is_path()
@@ -280,7 +280,7 @@ impl CaptureView {
         // GPU-authored scene data has no CPU input identity.
         // Their consumers replay even at the same time; compare observable inputs
         // only for captures whose complete state can be retained here.
-        if s.compute.is_none() && !s.plan.volume {
+        if s.compute.is_none() && !s.has_media {
             let mut inputs = Vec::new();
             // The shared stateless volume has its own exact input tracker. Retain
             // its revision, including updates made while this capture did not run.
@@ -313,14 +313,7 @@ impl CaptureView {
             if let Some(materials) = &frame.materials {
                 frame.changes.append_buffer_inputs(&materials.records, &mut inputs);
             }
-            for deform in frame.skin.iter().flatten() {
-                frame.changes.append_buffer_inputs(&deform.params, &mut inputs);
-                frame.changes.append_buffer_inputs(&deform.previous_params, &mut inputs);
-            }
-            for displacement in frame.displacements.iter().flatten() {displacement.append_inputs(&frame.changes,&mut inputs);}
-            for morphs in frame.subdivision_morphs.iter().flatten() {
-                frame.changes.append_buffer_inputs(morphs, &mut inputs);
-            }
+            frame.geometry_chain.append_inputs(&frame.changes,&mut inputs);
             let changed = changes.changed(values::ChangeKey::Capture(id), &inputs);
             if !(changed || dependency_changed) {
                 return Ok(false);

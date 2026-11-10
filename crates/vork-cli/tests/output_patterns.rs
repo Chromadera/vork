@@ -150,3 +150,48 @@ fn interrupted_overwrite_has_no_completion_record() {
     assert!(!out.join("meta.json").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "renders images; requires a Windows console, supported GPU, pinned Slang and OIDN"]
+fn ctrl_break_closes_sequence_and_reports_saved_output() {
+    use std::os::windows::process::CommandExt;
+    #[link(name = "Kernel32")]
+    unsafe extern "system" { fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32; }
+    let dir = std::env::temp_dir().join(format!("vork-break-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scene = dir.join("scene.json");
+    std::fs::write(&scene, r#"{"version":2,"render":{"resolution":[8,8],"duration":10000,"fps":24},"nodes":[{"type":"camera"}]}"#).unwrap();
+    let out = dir.join("frames");
+    let log_path = dir.join("interrupt.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vork"))
+        .arg("render").arg(scene).arg("--out").arg(&out).args(["--profile", "std/previs"])
+        .creation_flags(0x00000200) // CREATE_NEW_PROCESS_GROUP: target only the renderer.
+        .stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !out.join("000001.png").exists() && std::time::Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(out.join("000001.png").exists(), "renderer did not begin writing");
+    assert_ne!(unsafe { GenerateConsoleCtrlEvent(1, child.id()) }, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() { break status; }
+        if std::time::Instant::now() > deadline { child.kill().unwrap(); panic!("Ctrl+Break did not finish output"); }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(130));
+    let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("meta.json")).unwrap()).unwrap();
+    let frames = metadata["frames"].as_array().unwrap();
+    assert!(!frames.is_empty() && frames.len() < 240000);
+    for frame in frames {
+        let path = out.join(format!("{:06}.png", frame["index"].as_u64().unwrap()));
+        assert!(std::fs::read(path).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(log.contains("Interrupted: saved"));
+    assert!(log.contains("output files closed cleanly"));
+    std::fs::remove_dir_all(dir).unwrap();
+}

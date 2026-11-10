@@ -494,6 +494,8 @@ pub(super) struct Deform {
 }
 #[derive(Clone)]
 pub(super) struct FrameDeform {
+    pub leader: usize,
+    pub chained: Option<crate::passes::deform::Chained>,
     /// Current pose, in the pool ray hits read (hit.slang).
     pub output: crate::geometry::VertexStream,
     pub previous_output: wgpu::Buffer,

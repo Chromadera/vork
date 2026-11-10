@@ -1,1 +1,3 @@
-expand: scene JSON → scene JSON with buffer geometry; font paths relative to working directory
+expand: vork std expand - < scene.json > expanded.json; JSON argument also accepted
+Expands std builders in the geometry table and nested node geometry; text font paths relative to working directory.
+Expansion does not validate the whole scene or compile/install programs; render preparation does.

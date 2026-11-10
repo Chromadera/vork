@@ -21,7 +21,7 @@ VisibilityOutput visible(Visibility v,uint primitive,bool front,bool single) {
         depth=field_depth(v.object,hit);primitive=0xffffffffu;
     } else if(single && front==(v.mirrored!=0u)) discard;
     var position=v.position;position.z=depth;
-    opaque_depth(v.sample,position);volume_depth(v.sample,position,v.medium_capacity);
+    opaque_depth(v.sample,position);
     return VisibilityOutput(visibility_key(v.object,primitive),depth);
 }
 
@@ -44,7 +44,6 @@ struct Visibility {
     [[vk::location(1)]] nointerpolation uint mirrored : MIRRORED;
     // The pass's sample, for volume depth.
     [[vk::location(2)]] nointerpolation uint sample : VISIBILITY_SAMPLE;
-    [[vk::location(3)]] nointerpolation uint medium_capacity : MEDIUM_CAPACITY;
 };
 [shader("vertex")]
 Visibility vs([[vk::location(0)]] float3 p : POSITION, uint direct : SV_VulkanInstanceID, [[vk::location(REG_CAMERA_INSTANCE_LOCATION)]] uint mapped : CAMERA_INSTANCE, VISIBILITY_PASS) {
@@ -53,7 +52,7 @@ Visibility vs([[vk::location(0)]] float3 p : POSITION, uint direct : SV_VulkanIn
     Visibility o;
     // A culled object's clip position stays outside the frustum after the sub-pixel shift.
     o.position=offset(single.position,pass,disk);
-    o.object=object;o.mirrored=single.mirrored;o.sample=pass.z;o.medium_capacity=pass.w;
+    o.object=object;o.mirrored=single.mirrored;o.sample=pass.z;
     return o;
 }
 [shader("fragment")]
@@ -138,7 +137,7 @@ VisibilityOutput single_fs(Visibility v, bool front : SV_IsFrontFace, uint primi
 Varying masked_vs([[vk::location(0)]] VertexIn v, uint direct : SV_VulkanInstanceID, [[vk::location(REG_CAMERA_INSTANCE_LOCATION)]] uint mapped : CAMERA_INSTANCE, VISIBILITY_PASS) {
     var o=vertex(v,camera_object(direct,mapped));
     o.position=offset(o.position,pass,disk);
-    o.sample=pass.z;o.medium_capacity=pass.w;
+    o.sample=pass.z;
     return o;
 }
 [shader("fragment")]

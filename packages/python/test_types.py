@@ -36,11 +36,13 @@ class GeneratedTypes(unittest.TestCase):
         for internal in ['RasterIntegrator', 'PathIntegrator', 'Denoiser', 'FastGi', 'Probes']:
             self.assertFalse(hasattr(types, internal), internal)
 
-    def test_kernel_geometry_has_only_buffers(self):
-        fields = get_type_hints(types.Geometry)
-        self.assertIn('attributes', types.Geometry.__required_keys__)
+    def test_geometry_includes_kernel_buffers_and_authoring_shorthand(self):
+        fields = get_type_hints(types.BufferGeometry)
+        self.assertIn('attributes', types.BufferGeometry.__required_keys__)
         self.assertNotIn('std', fields)
-        for name in ['StdGeometry', 'StdSphereGeometry', 'StdTextGeometry', 'StdExtrudeGeometry']:
+        self.assertIn('std', types.StdGeometry.__required_keys__)
+        self.assertIn('font', get_type_hints(types.StdGeometry))
+        for name in ['StdSphereGeometry', 'StdTextGeometry', 'StdExtrudeGeometry']:
             self.assertFalse(hasattr(types, name), name)
 
     def test_std_uses_shared_cli(self):

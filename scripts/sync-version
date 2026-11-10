@@ -40,6 +40,8 @@ for name in ['packages/ts/package.json', 'packages/ts/package-lock.json']:
         data['packages']['']['version'] = version
     write(name, json.dumps(data, indent=2) + '\n')
 for name, pattern, replacement in [
+    ('docs/help/index.md', r'https://raw\.githubusercontent\.com/voyager-so/vork/v[^/]+/packages/ts/scene\.schema\.json',
+     f'https://raw.githubusercontent.com/voyager-so/vork/v{version}/packages/ts/scene.schema.json'),
     ('install.sh', r'version=\$\{VERSION:-[^}]+\}', 'version=${VERSION:-' + version + '}'),
     ('install.ps1', r"(\$version = .* else \{ ')[^']+(' \})", r'\g<1>' + version + r'\g<2>'),
     ('packages/python/pyproject.toml', r'(?m)^version = "[^"]+"', f'version = "{python_version}"'),

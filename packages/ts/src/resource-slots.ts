@@ -79,53 +79,57 @@ export const resourceSlots = {
       }
     },
     "Geometry": {
-      "properties": {
-        "attributes": {
-          "values": {
-            "ref": "NameOr3"
+      "branches": [
+        {
+          "properties": {
+            "attributes": {
+              "values": {
+                "ref": "NameOr3"
+              }
+            },
+            "count": {
+              "branches": [
+                {
+                  "ref": "NameOr3"
+                }
+              ]
+            },
+            "curve_vertex_counts": {
+              "branches": [
+                {
+                  "ref": "NameOr3"
+                }
+              ]
+            },
+            "ids": {
+              "branches": [
+                {
+                  "ref": "NameOr3"
+                }
+              ]
+            },
+            "indices": {
+              "branches": [
+                {
+                  "ref": "NameOr3"
+                }
+              ]
+            },
+            "morphs": {
+              "values": {
+                "ref": "Morph"
+              }
+            },
+            "widths": {
+              "branches": [
+                {
+                  "ref": "NameOr3"
+                }
+              ]
+            }
           }
-        },
-        "count": {
-          "branches": [
-            {
-              "ref": "NameOr3"
-            }
-          ]
-        },
-        "curve_vertex_counts": {
-          "branches": [
-            {
-              "ref": "NameOr3"
-            }
-          ]
-        },
-        "ids": {
-          "branches": [
-            {
-              "ref": "NameOr3"
-            }
-          ]
-        },
-        "indices": {
-          "branches": [
-            {
-              "ref": "NameOr3"
-            }
-          ]
-        },
-        "morphs": {
-          "values": {
-            "ref": "Morph"
-          }
-        },
-        "widths": {
-          "branches": [
-            {
-              "ref": "NameOr3"
-            }
-          ]
         }
-      }
+      ]
     },
     "GridBinding": {
       "properties": {
@@ -372,6 +376,13 @@ export const resourceSlots = {
               ]
             },
             "material": {
+              "branches": [
+                {
+                  "ref": "NameOr"
+                }
+              ]
+            },
+            "medium": {
               "branches": [
                 {
                   "ref": "NameOr"

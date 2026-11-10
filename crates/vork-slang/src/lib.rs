@@ -76,6 +76,8 @@ fn spawn_compiler(command: &mut Command) -> std::io::Result<std::process::Child>
 }
 
 mod effects;
+mod trace;
+pub use trace::QueryFilter;
 pub use effects::EffectProbe;
 mod enums;
 pub use enums::InputEnum;
@@ -85,12 +87,13 @@ mod declarations;
 mod hair;
 pub use hair::{HAIR_VEC4S, hair_fields};
 mod openpbr;
+mod native_blend;
 pub mod progress;
 pub mod registry;
 pub mod renderer_registry;
 pub use openpbr::openpbr_fields;
 mod compute;
-pub use compute::ComputeProgram;
+pub use compute::{ComputeProgram,compute_used_bindings};
 mod composite;
 mod display;
 mod propagation;
@@ -106,7 +109,7 @@ mod volume;
 pub use medium::{MEDIUM_FP_FLAGS, MEDIUM_VEC4S, MediumProgram};
 
 /// Changes to reflection/bridge metadata invalidate the shared program artifact key.
-pub const ABI_VERSION: u32 = 39;
+pub const ABI_VERSION: u32 = 42;
 /// Program-visible ABI version, `VORK_ABI` in `import vork`. Bump it when a
 /// public declaration a program can use changes incompatibly.
 pub const PROGRAM_ABI: u32 = 1;
@@ -187,6 +190,7 @@ pub enum Type {
     Vector(u32),
     /// `vork::Image`: one u32 image-table slot.
     Image,
+    Geometry,
     FloatGrid,
     VectorGrid,
     Aov,
@@ -205,6 +209,7 @@ impl Type {
             Type::Uint => "uint".into(),
             Type::Bool => "bool".into(),
             Type::Vector(n) => format!("float{n}"),
+            Type::Geometry => "Geometry".into(),
             Type::Image => "Image".into(),
             Type::FloatGrid => "FloatGrid".into(),
             Type::VectorGrid => "VectorGrid".into(),
@@ -216,7 +221,7 @@ impl Type {
         match self {
             Type::Float => "f32".into(),
             Type::Int => "i32".into(),
-            Type::Uint | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_) => "u32".into(),
+            Type::Uint | Type::Geometry | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_) => "u32".into(),
             Type::Bool => "bool".into(),
             Type::Vector(n) => format!("vec{n}<f32>"),
         }
@@ -353,6 +358,7 @@ impl Abi {
                     .map(|module| module.source)
                     .chain(KERNEL_MODULES.iter().map(|(_, source)| *source))
                     .collect::<String>()
+                + include_str!("trace_types.slang")
                 + &renderer_registry::generate(true)
         ))
     }
@@ -391,7 +397,7 @@ impl Abi {
     /// Every module a native program compile needs besides the renderer's own:
     /// (name, source), with `vork` in its native form.
     pub fn native_modules(&self) -> Vec<(String, String)> {
-        let mut modules = vec![("vork".to_owned(), self.native_module())];
+        let mut modules = vec![("vork".to_owned(), self.native_module()), ("program_trace".into(), include_str!("trace_types.slang").into())];
         for module in library_modules() {
             modules.push((module.name.to_owned(), module.source.to_owned()));
         }
@@ -431,6 +437,7 @@ impl Abi {
         s.push_str("    return ctx;\n}\n");
         s.push_str("[__AttributeUsage(_AttributeTargets.Var)]\npublic struct InputRangeAttribute { float min; float max; bool min_closed; bool max_closed; };\n");
         s.push_str(&coordinates::module(native));
+        s.push_str(&trace::module(native));
         s.push_str(if native {""} else {
             "internal void vork_blend_overflow(uint count, uint capacity) { __target_switch { case wgsl: __intrinsic_asm \"vork_blend_overflow($0, $1)\"; } }\n"
         });
@@ -454,11 +461,14 @@ impl Abi {
              public void write_aov(inout AovOutputs outputs, Aov target, float value) {{if(target.slot<{aov_count}u) outputs.values[target.slot]=float4(value,value,value,1.);}}\n\
              public void write_aov(inout AovOutputs outputs, Aov target, float3 value) {{if(target.slot<{aov_count}u) outputs.values[target.slot]=float4(value,1.);}}\n\
              public float4 vork_aov_value(AovOutputs outputs, uint index) {{ return outputs.values[index]; }}\n\
+             public struct Geometry {{ internal uint slot = 0xffffffffu; }};\n\
              public struct FloatGrid {{ internal uint slot = 0u; }};\n\
              public struct VectorGrid {{ internal uint slot = 0u; }};\n\
              public struct Image {{ internal uint slot = {NO_IMAGE}; }};\n\
              public Image vork_image(uint slot) {{ Image h; h.slot = slot; return h; }}\n\
              public Aov vork_aov(uint slot) {{ Aov h; h.slot = slot; return h; }}\n\
+             public Geometry vork_geometry(uint slot) {{ Geometry h; h.slot = slot; return h; }}\n\
+             public uint vork_slot(Geometry h) {{ return h.slot; }}\n\
              public FloatGrid vork_float_grid(uint slot) {{ FloatGrid h; h.slot = slot; return h; }}\n\
              public VectorGrid vork_vector_grid(uint slot) {{ VectorGrid h; h.slot = slot; return h; }}\n\
              public uint vork_slot(Image h) {{ return h.slot; }}\n\
@@ -672,7 +682,7 @@ fn to_f32_slang(ty: Type, v: &str) -> String {
     match ty {
         Type::Float | Type::Vector(_) => v.into(),
         Type::Int | Type::Uint => format!("asfloat({v})"),
-        Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov => format!("asfloat(vork_slot({v}))"),
+        Type::Geometry | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov => format!("asfloat(vork_slot({v}))"),
         Type::Attribute(_) => format!("asfloat(vork_slot({v}))"),
         Type::Bool => format!("({v} ? 1.0 : 0.0)"),
     }
@@ -682,13 +692,14 @@ fn from_f32_slang(ty: Type, v: &str) -> String {
         Type::Float | Type::Vector(_) => v.into(),
         Type::Int => format!("asint({v})"),
         Type::Uint => format!("asuint({v})"),
-        Type::Image | Type::Aov | Type::FloatGrid | Type::VectorGrid | Type::Attribute(_) => handle_slang(ty, &format!("asuint({v})")),
+        Type::Geometry | Type::Image | Type::Aov | Type::FloatGrid | Type::VectorGrid | Type::Attribute(_) => handle_slang(ty, &format!("asuint({v})")),
         Type::Bool => format!("{v} != 0.0"),
     }
 }
 /// An opaque resource handle from its u32 slot, through the reserved constructors.
 fn handle_slang(ty: Type, slot: &str) -> String {
     match ty {
+        Type::Geometry => format!("vork_geometry({slot})"),
         Type::Image => format!("vork_image({slot})"),
         Type::Aov => format!("vork_aov({slot})"),
         Type::FloatGrid => format!("vork_float_grid({slot})"),
@@ -700,7 +711,7 @@ fn handle_slang(ty: Type, slot: &str) -> String {
 fn to_f32_wgsl(ty: Type, v: &str) -> String {
     match ty {
         Type::Float | Type::Vector(_) => v.into(),
-        Type::Int | Type::Uint | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_) => format!("bitcast<f32>({v})"),
+        Type::Int | Type::Uint | Type::Geometry | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_) => format!("bitcast<f32>({v})"),
         Type::Bool => format!("select(0.,1.,{v})"),
     }
 }
@@ -763,6 +774,9 @@ pub struct ProgramDependencies {
     pub object_transforms: bool,
     pub attributes: bool,
     pub images: bool,
+    /// A reachable geometric query reads the evaluated scene snapshot.
+    #[serde(default)]
+    pub trace: bool,
 }
 
 impl ProgramDependencies {
@@ -772,6 +786,7 @@ impl ProgramDependencies {
         self.object_transforms |= other.object_transforms;
         self.attributes |= other.attributes;
         self.images |= other.images;
+        self.trace |= other.trace;
     }
 }
 
@@ -941,10 +956,11 @@ impl Compiler {
             command.args(["-line-directive-mode", "none"]);
         }
         let depfile = work.0.join("out.d");
-        let repro = work.0.join("native.repro");
-        if self.expected.is_some() || self.captured.is_some() { command.arg("-dump-repro").arg(&repro); }
-        let result = compiler_output(command.arg("-depfile").arg(&depfile).arg("-o").arg(&output))
-            .context("run Slang compiler")?;
+        command.arg("-depfile").arg(&depfile).arg("-o").arg(&output);
+        let (result, snapshot) = if self.expected.is_some() || self.captured.is_some() {
+            let (output, snapshot) = identity::capture_command(&work, &mut command, &depfile)?;
+            (output, Some(snapshot))
+        } else { (compiler_output(&mut command).context("run Slang compiler")?, None) };
         ensure!(
             result.status.success(),
             "slangc {}: {}",
@@ -952,9 +968,11 @@ impl Compiler {
             String::from_utf8_lossy(&result.stderr)
         );
         // Native-only branches (e.g. VORK_NATIVE_MEDIUM) may import authored modules the WGSL probe never saw.
-        reject_reserved_dependencies(&work, &depfile_paths(&read_compiler_text(depfile)?))?;
-        if self.expected.is_some() || self.captured.is_some() {
-            identity::check_imports(self, &work, repro)?;
+        let dependencies = snapshot.as_ref().map(|s| s.dependencies())
+            .unwrap_or(depfile_paths(&read_compiler_text(&depfile)?));
+        reject_reserved_dependencies(&work, &dependencies)?;
+        if let Some(snapshot) = &snapshot {
+            identity::check_imports(self, &work, snapshot)?;
         }
         let mut code=fs::read(output)?;
         // Slang emits MSL source; its fp-mode flag cannot configure the later
@@ -985,6 +1003,7 @@ impl Compiler {
         let capacity = std::cell::Cell::new(openpbr::BLEND_LOBES);
         let mut effects = String::new();
         let compiled = self.compile_with_capacity(abi, source, origin, tag, Some(&capacity), false, false, false, |inputs, declarations| {
+            ensure!(inputs.fields.iter().all(|field|field.ty!=Type::Geometry),"Geometry inputs require a compute program; bind collider geometry on the geometry producer");
             (capabilities, effects) = self.surface_effects(abi, source, origin, declarations.contains("lit"), inputs)?;
             let needed = capabilities.blend_lobes.unwrap_or(openpbr::BLEND_LOBES).max(1);
             capacity.set(needed.max(openpbr::BLEND_LOBES));
@@ -1047,9 +1066,22 @@ impl Compiler {
         let displacement_images: Vec<String>=resources.iter().filter(|name|inputs.fields.iter().any(|f|&f.name==*name && f.ty==Type::Image)).cloned().collect();
         let displacement_uses_normal=capabilities.displacement && effects::displacement_depends_on(&wgsl,&format!("vork_displace_{tag}_0_{tag}"),1)?;
         let displacement_uses_time=capabilities.displacement && effects::displacement_depends_on(&wgsl,&format!("vork_displace_{tag}_0_{tag}"),2)?;
+        for (present, entry) in [
+            (capabilities.displacement, format!("vork_displace_{tag}_0_{tag}")),
+            (has_aov, format!("vork_aov_{tag}_0_{tag}")),
+            (capabilities.lit, format!("vork_lit_{tag}_0_{tag}")),
+        ] {
+            ensure!(!present || !effects::calls_trace(&wgsl, &entry, abi)?, "trace is supported only in surface; displacement, lit and AOV queries are not qualified");
+        }
         capabilities.dependencies = effects::program_dependencies(&wgsl, &surface, abi)?;
         if capabilities.lit {
             capabilities.dependencies.include(effects::program_dependencies(&wgsl, &format!("vork_lit_{tag}_0_{tag}"), abi)?);
+        }
+        if capabilities.dependencies.trace {
+            effects::require_bounded_query_caller(&wgsl, &surface, abi)?;
+            if capabilities.lit {
+                effects::require_bounded_query_caller(&wgsl, &format!("vork_lit_{tag}_0_{tag}"), abi)?;
+            }
         }
         capabilities.dependencies.time |= displacement_uses_time;
         capabilities.dependencies.attributes |= !displacement_attributes.is_empty();
@@ -1266,8 +1298,6 @@ impl Compiler {
         let _progress = progress::Job::start(false);
         let mut command = Command::new(&self.executable);
         command.arg(&input).arg(INITIALIZATION).current_dir(&work.0);
-        let repro = work.0.join(if probe { "probe.repro" } else { "proof.repro" });
-        if self.expected.is_some() || self.captured.is_some() { command.arg("-dump-repro").arg(&repro); }
         // Image programs execute directly as WGSL; give their numeric loops
         // the same speed optimization level as the native renderer shaders.
         if optimize {command.arg("-O2");}
@@ -1295,17 +1325,21 @@ impl Compiler {
             .arg(&depfile)
             .arg("-o")
             .arg(&wgsl);
-        let output = compiler_output(&mut command).context("run Slang compiler")?;
+        let (output, snapshot) = if self.expected.is_some() || self.captured.is_some() {
+            let (output, snapshot) = identity::capture_command(work, &mut command, &depfile)?;
+            (output, Some(snapshot))
+        } else { (compiler_output(&mut command).context("run Slang compiler")?, None) };
         let diagnostics = String::from_utf8_lossy(&output.stderr).into_owned();
         ensure!(
             output.status.success(),
             "slangc {}: {diagnostics}",
             output.status
         );
-        let dependencies = depfile_paths(&read_compiler_text(depfile)?);
+        let dependencies = snapshot.as_ref().map(|s| s.dependencies())
+            .unwrap_or(depfile_paths(&read_compiler_text(&depfile)?));
         reject_reserved_dependencies(work, &dependencies)?;
-        if self.expected.is_some() || self.captured.is_some() {
-            identity::check_imports(self, work, repro)?;
+        if let Some(snapshot) = &snapshot {
+            identity::check_imports(self, work, snapshot)?;
         }
         Ok(Output {
             wgsl: read_compiler_text(wgsl)?,
@@ -1409,7 +1443,7 @@ fn program_text(source: &str, origin: &Path) -> String {
 fn include_paths(origin: &Path) -> Vec<PathBuf> {
     origin
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p })
         .map(Path::to_path_buf)
         .into_iter()
         .collect()
@@ -1742,7 +1776,7 @@ fn isolate(wgsl: &str, tag: &str, allow_workgroup: bool) -> Result<String> {
 /// Slang/naga disagreement surfaces at install with the program's name.
 fn validated_module(wgsl: &str, abi: &Abi) -> Result<naga::Module> {
     let mut module = abi.structs_wgsl();
-    module.push_str(coordinates::validation_stubs());
+    module.push_str(&coordinates::validation_stubs());
     module.push_str("fn vork_blend_overflow(count:u32,capacity:u32) {}\n");
     module.push_str("fn vork_attribute(slot:u32,differential:u32)->vec4<f32>{return vec4(f32(slot+differential));}\n");
     module.push_str("fn vork_compositor_context(index:u32)->vec4<f32>{return vec4(f32(index));}\n");
@@ -1863,6 +1897,7 @@ impl InputLayout {
                 Type::Int => format!("asint({})", word(0)),
                 Type::Uint => word(0),
                 Type::Bool => format!("{} != 0", word(0)),
+                Type::Geometry => format!("vork_geometry({})",word(0)),
                 Type::Image => format!("vork_image_input(base, {})", word(0)),
                 Type::FloatGrid => format!("vork_float_grid(base + {})",word(0)),
                 Type::VectorGrid => format!("vork_vector_grid(base + {})",word(0)),
@@ -1902,7 +1937,7 @@ impl InputLayout {
         let mut words = self.varying_words(&self.pack(values, |_, _| Ok(0))?, dynamic);
         for f in &self.fields {
             let animated = dynamic.contains(&f.name);
-            if animated || matches!(f.ty, Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_)) {
+            if animated || matches!(f.ty, Type::Geometry | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_)) {
                 words[f.offset..f.offset + f.ty.words()].fill(None);
             }
         }
@@ -1937,6 +1972,7 @@ impl InputLayout {
                     );
                     Type::Vector(n)
                 }
+                (Some("struct"), _) if t["name"] == "Geometry" => Type::Geometry,
                 (Some("struct"), _) if t["name"] == "Image" => Type::Image,
                 (Some("struct"), _) if t["name"] == "FloatGrid" => Type::FloatGrid,
                 (Some("struct"), _) if t["name"] == "VectorGrid" => Type::VectorGrid,
@@ -2117,11 +2153,12 @@ impl InputLayout {
                     )
                     .with_context(|| format!("input {name}: outside uint32"))?
                 }
-                Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_) => out[0] = image(name, value)?,
+                Type::Geometry | Type::Image | Type::FloatGrid | Type::VectorGrid | Type::Aov | Type::Attribute(_) => out[0] = image(name, value)?,
             }
         }
         for field in &self.fields {
             ensure!(!matches!(field.ty,Type::Attribute(_)) || values.contains_key(&field.name),"input {}: Attribute requires an attribute binding",field.name);
+            ensure!(field.ty!=Type::Geometry || values.contains_key(&field.name),"input {}: Geometry requires {{geometry: mesh-node-name}}",field.name);
         }
         Ok(words)
     }

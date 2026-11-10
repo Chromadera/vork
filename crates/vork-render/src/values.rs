@@ -361,6 +361,20 @@ pub(crate) fn sample_pose(
     values: &mut [Option<EvalNode>],
     worlds: &mut [Mat4],
 ) -> Result<()> {
+    sample_pose_inputs(originals, assets, animation, targets, request, samples, values, worlds)
+}
+
+/// Geometry stages use the same authored pose evaluation at canonical tick times.
+pub(crate) fn sample_pose_inputs(
+    originals: &[EvalNode],
+    assets: &[Asset],
+    animation: &animation::Plan,
+    targets: &crate::targets::Plan,
+    request: impl Into<vork_time::Request>,
+    samples: &mut animation::Samples,
+    values: &mut [Option<EvalNode>],
+    worlds: &mut [Mat4],
+) -> Result<()> {
     let request=request.into();
     let time=request.numeric()?;
     animation.sample_request_into(time, &request, samples)?;
@@ -711,7 +725,7 @@ impl FrameSlot {
                 },
                 transmission_word(render),
             ],
-            medium: [s.medium_base,s.rays.as_ref().map_or(0,|r|r.emitters),s.pipelines.resolve_native.as_ref().and_then(|n|n.surface_connection).map_or(0,|offset|s.medium_base+offset),u32::from(environment_visibility & constants::RAY_VOLUME!=0)],
+            medium: [s.medium_base,s.rays.as_ref().map_or(0,|r|r.emitters),0,u32::from(environment_visibility & constants::RAY_VOLUME!=0)],
             display: [f32::from_bits(render.settings.seed),render.resolution[0] as f32,render.resolution[1] as f32,self.view.post.display_base.unwrap_or(0) as f32],
             post: [if s.has_catchers {1.} else {post_mode(render)},
                 0.,
@@ -865,7 +879,6 @@ impl FrameSlot {
                 for &draw_id in &group.deforms {
                     let draw = &s.draws[draw_id];
                     let deform = draw.deform.as_ref().unwrap();
-                    let frame = self.skin[draw_id].as_ref().unwrap();
                     let key = if let Some(native) = &deform.native {
                         (true, native.mesh, 0, None, offset_bits)
                     } else {
@@ -900,67 +913,15 @@ impl FrameSlot {
                     if !displacement_spaces.is_empty() && deform.native.is_none() {
                         displacement_spaces[deform.job][pose]=poses[&deform.asset.unwrap()].worlds[deform.node];
                     }
-                    let cpu_palette = if let Some(cpu) = &deform.cpu {
-                        let mut input = Vec::new();
-                        input.extend_from_slice(bytemuck::cast_slice(matrices.as_slice()));
-                        input.extend_from_slice(bytemuck::cast_slice(weights.as_slice()));
-                        let base_vertices = &cpu.base;
-                        let bounds = changes.derive_upload(
-                            ChangeKey::Subdivision(deform.job, pose), &input,
-                            self.subdivision_morphs[draw_id].as_ref().unwrap(),
-                            pose as u64 * deform.count as u64 * constants::MORPH_FLOATS as u64 * 4,
-                            || {
-                                let vertices = cpu.vertices(matrices,weights);
-                                ensure!(vertices.iter().flat_map(|v| v.POSITION).all(|v| v.is_finite()), "deformed subdivision produced nonfinite positions");
-                                let mut delta = Vec::<f32>::with_capacity(vertices.len()*constants::MORPH_FLOATS);
-                                let mut lo=Vec3::splat(f32::INFINITY);let mut hi=Vec3::splat(f32::NEG_INFINITY);
-                                for (v,base) in vertices.into_iter().zip(base_vertices) {
-                                    let p=Vec3::from(v.POSITION);lo=lo.min(p);hi=hi.max(p);
-                                    delta.extend((p-Vec3::from(base.POSITION)).to_array());
-                                    delta.extend((Vec3::from(v.NORMAL)-Vec3::from(base.NORMAL)).to_array());
-                                    delta.extend((Vec3::from_slice(&v.TANGENT[..3])-Vec3::from_slice(&base.TANGENT[..3])).to_array());
-                                }
-                                Ok(([lo.to_array(),hi.to_array()],bytemuck::cast_slice(&delta).to_vec()))
-                            },
-                        )?;
-                        if current {local_bounds[deform.job]=Some((Vec3::from(bounds[0]),Vec3::from(bounds[1])));}
-                        Some((vec![Mat4::IDENTITY], (0..3).map(|i|if i==pose {1.} else {0.}).collect()))
-                    } else {
-                        if current {local_bounds[deform.job] = Some(deformed_bounds(&deform.bounds, matrices, weights));}
-                        None
-                    };
-                    let (matrices, weights) = cpu_palette.as_ref().map_or((&*matrices,&*weights), |(m,w)| (m,w));
-                    let mut params = Vec::with_capacity(4 + matrices.len() * 16 + deform.targets);
-                    params.extend(crate::passes::deform::header(deform));
-                    for matrix in matrices {
-                        params.extend(matrix.to_cols_array());
-                    }
-                    params.extend(
-                        (0..deform.targets).map(|index| weights.get(index).copied().unwrap_or(0.)),
-                    );
-                    let blocks = std::iter::once(0..4)
-                        .chain((0..deform.joints).map(|joint| 4 + joint * 16..4 + (joint + 1) * 16))
-                        .chain(
-                            (4 + deform.joints * 16..params.len()).map(|index| index..index + 1),
-                        );
-                    for block in blocks {
-                        changes.upload(
-                            if current {
-                                &frame.params
-                            } else {
-                                &frame.previous_params
-                            },
-                            (block.start * std::mem::size_of::<f32>()) as u64 + if pose==2 {frame.previous_params.size()/2} else {0},
-                            bytemuck::cast_slice(&params[block]),
-                        );
-                    }
+                    let bounds = self.geometry_chain.upload_pose(s,draw_id,pose,matrices,weights,changes)?;
+                    if current {local_bounds[deform.job]=bounds;}
                 }
             }
         }
-        let computed_bounds = crate::computed_geometry::evaluate(r,s,&self.computed_geometry,&self.geometry_bounds,changes,&self.sample_request,&self.previous_request,&mut self.simulation_checkpoint)?;
-        let mut displacement_bounds=displacement::evaluate(r,s,&self.skin,&self.displacements,self.materials.as_ref(),&self.object_values,&displacement_spaces,&self.geometry_bounds,&self.queries,changes,time,previous_time,next_time)?;
-        if displacement_bounds.is_empty() { displacement_bounds.resize(s.draws.len(),None); }
-        for (i,bounds) in computed_bounds.into_iter().enumerate() { if bounds.is_some() { displacement_bounds[i]=bounds; } }
+        let displacement_bounds = self.geometry_chain.evaluate(r, s, &self.geometry_bounds, changes,
+            &self.sample_request, &self.previous_request, &mut self.simulation_checkpoint,
+            self.materials.as_ref(), &self.object_values, &displacement_spaces, &self.queries,
+            time, previous_time, next_time)?;
         for &object in &s.dynamic_objects {
             if let Some((compute, offset)) = self.compute.as_ref().and_then(|c| c.parent_offset(object).map(|offset| (c, offset))) {
                 changes.upload(&compute.parents, offset, bytemuck::bytes_of(&self.object_values[object]));
@@ -1124,7 +1085,7 @@ impl FrameSlot {
     }
 }
 
-fn deformed_bounds(
+pub(crate) fn deformed_bounds(
     bounds: &[Vec<(Vec3, Vec3)>],
     matrices: &[Mat4],
     weights: &[f32],

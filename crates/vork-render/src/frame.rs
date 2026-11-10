@@ -45,6 +45,24 @@ impl std::fmt::Display for FrameRedo {
     }
 }
 impl std::error::Error for FrameRedo {}
+/// The shader rejected this exposure's values (non-finite radiance, say). No
+/// output from it may be delivered; later exposures do not depend on it, so a
+/// frame sequence can skip it and report it.
+#[derive(Debug)]
+pub struct FrameRefused(pub String);
+impl std::fmt::Display for FrameRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for FrameRefused {}
+
+// Incomplete storage can poison provisional colour. Replay that exposure before
+// judging colour, but preserve immediate refusal for independent shader failures.
+fn reservation_retry_allowed(errors: Option<[u32; 2]>) -> bool {
+    errors.is_none_or(|[code, _]| matches!(code,
+        0 | vork_slang::registry::RADIANCE_NONFINITE | vork_slang::registry::DISPLAY_NONFINITE))
+}
 
 pub struct FrameSlot {
     pub(crate) nominal_frame: u32,
@@ -55,6 +73,8 @@ pub struct FrameSlot {
     propagation_motion: bool,
     warned_propagation_motion: bool,
     _retained_transients: std::sync::Arc<std::sync::Mutex<crate::graph::State>>,
+    publication_error: std::sync::Arc<std::sync::OnceLock<String>>,
+    publication_checks: Option<crate::graph::PublicationChecks>,
     _retained_shadows: std::sync::Arc<crate::shadows::Persistent>,
     /// The frame's decoupled overflow pool and transparent fragment demands,
     /// nonzero once either was full (passes/decoupled.rs).
@@ -83,11 +103,8 @@ pub struct FrameSlot {
     pub(crate) exposure_shutter: Option<vork_scene::MotionBlur>,
     pub(crate) receiver_masks: u32,
     pub(crate) deforms: Vec<Option<EvaluatedGeometry>>,
-    pub(crate) skin: Vec<Option<FrameDeform>>,
-    pub(crate) displacements: Vec<Option<displacement::Frame>>,
-    pub(crate) computed_geometry: Vec<Option<crate::computed_geometry::Frame>>,
+    pub(crate) geometry_chain: crate::geometry_chain::Frame,
     pub(crate) geometry_bounds: Vec<Option<(Vec3,Vec3)>>,
-    pub(crate) subdivision_morphs: Vec<Option<wgpu::Buffer>>,
     /// Frame-private TLAS and deformed BLAS of scenes with a ray technique.
     pub(crate) rays: Option<crate::rt::FrameRays>,
     pub(crate) camera_data: CameraRecord,
@@ -128,6 +145,7 @@ pub struct FrameSlot {
     pub(crate) submission: Option<wgpu::SubmissionIndex>,
     /// Scene time of the submitted frame and the work it runs, named when the GPU fails it.
     submitted_time: f32,
+    timing_started: Instant,
     work: std::sync::Arc<str>,
     /// Collect optional named GPU timings and nonfinite diagnostics.
     pub profile: bool,
@@ -189,8 +207,12 @@ pub struct FrameTiming {
     /// Host wall time repacking and queuing CPU denoised output; zero for GPU interop.
     pub denoise_upload_ms: f64,
     pub gpu_ms: f64,
+    /// Counter intervals, or a conservative host envelope when counters are missing.
+    pub timing_source: &'static str,
     /// Bad RGBA evaluations summed across views and exposure samples, diagnostics only.
     pub nonfinite: Option<NonfiniteCounts>,
+    /// Non-finite light contributions dropped, collected even without diagnostics.
+    pub dropped_light_samples: u64,
     /// First-to-last written GPU timestamp, including intervals between named spans.
     pub gpu_elapsed_ms: f64,
     /// Named GPU spans in milliseconds, summed over shutter samples.
@@ -480,13 +502,8 @@ impl FrameSlot {
             wgpu::BufferUsages::STORAGE,
         );
         let mut rays = crate::rt::FrameRays::new(s, r, &objects)?;
-        let mut skin = passes::deform::resources(s, r)?;
-        let subdivision_morphs = crate::subdivision::frame_resources(s, r, &mut skin);
-        let displacements = displacement::resources(r, s, &skin)?;
-        let computed_geometry = crate::computed_geometry::resources(r,s)?;
-        let deforms: Vec<_> = skin.iter().enumerate().map(|(i,skin)|
-            computed_geometry[i].as_ref().map(|g|g.geometry.clone()).or_else(||
-            displacements.get(s.draws[i].displacement_leader.unwrap_or(i)).and_then(|d|d.as_ref()).map(|d|d.geometry.clone()).or_else(||skin.as_ref().map(EvaluatedGeometry::from)))).collect();
+        let geometry_chain = crate::geometry_chain::Frame::new(r, s)?;
+        let deforms = geometry_chain.outputs();
         if let Some(rays) = rays.as_mut() { rays.resolve_hit_buffers(s, &deforms); }
         let shadow_bind = s.shadows().bind(s, d, rays.as_ref());
         r.errors.check()?;
@@ -536,6 +553,7 @@ impl FrameSlot {
         };
         // Shadow bundles see the complete scene, independent of the visible subtree.
         let recorder = crate::bundles::Recorder {
+            shadow_bind: &shadow_bind,
             graph: &s.graph,
             transparent_instances: None,
             camera_instances: None,
@@ -605,6 +623,8 @@ impl FrameSlot {
             warned_propagation_motion: false,
             _retained_shadows: retained_shadows,
             _retained_transients: retained_transients,
+            publication_error: s.transients.recording_error.clone(),
+            publication_checks: (s.has_media || s.compute.is_some() || !image_targets.is_empty()).then(||s.transients.publication_checks.clone()),
             simulation_checkpoint: None,
             slot_overflow: s.plan.decoupled.then(|| buffer(
                 "visibility slot overflow readback", 8 * (1 + s.graph.views.images.len() * if s.plan.effects.image_feedback {2} else {1}) as u64,
@@ -634,11 +654,8 @@ impl FrameSlot {
             exposure_upload: Vec::new(),
             batch_uploads,
             deforms,
-            skin,
-            displacements,
-            computed_geometry,
+            geometry_chain,
             geometry_bounds: vec![None;s.draws.len()],
-            subdivision_morphs,
             rays,
             camera_data: CameraRecord::default(),
             objects,
@@ -673,6 +690,7 @@ impl FrameSlot {
             completed: None,
             submission: None,
             submitted_time: 0.,
+            timing_started: Instant::now(),
             work: s.gpu_work().into(),
             profile: false,
             sample_gpu_ms: Vec::new(),
@@ -853,6 +871,7 @@ impl FrameSlot {
     ) -> Result<()> {
         self.gpu_check(r)?;
         ensure!(!self.pending, "collect this frame slot before resubmitting");
+        self.timing_started = Instant::now();
         ensure!(time.is_finite() && time >= 0., "time must be nonnegative and finite");
         // Resolve once at the nominal exposure time, before selecting recorded
         // spatial work. Sample-time render evaluation must not change this plan.
@@ -994,6 +1013,9 @@ impl FrameSlot {
                     && self.view.visibility_samples <= vork_slang::registry::MERGE_BATCH
                     && group_ends[..samples - 1].iter().all(|end| !end)
                     && !self.view.recording().steps.iter().any(crate::graph::Step::separates)));
+        // Diagnostic cuts must see already-published uniforms, like OIDN interop.
+        #[cfg(test)]
+        let batch=batch && r.test_gpu_segment_times.is_none();
         let mut finish_workers = batch.then(|| r.command_finish
             .get_or_init(crate::command_finish::CommandFinish::new).batch(crate::command_finish::batch_window(r)));
         let mut recording = None;
@@ -1027,16 +1049,21 @@ impl FrameSlot {
         let sample_requests:Vec<_>=(0..count).map(|i|request_at(2*crate::sampling::shutter_index(i,count) as u64+1,2*count as u64))
             .chain(nominal_controls.then(||Ok(self.nominal_request.clone()))).collect::<Result<_>>()?;
         let sample_times:Vec<_>=sample_requests.iter().map(|request|request.numeric()).collect::<Result<_>>()?;
-        if self.computed_geometry.iter().any(Option::is_some) {
-            let historical_times:Vec<_>=sample_requests.iter().map(|t| {
-                let request=t.clone();
-                if self.exposure_cut {Ok(request)}else{request.previous(s.render.fps)}
-            }).collect::<Result<_>>()?;
-            crate::computed_geometry::prepare_history(r,s,&self.computed_geometry,&historical_times,&mut self.simulation_checkpoint)?;
-        }
         if let Some(compute)=&s.compute {
-            compute.plan_requests(&mut compute.cursor.lock().expect("compute cursor poisoned"), sample_requests.iter().cloned())?;
+            let mut cursor=compute.cursor.lock().expect("compute cursor poisoned");
+            if self.compute.is_some() {
+                compute.plan_placement_requests(&mut cursor,&sample_requests,self.exposure_cut)?;
+            } else {
+                compute.plan_requests(&mut cursor,sample_requests.iter().cloned())?;
+            }
         }
+        if self.compute.is_some() {
+            let compute=s.compute.as_ref().expect("placement compute");
+            let mut cursor=compute.cursor.lock().expect("compute cursor poisoned");
+            compute.prepare_placement_history(r,&mut cursor,&sample_requests,self.exposure_cut,&mut self.simulation_checkpoint)?;
+        }
+        self.geometry_chain.prepare_history(r,s,&sample_requests,self.exposure_cut,&mut self.simulation_checkpoint)?;
+        vork_slang::progress::sample_pass(0, count);
         for i in 0..count {
             if let Some(compute)=&s.compute {
                 compute.consume_request(&mut compute.cursor.lock().expect("compute cursor poisoned"), sample_requests[i].clone())?;
@@ -1070,6 +1097,7 @@ impl FrameSlot {
                 recording.take(),
             )?;
             recording = self.finish_sample(r, encoder, finish_workers.as_mut(), group_ends[self.view.sample_index], validation_group_size);
+            vork_slang::progress::sample_pass(i + 1, count);
             cpu += self.cpu_ms;
             prep += self.prep_ms;
             finish += self.finish_ms;
@@ -1091,7 +1119,7 @@ impl FrameSlot {
         }
         if nominal_controls {
             if let Some(compute)=&s.compute {
-                compute.plan_requests(&mut compute.cursor.lock().expect("compute cursor poisoned"), std::iter::empty())?;
+                compute.consume_request(&mut compute.cursor.lock().expect("compute cursor poisoned"),self.nominal_request.clone())?;
             }
             let color_enabled = self.view.color_enabled;
             self.view.nominal_sample = true;
@@ -1125,6 +1153,13 @@ impl FrameSlot {
             self.submission = Some(submission);
             finish += finish_ms;
             cpu += start.elapsed().as_secs_f64() * 1000.;
+        }
+        if let Some(checks) = &self.publication_checks {
+            let mut buffers = Vec::new();
+            if let Some(buffer)=&self.shader_error_readback {buffers.push(("shader",buffer.clone()));}
+            if let Some(env)=&self.environment_diagnostics {buffers.push(("environment",env.readback.clone()));}
+            if let Some(compute)=&self.compute {buffers.push(("placement",compute.error_readback.clone()));}
+            checks.lock().unwrap().push((self.submission.clone().context("publication has no fence")?,buffers));
         }
         self.flight_ownership.submit();
         self.pending = true;
@@ -1292,11 +1327,26 @@ impl FrameSlot {
         if sample==0 { if let Some(compute)=&self.compute {encoder.clear_buffer(&compute.errors,0,None);} }
         if !self.reuse_values {
         if let (Some(compute), Some(cursor)) = (&s.compute, compute_cursor.as_mut()) {
+            if self.compute.is_some() {
+                compute.consume_request(cursor,self.previous_request.clone())?;
+                if !self.exposure_cut && !compute.restore_placement_history(&mut encoder,cursor,&self.previous_request)? {
+                    if let Some(checkpoint) = compute.advance_with(&mut encoder, cursor, &self.previous_request, |encoder| {
+                        self.sample_segments.cut(r, encoder);
+                    })? {
+                        if self.simulation_checkpoint.is_none() { self.simulation_checkpoint = Some(checkpoint); }
+                    }
+                    compute.snapshot_placement_previous(&mut encoder);
+                }
+            }
             if let Some(checkpoint) = compute.advance_with(&mut encoder, cursor, &self.sample_request, |encoder| {
                 self.sample_segments.cut(r, encoder);
             })? {
                 // At most one bounded host snapshot per exposure, including shutter strata.
                 if self.simulation_checkpoint.is_none() { self.simulation_checkpoint = Some(checkpoint); }
+            }
+            if self.compute.is_some() {
+                compute.retain_placement_history(&mut encoder,cursor,&self.sample_request)?;
+                if self.exposure_cut {compute.snapshot_placement_previous(&mut encoder);}
             }
         }
         if let Some(cursor) = compute_cursor.as_ref() {
@@ -1314,6 +1364,7 @@ impl FrameSlot {
             dense.publish(r,&mut encoder,&mut self.sample_segments,&self.materials.as_ref().expect("dense frame table").records)?;
         }
         }
+        if let Some(compute)=&s.compute {compute.publish_queries(r,&mut encoder,&self.materials.as_ref().expect("compute query diagnostics").shader_errors);}
         for field in &s.implicit_fields {
             let revision=compute_cursor.as_ref().and_then(|c|c.publications.get(&field.source)).copied().unwrap_or(0);
             let published=field.acceleration.publish(&mut encoder,image_changes,revision);
@@ -1345,9 +1396,12 @@ impl FrameSlot {
             if !bits.runs(step.run) {
                 continue;
             }
-            // Reused deformation has no GPU work and no counter pair. Displaced
-            // geometry was evaluated by prepare_values before recording this graph.
-            if step.pass == Pass::Deform && (self.reuse_values || s.displacement.is_some()) {
+            // Only an installed deformation stage writes this counter pair.
+            // Computed-only geometry has no deformation pass; resolving its
+            // unwritten timestamps would make Vulkan wait for unavailable queries.
+            // Displacement is evaluated before recording this graph.
+            if step.pass == Pass::Deform && (self.reuse_values || s.displacement.is_some()
+                || self.geometry_chain.skin().is_empty()) {
                 continue;
             }
             // Pass descriptors retain cheap endpoint writes; omit their resolves
@@ -1384,7 +1438,7 @@ impl FrameSlot {
                             .encode(&mut encoder, &self.queries, timing::query("image inputs") + 1);
                     }
                 }
-                Pass::Deform => passes::deform::encode(&mut encoder, s, self),
+                Pass::Deform => self.geometry_chain.encode(&mut encoder, s, &self.queries),
                 Pass::Rays => crate::rt::encode(&mut encoder, s, self),
                 Pass::Fibre => {if let (Some(p),Some(slot))=(&s.fibre,&self.fibre) {slot.encode(&p.storage(),&mut encoder,&self.queries);}},
                 Pass::Probes => {
@@ -1509,6 +1563,12 @@ impl FrameSlot {
         let start = Instant::now();
         let end = self.view.sample_index + 1;
         let streaming = batch.is_none();
+        let mut encoder = encoder;
+        if submission_end {
+            if let Some(done) = vork_slang::progress::sample_counter() {
+                encoder.on_submitted_work_done(move || { done.fetch_max(end, std::sync::atomic::Ordering::Relaxed); });
+            }
+        }
         let (recording, submission, finish_ms) = self.sample_segments.finish_sample(
             r, encoder, batch, submission_end,
             end != self.group_ends.len() && end % validation_group_size != 0);
@@ -1572,6 +1632,49 @@ impl FrameSlot {
         format!("GPU failed at or before the frame at {}s; frames run {}", self.submitted_time, self.work)
     }
     pub fn collect_readback(&mut self, r: &Renderer) -> Result<FrameReadback> {
+        // Validate every queued producer before returning any dependent image,
+        // even when the caller collects successors out of submission order.
+        // Receipts use the existing slot readbacks; no extra GPU pass is needed.
+        let checked = self.check_publications(r);
+        let result = self.collect_readback_inner(r);
+        let result = result.and_then(|output| checked.map(|()|output));
+        // Captures and retained publications may already have been consumed by
+        // queued successors. An asynchronous failure invalidates the install,
+        // not just this slot. Reservation retries have their own drained replay.
+        if let Err(error) = &result {
+            if !error.is::<FrameRedo>() {
+                self.publication_error.get_or_init(|| format!("{error:#}"));
+            }
+        }
+        if result.is_ok() {
+            if let Some(error) = self.publication_error.get() {
+                anyhow::bail!("frame publication invalidated; reinstall the scene: {error}");
+            }
+        }
+        result
+    }
+    fn check_publications(&self, r: &Renderer) -> Result<()> {
+        let Some(checks) = &self.publication_checks else {return Ok(());};
+        let mut checks = checks.lock().unwrap();
+        for (submission,buffers) in checks.drain(..) {
+            r.wait(Some(submission))?;
+            for (kind,buffer) in buffers {
+                let (tx,rx)=mpsc::channel();
+                buffer.map_async(wgpu::MapMode::Read,..,move |result| {let _=tx.send(result);});
+                r.wait(None)?;rx.recv()??;
+                let mapped=buffer.get_mapped_range(..);
+                let code=u32::from_le_bytes(mapped[..4].try_into().unwrap());
+                drop(mapped);buffer.unmap();
+                if code!=0 {
+                    let message=format!("frame publication invalidated by {kind} diagnostic {code}; reinstall the scene");
+                    self.publication_error.get_or_init(||message.clone());
+                    return Err(anyhow::anyhow!(message));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn collect_readback_inner(&mut self, r: &Renderer) -> Result<FrameReadback> {
         self.gpu_check(r)?;
         ensure!(self.pending, "frame slot has no submitted frame");
         if let Some(done) = self.completed.take() {
@@ -1604,7 +1707,6 @@ impl FrameSlot {
             .and_then(|_| rx.into_iter().try_for_each(|mapped| mapped.map_err(anyhow::Error::from)))
             .with_context(|| self.failed_frame())?;
         self.flight_ownership.complete();
-        if let Some(checkpoint) = self.simulation_checkpoint.take() { checkpoint.publish(); }
         let read = |buffer: &wgpu::Buffer| {
             let mapped = buffer.get_mapped_range(..);
             let pairs: Vec<[u32; 2]> = mapped.chunks(8).map(|pair| std::array::from_fn(|i|
@@ -1670,10 +1772,11 @@ impl FrameSlot {
             slot.query_readback.unmap();
             slot.flight_ownership.retire();
             slot.pending = false;
+            if let Some(checkpoint)=slot.simulation_checkpoint.take() {for buffer in checkpoint.buffers {buffer.unmap();}}
         };
         if environment_invalid {
             fail(self);
-            anyhow::bail!("environment radiance must be finite and nonnegative; frame refused");
+            return Err(FrameRefused("environment radiance must be finite and nonnegative; frame refused".into()).into());
         }
         if placement_errors!=0 {
             fail(self);
@@ -1686,7 +1789,7 @@ impl FrameSlot {
         let band_share=self.views().filter_map(|view|view.decoupled.as_ref()).map(|v|(u64::from(v.extent[1]),u64::from(v.band_rows)))
             .max_by(|a,b|(a.0*b.1).cmp(&(b.0*a.1))).unwrap_or((1,1));
         let shading_evaluations=shader_diagnostics.as_ref().and_then(|p|p.get(1)).map_or(0,|pair|(u64::from(pair[1])*band_share.0).div_ceil(band_share.1));
-        if demands.iter().any(|&demand| demand != 0) || shading_evaluations!=0 || probe_pages!=0 {
+        if reservation_retry_allowed(errors) && (demands.iter().any(|&demand| demand != 0) || shading_evaluations!=0 || probe_pages!=0) {
             let [visibility_pool, transparent_fragments] = demands;
             if self.profile {
                 eprintln!("frame reservation retry: visibility={visibility_pool}, fragments={transparent_fragments}, evaluations={shading_evaluations}");
@@ -1701,17 +1804,36 @@ impl FrameSlot {
         if exhausted != 0 {
             eprintln!("warning: solid transmission exhausted the internal continuation budget (object {}); simplify glass geometry", exhausted - 1);
         }
+        if self.profile {
+            let queries=shader_diagnostics.as_ref().and_then(|words|words.get(3)).map_or(0,|words|words[0]);
+            if queries!=0 {eprintln!("trace rays: {queries}");}
+        }
         if let Some([count, capacity]) = errors.filter(|[count, _]| *count != 0) {
             fail(self);
             if count == vork_slang::registry::CAMERA_COVERAGE_INVALID {anyhow::bail!("cached opaque slot coverage exceeds the camera sample budget; frame refused");}
-            if count == constants::PATH_BOUNDARY_OVERFLOW { anyhow::bail!("more glass solids overlap at a point (at object {capacity}) than the path integrator's occupancy storage installed for them"); }
+            if count == constants::PATH_BOUNDARY_OVERFLOW { anyhow::bail!("more glass solids overlap at a point (at object {capacity}) than the path integrator's occupancy storage installed for them (at most {}); separate or merge the overlapping transmissive solids",crate::passes::path::KERNEL_BOUNDARY_LIMIT); }
+            if count == vork_slang::registry::GEOMETRY_NONFINITE {anyhow::bail!("geometry prefix on object {capacity} produced nonfinite geometry; make displacement positions and shading frames finite");}
             if count == vork_slang::registry::IMPLICIT_INVALID { anyhow::bail!("implicit grid has a nonfinite sample, constant-zero cell or singular zero gradient (object {capacity})"); }
             if count == constants::PATH_BOUNDARY_AMBIGUOUS { anyhow::bail!("path solid boundary requires the same IOR and absorption descriptor in every surface lobe (object {capacity})"); }
-            if count == vork_slang::registry::PATH_MEDIUM_MAJORANT {
-                anyhow::bail!("certified medium extinction bound violated (observed {}): shader produced coefficients outside its compiler certificate; frame refused",f32::from_bits(capacity));
+            if count == vork_slang::registry::PATH_MEDIUM_DISTANCE {
+                anyhow::bail!("medium collision distance exceeds the renderer's finite coordinate range; use a finite fog carrier or rescale scene distances and coefficients; frame refused");
             }
-            if count == vork_slang::registry::RADIANCE_NONFINITE {anyhow::bail!("non-finite scene-linear radiance; frame refused");}
-            if count == vork_slang::registry::DISPLAY_NONFINITE {anyhow::bail!("render.display: display program returned a non-finite colour");}
+            if count == vork_slang::registry::PATH_MEDIUM_INVALID {
+                anyhow::bail!("medium program {capacity} returned invalid physical coefficients: absorption, scattering and emission must be finite and nonnegative and anisotropy strictly between -1 and 1; frame refused");
+            }
+            if count == vork_slang::registry::PATH_MEDIUM_WORK {
+                let operation=capacity>>24;let detail=capacity&0x00ffffff;
+                if operation==7 {anyhow::bail!("medium work budget exhausted during triangle traversal (operation 7); simplify ray-visible geometry or render the fog externally; frame refused without an image");}
+                if operation==8 {anyhow::bail!("medium work budget exhausted during alpha coverage (operation 8, object {detail}); simplify overlapping cutouts/glass or render the fog externally; frame refused without an image");}
+                if operation==255 {anyhow::bail!("stage 1 fog does not support custom light callbacks; use std/openpbr surfaces or render the fog externally; frame refused without an image");}
+                anyhow::bail!("medium work budget exhausted (operation {operation}, program {detail}); simplify the medium or render it externally; frame refused without an image");
+            }
+            if count == vork_slang::registry::PATH_MEDIUM_MAJORANT {
+                return Err(FrameRefused(format!("certified medium extinction bound violated (observed {}): shader produced coefficients outside its compiler certificate; frame refused",f32::from_bits(capacity))).into());
+            }
+            if count == vork_slang::registry::RADIANCE_NONFINITE {return Err(FrameRefused("non-finite scene-linear radiance; frame refused".into()).into());}
+            if count == vork_slang::registry::DISPLAY_NONFINITE {return Err(FrameRefused("render.display: display program returned a non-finite colour".into()).into());}
+            if count == vork_slang::registry::TRACE_EXHAUSTED {anyhow::bail!("trace work exhausted: ray budget or traversal candidate limit (code {capacity}); exposure discarded");}
             if count == vork_slang::registry::CAMERA_RAY_INVALID {anyhow::bail!("camera program returned a non-finite ray, zero direction or invalid t_min/t_max interval");}
             if count == vork_slang::registry::PATH_PROPAGATION_ERROR {anyhow::bail!("authored propagation failed: invalid or non-progressing segment, or free-flight work reservation exhausted (code {capacity})");}
             if count == vork_slang::registry::PATH_MEDIUM_DIVERGENT {anyhow::bail!("unbounded medium emission has no proven finite integral: a constant zero-extinction channel diverges; varying emission without asymptotic closure is unsupported; use a finite mesh boundary");}
@@ -1779,9 +1901,22 @@ impl FrameSlot {
         self.query_readback.unmap();
         self.flight_ownership.retire();
         self.pending = false;
-        timings?;
+        let timing_source = if let Err(error) = timings {
+            // Starts before any exposure work is submitted and ends after its
+            // final fence and readback. Includes CPU recording and queue waits.
+            let (envelope, _) = timing::measured_or_wall(0, 0, r.queue.get_timestamp_period(), self.timing_started.elapsed().as_secs_f64() * 1000.);
+            eprintln!("timing fallback: submission_wall_upper_bound_ms={envelope:.6}; {error:#}");
+            // No attribution is possible. Do not retain partial span totals or
+            // divide an upper bound among samples: each sample may cost it all.
+            gpu_spans_ms.clear();
+            gpu_spans_ms.push(("submission wall upper bound", envelope));
+            sample_gpu_ms.fill(envelope);
+            "submission_wall_upper_bound"
+        } else { "gpu_timestamp" };
         self.sample_gpu_ms = sample_gpu_ms;
         self.gpu_check(r)?;
+        // A rejected exposure must not persist partially evaluated compute state.
+        if let Some(checkpoint) = self.simulation_checkpoint.take() { checkpoint.publish(); }
         Ok(FrameReadback {
             credit: self
                 .read_pixels
@@ -1797,10 +1932,15 @@ impl FrameSlot {
                 denoise_pack_ms: self.denoise_ms.pack_ms,
                 denoise_filter_ms: self.denoise_ms.filter_ms,
                 denoise_upload_ms: self.denoise_ms.upload_ms,
+                timing_source,
                 gpu_ms: gpu_spans_ms.iter().map(|(_, ms)| ms).sum(),
-                gpu_elapsed_ms: timing::elapsed_ms(gpu_begin, gpu_end, r.queue.get_timestamp_period()).unwrap_or(0.),
+                gpu_elapsed_ms: if timing_source == "gpu_timestamp" { timing::elapsed_ms(gpu_begin, gpu_end, r.queue.get_timestamp_period()).unwrap_or(0.) } else { self.sample_gpu_ms.first().copied().unwrap_or(0.) },
                 gpu_spans_ms,
                 nonfinite,
+                dropped_light_samples: shader_diagnostics.as_ref().map_or(0, |words| {
+                    let pair = words[(vork_slang::registry::DROPPED_LIGHT_SAMPLES_WORD / 2) as usize];
+                    u64::from(pair[0]) | (u64::from(pair[1]) << 32)
+                }),
                 sample_count: self.sample_spans.len(),
             },
         })
@@ -1832,6 +1972,23 @@ fn sample_group_ends(costs: &[f64], samples: usize) -> Vec<bool> {
 #[cfg(test)]
 mod profiling_tests {
     use super::*;
+
+    #[test]
+    fn reservation_replay_allows_only_provisional_colour_errors() {
+        use vork_slang::registry::*;
+        assert!(reservation_retry_allowed(None));
+        for code in [0, RADIANCE_NONFINITE, DISPLAY_NONFINITE] {
+            assert!(reservation_retry_allowed(Some([code, 17])));
+        }
+        for code in [PATH_MEDIUM_WORK, PATH_MEDIUM_MAJORANT, PATH_MEDIUM_INVALID,
+            PATH_MEDIUM_DISTANCE, PATH_MEDIUM_DIVERGENT, PATH_BOUNDARY_OVERFLOW,
+            PATH_BOUNDARY_AMBIGUOUS, TRACE_EXHAUSTED, CAMERA_RAY_INVALID,
+            PATH_PROPAGATION_ERROR, CAMERA_COVERAGE_INVALID, IMPLICIT_INVALID,
+            GEOMETRY_NONFINITE, 1] {
+            assert!(!reservation_retry_allowed(Some([code, 17])), "code {code}");
+        }
+    }
+
 
     #[test]
     fn gpu_budget_sizes_groups_from_sample_time() {
@@ -1936,6 +2093,44 @@ mod profiling_tests {
 
     #[test]
     #[ignore = "requires real GPU and pinned Slang"]
+    fn missing_timestamps_complete_with_conservative_wall_timing() -> Result<()> {
+        let Some(renderer) = crate::test_renderer()? else { return Ok(()); };
+        let mut input = vork_scene::v2::with_test_settings(
+            include_str!("../tests/fixtures/analytic.json"),
+            include_str!("../tests/presets/analytic-7fefd52a.json"))?;
+        input["render"]["resolution"] = serde_json::json!([32,24]);
+        input["render"]["settings"]["samples"] = 1.into();
+        vork_scene::v2::replace_integrator(&mut input, serde_json::json!({"integrator":"path","denoiser":null}));
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
+        let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+        frame.profile = true;
+        frame.submit(&installed, &renderer, 0.)?;
+        let expected = frame.collect(&renderer)?.rgba;
+        for end_only in [true, false] {
+            frame.submit(&installed, &renderer, 0.)?;
+            // Inject a missing endpoint after the real query copy, preserving
+            // the ordinary final-fence/map/collection path and rendered image.
+            let mut encoder = renderer.device.create_command_encoder(&Default::default());
+            let offset = timing::resolve_offset(0, timing::sample_query());
+            encoder.clear_buffer(&frame.query_readback, offset + if end_only { 8 } else { 0 }, Some(if end_only { 8 } else { 16 }));
+            frame.submission = Some(renderer.queue.submit([encoder.finish()]));
+            let pixels = frame.collect(&renderer)?;
+            assert_eq!(pixels.rgba, expected);
+            if let Ok(out) = std::env::var("VORK_TEST_FRAME_OUT") {
+                std::fs::create_dir_all(&out)?;
+                image::save_buffer(std::path::Path::new(&out).join(format!("missing-counter-{end_only}.png")), &pixels.rgba, 32, 24, image::ColorType::Rgba8)?;
+            }
+            assert_eq!(pixels.timing.timing_source, "submission_wall_upper_bound");
+            assert!(pixels.timing.gpu_elapsed_ms > 0.);
+            assert_eq!(frame.sample_gpu_ms, vec![pixels.timing.gpu_elapsed_ms]);
+            assert_eq!(pixels.timing.gpu_spans_ms, vec![("submission wall upper bound", pixels.timing.gpu_elapsed_ms)]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires real GPU and pinned Slang"]
     fn actual_sample_uploads_preserve_animated_exposure() -> Result<()> {
         let Some(renderer) = crate::test_renderer()? else {return Ok(())};
         let mut input = vork_scene::v2::with_test_settings(
@@ -1973,9 +2168,8 @@ mod profiling_tests {
         Ok(())
     }
 
-    // This contract uses private corpus assets; private CI opts in explicitly.
-    #[cfg(vork_private_tests)]
     #[test]
+    #[cfg(vork_private_tests)] // Uses the private multi-capture monitor scene.
     fn shutter_zero_crossings_match_fixed_exposures_with_captures() -> Result<()> {
         let Some(r) = crate::test_renderer()? else { return Ok(()) };
         let mut input: serde_json::Value = vork_scene::v2::from_test_str(include_str!(
@@ -2132,7 +2326,7 @@ mod profiling_tests {
         let Some(renderer) = crate::test_renderer()? else { return Ok(()) };
         for (colour, poisoned) in [(".25", false), ("asfloat(0x7f800000u)", true)] {
             let source = format!("import vork; struct Inputs {{}}; Closure surface(ShadingContext ctx,Inputs inputs) {{ return unlit(float3(ctx.TEXCOORD_0.x>.5 ? {colour} : .25)); }}");
-            let input = vork_scene::v2::from_test_value(serde_json::json!({
+            let input: Scene = vork_scene::v2::from_test_value(serde_json::json!({
                 "version":2,
                 "render":{"resolution":[16,16],"settings":{"integrator":"raster","samples":2}},
                 "buffers":{
@@ -2145,10 +2339,17 @@ mod profiling_tests {
                 "nodes":[{"type":"camera","translation":[0,0,10],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2.0}}},
                     {"type":"mesh","geometry":"tile","materials":["poison"]}]
             }))?;
-            let installed = renderer.install(input, Path::new("."))?;
+            let mut installed = renderer.install(input.clone(), Path::new("."))?;
             let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
             let mut previous=None;
-            for diagnostics in [false,true,true,false] {
+            for (case, diagnostics) in [false,true,true,false].into_iter().enumerate() {
+                // Refusal invalidates every publication in the installation.
+                // Keep valid exposures on one slot to test counter reset, but
+                // give each invalid exposure its own installed scene.
+                if poisoned && case > 0 {
+                    installed = renderer.install(input.clone(), Path::new("."))?;
+                    frame = installed.create_frame_slot(&renderer, Default::default())?;
+                }
                 frame.profile=diagnostics;
                 frame.submit(&installed,&renderer,0.)?;
                 let collected=frame.collect(&renderer);

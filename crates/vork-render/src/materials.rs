@@ -3,7 +3,7 @@ use super::*;
 use ::vork_scene::v2::{OPENPBR, OpenPbrKind, OpenPbrParam};
 
 // Fatal errors, transmission warning, evaluation demand and current-view capacity feedback.
-pub(crate) const SHADER_DIAGNOSTICS_INIT: [u32; vork_slang::registry::SHADER_DIAGNOSTICS_WORDS as usize] = [0, u32::MAX, 0, 0, 0, 0];
+pub(crate) const SHADER_DIAGNOSTICS_INIT: [u32; vork_slang::registry::SHADER_DIAGNOSTICS_WORDS as usize] = [0, u32::MAX, 0, 0, 0, 0, 0, 0, 0, 0];
 pub(crate) const SHADER_DIAGNOSTICS_BYTES: u64 = std::mem::size_of_val(&SHADER_DIAGNOSTICS_INIT) as u64;
 
 /// One material: OpenPBR inputs as constants, each optionally multiplied by a channel
@@ -14,7 +14,7 @@ pub(crate) struct MaterialRecord {
     /// x program id (0 = std/openpbr); y first tap word in the word buffer; z flags
     /// (bit 1 double-sided, bit 2 vertex alpha multiplies opacity); w first program input word.
     pub(crate) tag: [u32; 4],
-    /// Reserved, coverage integration (1 = continuous, 2 = sampled, 3 = binary), glTF occlusion strength, disable transparent shadows.
+    /// Bitcast i32 dielectric priority, coverage integration (1 = continuous, 2 = sampled, 3 = binary), glTF occlusion strength, disable transparent shadows.
     pub(crate) extra: [f32; 4],
     /// One u32 per OpenPBR input, then glTF occlusion: low 28 bits address
     /// the tap (0 = none); high bits encode the channel and normal mode.
@@ -225,6 +225,16 @@ impl MaterialTable {
             .iter()
             .any(|slot| matches!(slot, TextureSlot::Render(_)))
     }
+    pub(crate) fn canonical(&self,r:&Renderer)->Result<FrameMaterials> {
+        // Displacement capability analysis already excludes callbacks reading
+        // changing render images. Unrelated surface slots use the table's dummy
+        // file view in this private geometry-only binding.
+        let fallback=self.views.iter().find_map(|slot|match slot {TextureSlot::File(view)=>Some(view),_=>None})
+            .context("canonical material table requires its dummy file view")?;
+        let views:Vec<_>=self.views.iter().map(|slot|match slot {TextureSlot::File(view)=>view.clone(),_=>fallback.clone()}).collect();
+        Ok(frame_materials(r,&self.layout,&self.records,&views,&self.samplers))
+    }
+
     pub(crate) fn frame_with_images(
         &self,
         r: &Renderer,
@@ -2365,6 +2375,7 @@ pub(crate) fn openpbr_values(
         program: "std/openpbr".into(),
         inputs: Default::default(),
         double_sided: true,
+        priority: 0,
         opacity: None,
     };
     let material = match name {
@@ -2372,6 +2383,7 @@ pub(crate) fn openpbr_values(
         Some(name) => scene.materials.get(name)
             .with_context(|| format!("unknown material {name}"))?,
     };
+    b.record.extra[0] = f32::from_bits(material.priority as u32);
     let name = name.unwrap_or("default OpenPBR");
     ensure!(
         material.program == "std/openpbr",

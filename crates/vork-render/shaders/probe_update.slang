@@ -1,8 +1,3 @@
-#ifdef VORK_DIFFUSE_MEDIUM
-import diffuse_medium;
-import vork_medium_bounds;
-import vork_medium_types;
-#endif
 // Irradiance volume update (probes.rs). `trace` shades one probe ray per thread
 // (spherical Fibonacci, fixed per-probe rotation) through the shared hit
 // evaluation (hit.slang, hit_lighting.slang); hits read the previous bounce's
@@ -27,7 +22,6 @@ import ray_coverage;
 import hit_lighting;
 import emitter_mesh;
 import surface_lighting;
-import surface_medium;
 import subsurface_transport;
 import probes;
 // probes::update_entries: the scene globals (frame.slang) occupy bindings 0-9.
@@ -71,16 +65,13 @@ struct ProbeGeometry : IHitGeometry {
     static uint word(uint index) {return ray_alpha[index];}
     static uint load(uint buffer, uint index) {return ray_hit_buffers_load(buffer,index);}
 };
-#ifdef VORK_DIFFUSE_MEDIUM
-float3 probe_medium_visibility<P:IProgram>(float3 position,uint index) {
-    return diffuse_source_visibility<P,ProbeGeometry>(ray_scene,ray_alpha,position,index);
-}
-#ifdef VORK_MEDIUM_MESH_SOURCES
-float3 probe_medium_mesh<P:IProgram>(float3 position,float3 ray,float g) {
-    return diffuse_mesh_illumination<P,ProbeGeometry>(ray_scene,ray_alpha,probe_emitter_weights,position,ray,g);
+#ifdef VORK_PROGRAM_TRACE
+import geometric_trace;
+export TraceHit native_geometric_trace(float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
+    return geometric_trace<ProbeGeometry>(ray_scene,origin,direction,minimum,maximum,mask,object);
 }
 #endif
-#endif
+
 // Capture hits use the shared correlated source/BSDF visibility estimator.
 struct ProbeShadows<P:IProgram> : IShadows {
     static const bool probe_rays=true;
@@ -159,9 +150,6 @@ float3 probe_source<P:IProgram>(uint probe,uint ray,float3 from,out float3 direc
     if(diffuse_ray_occluded<P,ProbeGeometry>(ray_scene,ray_alpha,desc,REG_RAY_GI_OCCLUDER,float2(0.))) {return float3(0.);}
     let uniform=1./(4.*REG_PI);
     var radiance=emitted;
-#ifdef VORK_DIFFUSE_MEDIUM
-    radiance=diffuse_medium_radiance(from,direction,distance,radiance,extra.y,false);
-#endif
     return radiance*probe_mis(pdf,uniform)*uniform/pdf;
 }
 // Scenes with programs compile their own entry with their Programs (probes.rs).
@@ -236,12 +224,6 @@ void probe_trace<V:IVariant,P:IProgram>(uint3 group,uint thread) {
             result=float4(radiance,distance);
         }
     }
-#ifdef VORK_DIFFUSE_MEDIUM
-    if(!near_boundary) {
-        let fraction=sample_2d(uint2(probe_identity(probe),0u),probe_sample_index(ray),probe_sample_count(),REG_SAMPLING_STREAM_RAY_GI).x;
-        result.rgb=diffuse_medium_radiance(position,direction,nearest.found ? result.w : REG_FP32_MAX,result.rgb,fraction,!indirect_only);
-    }
-#endif
     // Buried-probe validity/depth diagnostics retain the nearest boundary even
     // when that single-sided back face did not stop the radiance ray. Candidate
     // traversal already visits it: no second query or geometry representation.
@@ -341,14 +323,7 @@ float4 probe_directional_capture<V:IVariant,P:IProgram>(uint probe,uint ray,floa
     // preserving its original angular detail, rotation, filtering and source split.
     if(!nearest.found) {
         var world=(frame.environment_links.x&REG_RAY_SPECULAR)!=0u ? reflection_fallback(direction,0.,frame,env_specular,env_sampler) : float3(0.);
-#ifdef VORK_DIFFUSE_MEDIUM
-        let fraction=sample_2d(uint2(probe_identity(probe),0u),probe_sample_index(ray),probe_sample_count(),REG_SAMPLING_STREAM_VOLUME).x;
-        let transport=volume_finite<VORK_MEDIUM_STEPS,true>(position,direction,medium_infinity(),fraction,0xffffffffu,false);
-        terminal=transport.transmission*world;
-        world=transport.source;
-#else
         terminal=world;world=float3(0.);
-#endif
         return float4(world,-reach);
     }
     let hit=nearest.hit;
@@ -360,10 +335,6 @@ float4 probe_directional_capture<V:IVariant,P:IProgram>(uint probe,uint ray,floa
     let h=hit_surface<V,P,ProbeGeometry>(hit.instance_index,hit.primitive_index,hit.instance_custom_data,nearest.inverse,hit.barycentrics,direction,float2(0.),Lobe(select(P.lobes,LOBE_PICK,0u),u));
     float3 emission;radiance=finalized_hit_radiance<V,ProbeShadows<P>,P>(h,uint2(probe_identity(probe),0u),probe_sample_index(ray),REG_RAY_DIFFUSE|REG_RAY_SPECULAR,emission,false,true);
     }
-#ifdef VORK_DIFFUSE_MEDIUM
-    radiance=diffuse_medium_radiance(position,direction,distance,radiance,
-        sample_2d(uint2(probe_identity(probe),0u),probe_sample_index(ray),probe_sample_count(),REG_SAMPLING_STREAM_VOLUME).x);
-#endif
     return float4(radiance,distance);
 }
 void probe_directional_trace<V:IVariant,P:IProgram>(uint3 group,uint thread) {

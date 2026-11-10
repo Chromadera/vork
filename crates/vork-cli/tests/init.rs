@@ -12,12 +12,13 @@ fn offline_starter_and_authoring_variants_preserve_user_files() {
         let project = root.join(language);
         let scene: serde_json::Value = serde_json::from_slice(&fs::read(project.join("scene.json")).unwrap()).unwrap();
         assert_eq!(scene["version"], 2);
-        assert_eq!(scene["$schema"], "https://voyager.so/vork/schema/scene.schema.json");
+        assert_eq!(scene["$schema"], concat!("https://raw.githubusercontent.com/voyager-so/vork/v", env!("CARGO_PKG_VERSION"), "/packages/ts/scene.schema.json"));
         assert_eq!(scene["nodes"].as_array().unwrap().len(), 6);
         let readme = fs::read_to_string(project.join("README.md")).unwrap();
         assert!(readme.contains("vork help"));
         assert!(!project.join("AGENTS.md").exists());
         if language == "typescript" {
+            assert!(fs::read_to_string(project.join("scene.ts")).unwrap().contains(scene["$schema"].as_str().unwrap()));
             let package: serde_json::Value = serde_json::from_slice(&fs::read(project.join("package.json")).unwrap()).unwrap();
             assert_eq!(package["type"], "module");
             assert!(readme.contains("LOCALAPPDATA\\Programs\\vork\\sdk"));
@@ -29,6 +30,7 @@ fn offline_starter_and_authoring_variants_preserve_user_files() {
             assert!(stdout.contains("node --experimental-strip-types scene.ts"));
         }
         if language == "python" {
+            assert!(fs::read_to_string(project.join("scene.py")).unwrap().contains(scene["$schema"].as_str().unwrap()));
             assert!(readme.contains("LOCALAPPDATA\\Programs\\vork\\python"));
             assert!(readme.contains("$HOME/.local/lib/vork/python"));
             assert!(readme.contains("Python 3.11+"));

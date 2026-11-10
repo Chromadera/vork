@@ -233,8 +233,23 @@ fn adapter_key(adapter: &AdapterInfo) -> Result<[u8; 15], PipelineCacheValidatio
             ];
             Ok(adapter)
         }
+        wgt::Backend::Metal => {
+            // Metal reports no PCI ids; key by the device name. The HAL validation
+            // key additionally carries the OS build that supplies the compiler.
+            let name = adapter_info_name_hash(&adapter.name);
+            let mut key = [255; 15];
+            key[3..11].copy_from_slice(&name.to_be_bytes());
+            Ok(key)
+        }
         _ => Err(PipelineCacheValidationError::Unsupported),
     }
+}
+
+/// FNV-1a: stable across processes and Rust releases, unlike `DefaultHasher`.
+fn adapter_info_name_hash(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 struct Reader<'a> {

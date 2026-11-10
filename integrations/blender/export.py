@@ -23,7 +23,8 @@ from world_hdr import write_image
 from integrations.blender.animation import export_clip, sample_controls, camera_focus
 from integrations.blender.pose import rotation as pose_rotation
 from integrations.blender.camera import camera_fit
-from integrations.blender.lights import color as light_color, energy as light_energy, temperature as light_temperature
+from integrations.blender.light_graph import translate as translate_light
+from integrations.blender.visibility import asset_overrides
 from integrations.blender.world import translate as translate_world, preprocess_image
 from integrations.blender.geometry import export_gltf, filter_material_overrides
 from integrations.blender.display import translate as translate_display
@@ -32,7 +33,9 @@ from integrations.blender.render_geometry import direct_render_objects, render_s
 report = dict(stages={}, omissions=[], materials={}, warnings=[])
 clip = None
 control_bindings = {}
-def wall(kind, detail): report['omissions'].append(dict(kind=kind, detail=detail))
+def wall(kind, detail):
+    report['omissions'].append(dict(kind=kind, detail=detail))
+    print(f'BRIDGE SUBSTITUTION [{kind}]: {detail}', file=sys.stderr, flush=True)
 if args.animation and args.bake_values is not None:
     wall('value bake animation snapshot','value textures retain the source frame; changed poses require new exports')
 def stage(name, t0): report['stages'][name] = round(time.perf_counter()-t0, 3)
@@ -110,14 +113,14 @@ report['material_summary'] = dict(used=len(used), lowered=sum(v=='lowered' for v
 # World
 images = {}
 try:
-    world = translate_world(sc.world); environment = world.environment; camera_background = world.background; materials = dict(world.materials)
+    world = translate_world(sc.world, bake_directory=out, on_bake=lambda detail: report.setdefault('world_bakes', []).append(detail)); environment = world.environment; camera_background = world.background; materials = dict(world.materials)
     if world.image is not None:
         write_image(out/'world.hdr', world.image); images['world'] = {'file': 'world.hdr', 'color_space': 'Linear Rec.709'}
         preprocess_image(environment, out, float(sc.world.sun_threshold), float(sc.world.sun_angle))
 except Exception as e:
-    wall('World not translated', f'{type(e).__name__}: {e}'); environment = None; camera_background = [0,0,0]; materials = {}
+    wall('World not translated', f'{type(e).__name__}: {e}; substitute implicit 0.05 environment illumination and black camera background'); environment = None; camera_background = [0,0,0]; materials = {}
 try:
-    display = translate_display(sc, emit_compositor=writer.write_compositor, on_substitution=lambda field,reason,replacement:
+    display = translate_display(sc, emit_display=writer.write_display, on_substitution=lambda field,reason,replacement:
         wall('display setting not translated', f'{field}: {reason}; {replacement}'))
 except Exception as e:
     wall('display transform not translated', f'{type(e).__name__}: {e}'); display = dict(display={'program':'std/agx'})
@@ -149,7 +152,8 @@ elif cd.dof.use_dof:
         optics.update(use_dof=True, focus_distance=fd, aperture_fstop=cd.dof.aperture_fstop, aperture_blades=cd.dof.aperture_blades,
                           aperture_rotation=cd.dof.aperture_rotation, aperture_ratio=cd.dof.aperture_ratio)
 materials['camera-optics'] = dict(program='std/camera',inputs=optics)
-nodes = [dict(type='asset', name='model', file='scene.glb', materials=bindings), cam]
+nodes = [dict(type='asset', name='model', file='scene.glb', materials=bindings, nodes=asset_overrides(out/'scene.glb',
+    lambda obj,reason,replacement: wall('object ray visibility', f'{obj}: {reason}; {replacement}'))), cam]
 if environment is not None: nodes.append(environment)
 lights = collections.Counter()
 visible = direct_render_objects(bpy.context.view_layer.layer_collection)
@@ -165,8 +169,8 @@ with gltf_render_settings(sc):
         if kind not in ('sun','area','point','spot'): wall('light type', kind); continue
         qq = pose_rotation(basis.to_4x4() @ mw, area=kind == 'area')
         node = {'type':'light','shape':{'area':'rectangle'}.get(kind, kind),'name':f'light_{sum(lights.values())}_{obj.name}',
-                'translation':cv(mw.translation), 'rotation':[qq.x,qq.y,qq.z,qq.w],'color':light_color(data),'energy':light_energy(data)}
-        if data.use_temperature: node['temperature'] = light_temperature(data)
+                'translation':cv(mw.translation), 'rotation':[qq.x,qq.y,qq.z,qq.w],**translate_light(data, on_substitution=lambda reason,replacement:
+                    wall('light graph', f'{obj.name}/{data.name}: {reason}; {replacement}'))}
         if kind == 'sun': node['angle'] = data.angle
         if kind in ('point','spot'): node['radius'] = data.shadow_soft_size
         if kind == 'spot': node.update(spot_size=data.spot_size, spot_blend=data.spot_blend)
@@ -174,7 +178,6 @@ with gltf_render_settings(sc):
             node.update(size=data.size*mw.to_3x3().col[0].length, size_y=(data.size_y if data.shape in ('RECTANGLE','ELLIPSE') else data.size)*mw.to_3x3().col[1].length,
                         shape='ellipse' if data.shape in ('DISK','ELLIPSE') else 'rectangle')
             if getattr(data, 'spread', math.pi) < math.pi - 1e-4: wall('area light spread not exported', f'{obj.name}: spread={data.spread:.3f}')
-        if data.use_nodes if hasattr(data,'use_nodes') else False: wall('light node tree', obj.name + ': datablock energy/color retained; arbitrary Cycles rigs are not translated')
         if not data.use_shadow: node['shadowed_by'] = []
         if not data.normalize: wall('unnormalized light approximation', obj.name + ': retain normalized energy; unnormalized surface radiance is not converted')
         lights[kind] += 1; nodes.append(node)

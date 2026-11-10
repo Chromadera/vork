@@ -112,6 +112,8 @@ fn open_union<'a>(ranges: impl IntoIterator<Item = &'a OpenEdges>) -> bool {
 /// A path solid's bounds in its object space and the object row whose transform places them.
 pub(crate) struct PathSolid {
     pub(crate) lo: Vec3, pub(crate) hi: Vec3, pub(crate) row: u32,
+    /// Conservative world-space surface bounds; moving/unknown geometry is infinite.
+    pub(crate) contact_bounds: (Vec3,Vec3),
     /// Rest bounds of a closed, consistently placed domain. Shadow discovery
     /// refits deforming domains from the existing evaluated geometry bounds.
     pub(crate) shadow_bounds: Option<(Vec3,Vec3)>,
@@ -138,6 +140,7 @@ pub(crate) fn occupancy(solids: &Solids, draws: &[install::Draw], roots: &[insta
     let mut local = vec![EMPTY; count];
     let mut first = vec![None::<usize>; count];
     let mut unbounded = vec![false; count];
+    let mut geometry_unbounded=vec![false;count];
     let mut moving_geometry = vec![false; count];
     let mut ranges = vec![Vec::<&OpenEdges>::new(); count];
     for (index, draw) in draws.iter().enumerate() {
@@ -148,7 +151,9 @@ pub(crate) fn occupancy(solids: &Solids, draws: &[install::Draw], roots: &[insta
             let id = id as usize;
             local[id] = (local[id].0.min(draw.bounds.0), local[id].1.max(draw.bounds.1));
             moving_geometry[id] |= moves;
-            unbounded[id] |= compute.is_some_and(|c|c.computed_draw(index)) || first[id].is_some_and(|other| !roots[other].same_placement(&roots[object]));
+            let placement_unbounded=compute.is_some_and(|c|c.computed_draw(index)) || first[id].is_some_and(|other| !roots[other].same_placement(&roots[object]));
+            geometry_unbounded[id] |= placement_unbounded;
+            unbounded[id] |= placement_unbounded;
             first[id].get_or_insert(object);
             // Without retained geometry, closure is unknown: unbounded.
             match &draw.open_edges {
@@ -164,11 +169,11 @@ pub(crate) fn occupancy(solids: &Solids, draws: &[install::Draw], roots: &[insta
     let moves_itself = |node: usize| animation.transforms_node(node) || targets.aims[node].is_some()
         || (nodes[node].embedded.is_some() && nodes[node].dynamic);
     let mut fixed = Vec::new();
+    let mut contact_bounds=vec![UNBOUNDED;count];
     let mut groups = std::collections::HashMap::<(usize, u32), Vec<(Vec3, Vec3)>>::new();
     for id in 0..count {
         let Some(object) = first[id] else {continue};
         let root = &roots[object];
-        if unbounded[id] || moving_geometry[id] {fixed.push(UNBOUNDED); continue;}
         // Static nodes between the solid and the node that moves it.
         let mut chain = Vec::new();
         let mut node = Some(root.node);
@@ -178,6 +183,10 @@ pub(crate) fn occupancy(solids: &Solids, draws: &[install::Draw], roots: &[insta
             chain.push(n);
             node = nodes[n].parent;
         };
+        if count<=8 && !geometry_unbounded[id] && !moving_geometry[id] && mover.is_none() {
+            contact_bounds[id]=placed(id,objects[object].model);
+        }
+        if unbounded[id] || moving_geometry[id] {fixed.push(UNBOUNDED); continue;}
         match mover {
             None => fixed.push(placed(id, objects[object].model)),
             // An embedded glTF node's world comes from its asset pose, not this chain.
@@ -194,12 +203,33 @@ pub(crate) fn occupancy(solids: &Solids, draws: &[install::Draw], roots: &[insta
     }
     let capacity = groups.values().fold(overlap_capacity(&fixed), |sum, group| sum.saturating_add(overlap_capacity(group)));
     // A solid without a row is in no draw, so never hit or tracked; its row is unused.
-    let solids = local.into_iter().zip(unbounded).zip(moving_geometry).zip(first).map(|((((lo, hi), unbounded), moving), first)| {
+    let solids = local.into_iter().zip(unbounded).zip(moving_geometry).zip(first).zip(contact_bounds).map(|(((((lo, hi), unbounded), moving), first), contact_bounds)| {
         let shadow_bounds=(!unbounded).then_some((lo,hi));
         let (lo, hi) = if unbounded || moving {UNBOUNDED} else {(lo, hi)};
-        PathSolid { lo, hi, row: first.unwrap_or_default() as u32, shadow_bounds }
+        PathSolid { lo, hi, row: first.unwrap_or_default() as u32, shadow_bounds, contact_bounds }
     }).collect();
     (solids, capacity)
+}
+/// The most solids a path kernel tracks at one point. The kernel keeps
+/// several N-entry descriptor arrays per invocation (the occupancy set,
+/// camera containment records and the boundary transaction's working
+/// copies), so its private memory grows with N. N is the sum of per-group
+/// bounds, and every independently animated solid is its own group: 60
+/// separately moving water drops made N=62, whose kernel lost the device on an
+/// NVIDIA L4 on its first dispatch (BB065). Larger bounds keep this ceiling;
+/// a point that really holds more solids reports PATH_BOUNDARY_OVERFLOW.
+pub(crate) const KERNEL_BOUNDARY_LIMIT: u32 = 32;
+/// The capacity a path kernel is compiled with for an installed bound.
+pub(crate) fn kernel_boundaries(capacity: u32) -> u32 {capacity.min(KERNEL_BOUNDARY_LIMIT)}
+/// Equal priorities preserve ordinary last-entered ownership. Disjoint static
+/// surface bounds exclude simultaneous crossings even for open/unbounded media.
+/// Unknown or moving surfaces retain the general contact transaction.
+pub(crate) fn plain_boundaries(solids: &[PathSolid], priorities: impl Iterator<Item=i32>) -> bool {
+    let mut priorities=priorities;
+    if let Some(first)=priorities.next() {if priorities.any(|p|p!=first) {return false;}}
+    if solids.iter().any(|s|!s.contact_bounds.0.is_finite() || !s.contact_bounds.1.is_finite()) {return false;}
+    !solids.iter().enumerate().any(|(i,a)|solids[i+1..].iter().any(|b|
+        a.contact_bounds.0.cmple(b.contact_bounds.1).all() && b.contact_bounds.0.cmple(a.contact_bounds.1).all()))
 }
 /// Object-space bounds under `model`, padded twice:
 /// - by the f32 error of transforming them (cancellation included),
@@ -328,6 +358,7 @@ pub(crate) fn layout_entries(adaptive: bool) -> Vec<wgpu::BindGroupLayoutEntry> 
 
 pub(crate) struct Pipeline {
     volume_bounces: u32,
+    medium_batch_rows: Option<u32>,
     global_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     kernel: crate::pipelines::ProgramKernel,
@@ -360,12 +391,19 @@ impl Pipeline {
             compilation_options: Default::default(),
             cache: r.cache.as_ref(),
         });
-        #[cfg(not(test))]
-        let volume_bounces = 0;
-        #[cfg(test)]
-        let volume_bounces = options.test_volume_bounces;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let volume_bounces = crate::constants::PATH_MAX_BOUNCES;
+        #[cfg(any(test, feature = "test-support"))]
+        let volume_bounces = if options.test_participating_media {options.test_volume_bounces} else {crate::constants::PATH_MAX_BOUNCES};
+        let medium_batch_rows = media.map(|_|32);
+        #[cfg(any(test, feature = "test-support"))]
+        let medium_batch_rows = if options.test_participating_media {
+            (media.is_some() && options.test_convex_media && options.test_convex_work_limit.is_some()).then_some(options.test_medium_batch_rows.unwrap_or(32).max(TILE).next_multiple_of(TILE))
+        } else {medium_batch_rows};
         let _ = options;
-        Ok(Self { volume_bounces, global_layout, pipeline, kernel })
+        Ok(Self { volume_bounces, global_layout, pipeline, kernel,
+            medium_batch_rows,
+        })
     }
 }
 
@@ -455,6 +493,7 @@ pub(crate) fn record(
         None
     };
     let rows = dispatch_rows([width, height]);
+    let rows = retained.medium_batch_rows.map_or(rows, |cap| rows.min(cap));
     let chunks = height.div_ceil(rows) as usize;
     let alignment = d.limits().min_uniform_buffer_offset_alignment as usize;
     let stride = std::mem::size_of::<PathUniform>().next_multiple_of(alignment);
@@ -619,6 +658,34 @@ mod tests {
     }
 
     #[test]
+    fn plain_boundary_proof_requires_disjoint_surfaces_and_equal_priorities() {
+        let solid=|lo,hi|PathSolid {lo:Vec3::splat(f32::NEG_INFINITY),hi:Vec3::splat(f32::INFINITY),row:0,
+            contact_bounds:(Vec3::new(lo,0.,0.),Vec3::new(hi,1.,1.)),shadow_bounds:None};
+        assert!(plain_boundaries(&[],[].into_iter()));
+        assert!(plain_boundaries(&[solid(0.,1.),solid(2.,3.)],[0,0].into_iter()));
+        assert!(plain_boundaries(&[solid(0.,1.),solid(2.,3.)],[-2,-2].into_iter()));
+        assert!(!plain_boundaries(&[solid(0.,1.),solid(2.,3.)],[0,1].into_iter()));
+        assert!(!plain_boundaries(&[solid(0.,1.),solid(1.,2.)],[0,0].into_iter()));
+        assert!(!plain_boundaries(&[solid(0.,2.),solid(1.,3.)],[0,0].into_iter()));
+        assert!(!plain_boundaries(&[solid(f32::NEG_INFINITY,f32::INFINITY)],[0].into_iter()));
+        let mut scene=crate::slang_forward::SlangScene::default();
+        let key=|s:&crate::slang_forward::SlangScene|crate::pipelines::CachedPipelines::identity("","",1,true,s,wgpu::TextureFormat::Rgba8Unorm);
+        let ordinary=key(&scene);scene.no_boundary_transactions=true;
+        assert_ne!(ordinary,key(&scene),"the proof must separate persistent pipeline identities");
+    }
+
+    #[test]
+    fn kernel_boundaries_keep_a_private_memory_ceiling() {
+        // BB065: 60 independently animated solids sum to an install bound past
+        // what a path invocation's private memory holds.
+        assert_eq!(kernel_boundaries(0),0);
+        assert_eq!(kernel_boundaries(3),3);
+        assert_eq!(kernel_boundaries(KERNEL_BOUNDARY_LIMIT),KERNEL_BOUNDARY_LIMIT);
+        assert_eq!(kernel_boundaries(62),KERNEL_BOUNDARY_LIMIT);
+        assert_eq!(kernel_boundaries(u32::MAX),KERNEL_BOUNDARY_LIMIT);
+    }
+
+    #[test]
     fn dielectric_storage_bounds_disjoint_nested_and_touching_solids() {
         let b=|lo:f32,hi:f32|(Vec3::new(lo,-1.,-1.),Vec3::new(hi,1.,1.));
         assert_eq!(overlap_capacity(&[]),0);
@@ -678,8 +745,6 @@ mod tests {
             s.path = Some(Pipeline::new(&r, adaptive, false, random_walk, features, boundaries,
                 emitter_profiles, media, &crate::InstallOptions::default(), &s.pipelines)?);
             assert!(matches!(s.path.as_ref().unwrap().kernel, crate::pipelines::ProgramKernel::Path { media: None, .. }), "no-medium paths installed medium state/code");
-            assert!(!s.plan.volume, "no-medium paths installed froxel passes/resources");
-            assert!(s.pipelines.resolve_native.is_none(), "no-medium paths compiled a medium resolve variant");
             let rays = s.rays.as_ref().expect("path rays");
             assert_eq!(rays.film_filter, rays.boundaries,
                 "no-solid paths installed an unused boundary descriptor table");

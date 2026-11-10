@@ -57,3 +57,32 @@ pub fn load_scene(path: &Path) -> Result<Vec<u8>> {
     expand_scene(&mut document, path.parent().unwrap_or(Path::new(".")))?;
     Ok(serde_json::to_vec(&document)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn expansion_owns_identity_and_preserves_unvalidated_content() -> Result<()> {
+        let definition = json!({"std":"box"});
+        let mut document = json!({"version":"invalid", "programs":{"broken":{"unknown":true}},
+            "geometry":{"custom":definition},
+            "nodes":[{"children":[{"geometry":definition}]}]});
+        let expanded: Value = serde_json::from_str(&super::super::evaluate("expand", &document.to_string())?)?;
+        let table = &expanded["geometry"]["custom"];
+        assert_eq!(table, &expanded["nodes"][0]["children"][0]["geometry"]);
+        assert!(table.get("std").is_none());
+        assert!(table["attributes"]["POSITION"]["data"].is_array());
+        assert!(table["indices"]["data"].is_array());
+        assert_eq!(expanded["version"], document["version"]);
+        assert_eq!(expanded["programs"], document["programs"]);
+        for pointer in ["/geometry/custom", "/nodes/0/children/0/geometry"] {
+            document.pointer_mut(pointer).unwrap()["name"] = "forbidden".into();
+            let error = format!("{:#}", expand_scene(&mut document, Path::new(".")).unwrap_err());
+            assert!(error.contains("table key or inline position"), "{error}");
+            document.pointer_mut(pointer).unwrap().as_object_mut().unwrap().remove("name");
+        }
+        Ok(())
+    }
+}

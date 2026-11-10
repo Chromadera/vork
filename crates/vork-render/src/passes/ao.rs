@@ -40,6 +40,7 @@ impl Resources {
         diffuse_response: &wgpu::Buffer,
         rays: Option<&crate::rt::FrameRays>,
         lights: &wgpu::Buffer,
+        light_tree: Option<&wgpu::Buffer>,
         objects: &wgpu::Buffer,
         cluster_config: &wgpu::Buffer,
         cluster_lights: &wgpu::Buffer,
@@ -69,14 +70,14 @@ impl Resources {
                 .create_view(&Default::default())
         };
         let (aw, ah) = if enabled && s.plan.effects.indirect { (w.div_ceil(divisor), h.div_ceil(divisor)) } else { (1, 1) };
-        let raw_ao = image("AO per-sample visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba16Float);
-        let incident_image = |label| image(label, iw, ih, wgpu::TextureFormat::Rgba16Float);
+        let raw_ao = image("AO per-sample visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba32Float);
+        let incident_image = |label| image(label, iw, ih, wgpu::TextureFormat::Rgba32Float);
         let incident = incident_image("hemisphere per-sample incident radiance");
         // Query selection is shared by both blur axes and every upsampling tap.
         let cell_receivers = image("AO selected receivers", aw, ah, wgpu::TextureFormat::Rgba32Float);
         let mut dispatches = Vec::new();
         if enabled && s.plan.effects.indirect {
-            let ao_view = image("AO filtered visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba16Float);
+            let ao_view = image("AO filtered visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba32Float);
             let incident_horizontal = incident_image("hemisphere incident radiance");
             let (receivers, post_normals) = guides.context("AO needs retained slot receivers")?;
             let groups = [
@@ -84,6 +85,15 @@ impl Resources {
                 h.div_ceil(divisor).div_ceil(8),
                 1,
             ];
+            let demand = [
+                image("GI demand a", aw, ah, wgpu::TextureFormat::R32Uint),
+                image("GI demand b", aw, ah, wgpu::TextureFormat::R32Uint),
+            ];
+            let (demand_work, demand_ping) = demand_dispatches(
+                d, s.pipelines.gi_demand_pipeline.get().context("GI demand pipeline")?,
+                uniform, receivers, ambient, diffuse_response, &demand, extent, groups,
+            );
+            recorder.compute(crate::graph::Pass::Ao,"GI exact consumer demand","gi demand",false,demand_work);
             let frame_rays = rays.context("diffuse GI needs the scene TLAS")?;
             let batch=vork_slang::registry::GI_RAY_BATCH;
             let batches=(visibility_samples.max(1)*constants::GI_RAYS_PER_SAMPLE).div_ceil(batch);
@@ -96,6 +106,9 @@ impl Resources {
             });
             let (band_rows, accumulation_bytes) = accumulation_band(&limits, aw, ah)?;
             let bands = ah.div_ceil(band_rows);
+            let guide_bytes=u64::from(aw)*u64::from(ah)*32;
+            gpu_memory::storage_binding(&d.limits(),"GI independent pilot guide",guide_bytes)?;
+            let guide=s.transients.buffer(d,"GI independent pilot guide",guide_bytes,wgpu::BufferUsages::STORAGE);
             let hits={
                 let accumulation=s.transients.buffer(d,"GI prepared queries and accumulation",accumulation_bytes,wgpu::BufferUsages::STORAGE);
                 #[cfg(test)]
@@ -103,10 +116,13 @@ impl Resources {
                 let geometry=frame_rays.hit_bindings();
                 d.create_bind_group(&wgpu::BindGroupDescriptor {
                     label:Some("GI hit and accumulation buffers"),layout:&crate::rt::gi_read_layout(d),
-                    entries:&[entry(0,wgpu::BindingResource::BufferArray(&geometry)),entry(1,accumulation.as_entire_binding())],
+                    entries:&[entry(0,wgpu::BindingResource::BufferArray(&geometry)),entry(1,accumulation.as_entire_binding()),entry(2,guide.as_entire_binding()),entry(3,light_tree.context("GI light tree")?.as_entire_binding())],
                 })
             };
-            let mut source_words=vec![0u32;(bands*batches) as usize*64];
+            let source_records=u64::from(bands)*(u64::from(batches)+1);
+            anyhow::ensure!(source_records<=d.limits().max_buffer_size/256,
+                "GI dispatch uniforms need {} bytes; device max_buffer_size={} bytes",source_records*256,d.limits().max_buffer_size);
+            let mut source_words=vec![0u32;source_records as usize*64];
             let topology=s.rays.as_ref().unwrap();
             for band in 0..bands {
                 for batch_index in 0..batches {
@@ -114,6 +130,11 @@ impl Resources {
                     source_words[at..at+4].copy_from_slice(&[topology.emitters,topology.implicit[2],topology.implicit[3],0]);
                     source_words[at+4..at+8].copy_from_slice(&[batch_index*batch,band*band_rows,(ah-band*band_rows).min(band_rows),0]);
                 }
+            }
+            for band in 0..bands {
+                let at=((bands*batches+band)*64) as usize;
+                source_words[at..at+4].copy_from_slice(&[topology.emitters,topology.implicit[2],topology.implicit[3],0]);
+                source_words[at+4..at+8].copy_from_slice(&[0,band*band_rows,(ah-band*band_rows).min(band_rows),1]);
             }
             let sources=d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label:Some("diffuse source topology"),
@@ -145,12 +166,21 @@ impl Resources {
                         entry(18,frame_rays.emitter_weights.as_ref().map_or(table,|weights|&weights.buffer).as_entire_binding()),
                         entry(19,wgpu::BindingResource::TextureView(ambient)),
                         entry(20,diffuse_response.as_entire_binding()),
+                        entry(21,wgpu::BindingResource::TextureView(&demand[demand_ping])),
                     ]);
                     entries },
                     Some(material),
                 )
             };
-            let reconstruction = |pipeline, label, vertical| {
+            let max_step=(w.min(h)/vork_slang::registry::GI_FILTER_EXTENT_PER_STEP).clamp(1,vork_slang::registry::GI_FILTER_MAX_STEP);
+            let mut steps=Vec::new();let mut step=1;
+            while step<=max_step {steps.push(step);step*=2;}
+            let mut scale_words=vec![0u32;steps.len()*64];
+            for (level,step) in steps.iter().enumerate() {scale_words[level*64]=*step;}
+            let scales=d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("GI reconstruction scales"),contents:bytemuck::cast_slice(&scale_words),usage:wgpu::BufferUsages::UNIFORM,
+            });
+            let reconstruction = |pipeline, label, vertical, level: u64| {
                 let (output, input, out_incident, in_incident) = if vertical {
                     (&raw_ao, &ao_view, &incident, &incident_horizontal)
                 } else {
@@ -163,17 +193,22 @@ impl Resources {
                     entry(3, wgpu::BindingResource::TextureView(input)),
                     entry(4, wgpu::BindingResource::TextureView(out_incident)),
                     entry(5, wgpu::BindingResource::TextureView(in_incident)),
+                    entry(6,guide.as_entire_binding()),
+                    entry(7,wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&scales,offset:level*256,size:std::num::NonZeroU64::new(16)})),
                 ], None)
             };
-            let mut stages=vec![visibility];
-            stages.push(reconstruction(s.pipelines.ao_blur_horizontal_pipeline.get(),"AO horizontal blur",false));
-            stages.push(reconstruction(s.pipelines.ao_blur_vertical_pipeline.get(),"AO vertical blur",true));
-            for (pipeline, label, entries, material) in stages {
+            let mut pilot=visibility.clone();pilot.1="GI independent proposal pilots";
+            let mut stages=vec![(pilot,true),(visibility,false)];
+            for level in 0..steps.len() {
+                stages.push((reconstruction(s.pipelines.ao_blur_horizontal_pipeline.get(),"GI horizontal reconstruction",false,level as u64),false));
+                stages.push((reconstruction(s.pipelines.ao_blur_vertical_pipeline.get(),"GI vertical reconstruction",true,level as u64),false));
+            }
+            for ((pipeline, label, entries, material), pilot) in stages {
               for band in 0..if material.is_some() {bands} else {1} {
-              for batch in 0..if material.is_some() {batches} else {1} {
+              for batch in 0..if material.is_some() && !pilot {batches} else {1} {
                 let mut entries=entries.clone();
                 if material.is_some() {
-                    entries.iter_mut().find(|e|e.binding==17).unwrap().resource=wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&sources,offset:u64::from(band*batches+batch)*256,size:std::num::NonZeroU64::new(32)});
+                    entries.iter_mut().find(|e|e.binding==17).unwrap().resource=wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&sources,offset:u64::from(if pilot {bands*batches+band} else {band*batches+batch})*256,size:std::num::NonZeroU64::new(32)});
                 }
                 let pipeline = pipeline.context("incomplete installed AO plan")?;
                 let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -194,17 +229,9 @@ impl Resources {
                 });
               }
               }
+              let span=if pilot {"gi pilots"} else if material.is_some() {"gi beauty"} else {"gi reconstruction"};
+              recorder.compute(crate::graph::Pass::Ao,label,span,false,std::mem::take(&mut dispatches));
             }
-        }
-        if !dispatches.is_empty() {
-            recorder.compute(
-                crate::graph::Pass::Ao,
-                "diffuse query reconstruction",
-                "ao",
-                false,
-                dispatches,
-            );
-            if s.pipelines.resolve_native.is_some() {recorder.separate_last();}
         }
         Ok(Self {
             output: raw_ao,
@@ -214,13 +241,91 @@ impl Resources {
     }
 }
 
+// Three translated copies extend [-r,r] to [-r-s,r+s] without gaps
+// whenever s <= 2r+1. This interval schedule reaches the exact requested
+// radius, including non-power-of-two tails; it never caps reconstruction.
+fn demand_steps([w,h]: [u32;2]) -> Vec<[u32;4]> {
+    let max_step=(w.min(h)/vork_slang::registry::GI_FILTER_EXTENT_PER_STEP)
+        .clamp(1,vork_slang::registry::GI_FILTER_MAX_STEP);
+    let mut step=1;let mut radius=vork_slang::renderer_registry::REG_AO_UPSAMPLE_RADIUS as u32;
+    while step<=max_step {radius+=vork_slang::renderer_registry::REG_GI_FILTER_RADIUS as u32*step;step*=2;}
+    let mut steps=vec![[0,0,1,0]];
+    for axis in 0..2 {
+        let mut covered=0;
+        while covered<radius {
+            let stride=(2*covered+1).min(radius-covered);
+            let mut value=[0;4];value[axis]=stride;steps.push(value);
+            covered+=stride;
+        }
+    }
+    steps
+}
+
+fn demand_dispatches(
+    d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, uniform: &wgpu::Buffer,
+    receivers: &wgpu::TextureView, ambient: &wgpu::TextureView, response: &wgpu::Buffer,
+    masks: &[wgpu::TextureView;2], extent: [u32;2], groups: [u32;3],
+) -> (Vec<crate::graph::Dispatch>, usize) {
+    let steps=demand_steps(extent);
+    let mut words=vec![0u32;steps.len()*64];
+    for (i,step) in steps.iter().enumerate() {words[i*64..i*64+4].copy_from_slice(step);}
+    let parameters=d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label:Some("GI exact demand intervals"),contents:bytemuck::cast_slice(&words),usage:wgpu::BufferUsages::UNIFORM,
+    });
+    let mut dispatches=Vec::new();let mut ping=0;
+    for (i,_) in steps.iter().enumerate() {
+        let next=1-ping;
+        let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:Some("GI exact consumer demand"),layout:&pipeline.get_bind_group_layout(0),
+            entries:&[
+                entry(0,uniform.as_entire_binding()),
+                entry(1,wgpu::BindingResource::TextureView(receivers)),
+                entry(2,wgpu::BindingResource::TextureView(ambient)),
+                entry(3,response.as_entire_binding()),
+                entry(4,wgpu::BindingResource::TextureView(&masks[ping])),
+                entry(5,wgpu::BindingResource::TextureView(&masks[next])),
+                entry(6,wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer:&parameters,offset:i as u64*256,size:std::num::NonZeroU64::new(16),
+                })),
+            ],
+        });
+        dispatches.push(crate::graph::Dispatch::new(pipeline,bind,groups));ping=next;
+    }
+    (dispatches,ping)
+}
+
+pub(crate) fn demand_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let compute=wgpu::ShaderStages::COMPUTE;
+    vec![
+        pipelines::buffer_entry(0,compute,wgpu::BufferBindingType::Uniform),
+        pipelines::texture_entry(1,wgpu::TextureSampleType::Float {filterable:false},false),
+        pipelines::texture_entry(2,wgpu::TextureSampleType::Float {filterable:false},false),
+        pipelines::buffer_entry(3,compute,wgpu::BufferBindingType::Storage {read_only:true}),
+        pipelines::texture_entry(4,wgpu::TextureSampleType::Uint,false),
+        wgpu::BindGroupLayoutEntry {binding:5,visibility:compute,ty:wgpu::BindingType::StorageTexture {
+            access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::R32Uint,view_dimension:wgpu::TextureViewDimension::D2,
+        },count:None},
+        pipelines::buffer_entry(6,compute,wgpu::BufferBindingType::Uniform),
+    ].into_iter().map(|mut entry| {entry.visibility=compute;entry}).collect()
+}
+
+pub(crate) fn demand_layout(d: &wgpu::Device) -> wgpu::PipelineLayout {
+    let group=d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label:Some("GI consumer demand"),entries:&demand_entries(),
+    });
+    d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label:Some("GI consumer demand"),bind_group_layouts:&[Some(&group)],immediate_size:0,
+    })
+}
+
 /// Native shaders need explicit layouts; Metal indices follow these bindings.
 pub(crate) fn slang_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
-    (0..6).map(|binding| wgpu::BindGroupLayoutEntry {
+    (0..8).map(|binding| wgpu::BindGroupLayoutEntry {
         binding, visibility: wgpu::ShaderStages::COMPUTE,
         ty: match binding {
-            1 => wgpu::BindingType::Buffer {ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},
-            2 | 4 => wgpu::BindingType::StorageTexture {access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::Rgba16Float,view_dimension:wgpu::TextureViewDimension::D2},
+            6 => wgpu::BindingType::Buffer {ty:wgpu::BufferBindingType::Storage {read_only:true},has_dynamic_offset:false,min_binding_size:None},
+            1 | 7 => wgpu::BindingType::Buffer {ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},
+            2 | 4 => wgpu::BindingType::StorageTexture {access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::Rgba32Float,view_dimension:wgpu::TextureViewDimension::D2},
             _ => wgpu::BindingType::Texture {sample_type:wgpu::TextureSampleType::Float {filterable:false},view_dimension:wgpu::TextureViewDimension::D2,multisampled:false},
         },count:None,
     }).collect()
@@ -237,44 +342,6 @@ pub(crate) fn slang_layout(d: &wgpu::Device) -> wgpu::PipelineLayout {
         bind_group_layouts: &[Some(&group)],
         immediate_size: 0,
     })
-}
-
-#[cfg(test)]
-mod prepared_query_tests {
-    use crate::*;
-    use serde_json::json;
-
-    /// Exercise empty demand and inexpensive active rays with the same medium
-    /// topology. Log warmed AO timings; both cases have an analytic furnace.
-    #[test]
-    #[ignore = "requires a real ray-query GPU"]
-    fn prepared_diffuse_queries_preserve_sparse_and_active_furnaces() -> Result<()> {
-        let r=Renderer::new()?;
-        for active in [false,true] {
-            let mut scene=crate::test_scene(json!({"version":2,
-                "render":{"resolution":[64,64]},
-                "buffers":{"p":{"type":"vec3","data":[[-100,-100,0],[100,-100,0],[0,100,0]]}},
-                "geometry":{"plane":{"attributes":{"POSITION":"p"}}},
-                "materials":{"receiver":{"inputs":{"base_weight":if active {1.} else {0.},"base_color":[1,1,1],"specular_weight":0,"emission_color":[1,1,1],"emission_luminance":if active {0.} else {1.}}},
-                    "fog":{"program":"std/fog","inputs":{"absorption":[0.1,0.1,0.1],"scattering":[0,0,0]}}},
-                "nodes":[{"type":"camera","translation":[0,0,1],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2}}},
-                    {"type":"mesh","geometry":"plane","materials":["receiver"]},
-                    {"type":"mesh","geometry":{"std":"box","size":[1,1,1]},"translation":[10000,0,0],"materials":["fog"]},
-                    {"type":"light","shape":"environment","color":[1,1,1],"energy":1}]}),Path::new("."))?;
-            scene.render.settings=serde_json::from_value(json!({"integrator":"raster","samples":32,"fast_gi":{"method":"ray"},"reflections":"environment","denoiser":null}))?;
-            let mut installed=r.install(scene,Path::new("."))?;
-            assert!(installed.pipelines.resolve_native.is_some() && installed.plan.effects.indirect);
-            let mut slot=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;slot.profile=true;
-            for repetition in 0..4 {
-                let image=installed.render_frame(&r,&mut slot,0.)?;
-                let pixels=image.linear_rgba.unwrap();
-                let error=pixels.iter().map(|p|(p[0]-1.).abs()).fold(0_f32,f32::max);
-                assert!(error<0.01,"active={active}: furnace error {error}");
-                eprintln!("prepared queries active={active} repetition={repetition} max_error={error} gpu_ms={} spans={:?}",image.timing.gpu_ms,image.timing.gpu_spans_ms);
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -321,6 +388,211 @@ mod accumulation_tests {
         assert!(whole.iter().any(|p|p[0]>0.01 && p[1]>0.01));
         assert_eq!(whole,banded,"GI partition changed scene-linear pixels");
         Ok(())
+    }
+
+    #[test]
+    fn gi_demand_matches_full_pixel_support_without_false_negatives() -> Result<()> {
+        let Some(r)=crate::test_renderer()? else {return Ok(())};
+        let d=&r.device;
+        let layout=demand_layout(d);
+        let module=crate::native::shader_module(d,&crate::native::GI_DEMAND_BUILD);
+        let pipeline=r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label:Some("exact demand qualification"),layout:Some(&layout),module:&module,
+            entry_point:Some("build"),compilation_options:Default::default(),cache:r.cache.as_ref(),
+        });
+        for (w,h) in [(1u32,1u32),(3,5),(131,129),(257,255),(1920,1080)] {
+          for diffuse in [false,true] {
+            let (cw,ch)=(w.div_ceil(2),h.div_ceil(2));
+            let texture=|width,height,format| d.create_texture(&wgpu::TextureDescriptor {
+                label:Some("exact demand fixture"),size:extent(width,height),mip_level_count:1,sample_count:1,
+                dimension:wgpu::TextureDimension::D2,format,
+                usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::STORAGE_BINDING|wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::COPY_SRC,view_formats:&[],
+            });
+            let receivers=texture(w,h,wgpu::TextureFormat::Rgba32Float);
+            let ambient=texture(w,h,wgpu::TextureFormat::Rgba32Float);
+            let masks=[texture(cw,ch,wgpu::TextureFormat::R32Uint),texture(cw,ch,wgpu::TextureFormat::R32Uint)];
+            let mut geometry=vec![[0f32;4];(w*h) as usize];
+            let mut baseline=geometry.clone();let mut response=vec![0f32;(w*h*3) as usize];
+            // Sparse donors exercise every support edge, all channels, signed
+            // and tiny FP32 payloads, and the clipped odd-size corner.
+            let mut consumers=Vec::new();
+            for (i,(x,y)) in [(0,0),(w-1,h-1),(w/2,h/2),(w/3,h/3),(w-1,0),(0,h-1)].into_iter().enumerate() {
+                let at=(y*w+x) as usize;
+                if i%2==0 {baseline[at][i%3]=if i==0 {-1.0e-25} else {0.001};}
+                else {response[at*3+i%3]=1.0e-20;}
+            }
+            // A background pixel with nonzero payload is never a consumer.
+            geometry[(h/3*w+w/3) as usize][3]=1.;
+            for y in 0..h {for x in 0..w {
+                let at=(y*w+x) as usize;
+                if geometry[at][3]<1. && (baseline[at][..3].iter().any(|v|*v!=0.) ||
+                    (diffuse && response[at*3..at*3+3].iter().any(|v|*v!=0.))) {consumers.push((x,y));}
+            }}
+            for (image,data) in [(&receivers,&geometry),(&ambient,&baseline)] {
+                r.queue.write_texture(image.as_image_copy(),bytemuck::cast_slice(data),wgpu::TexelCopyBufferLayout {
+                    offset:0,bytes_per_row:Some(w*16),rows_per_image:Some(h),
+                },extent(w,h));
+            }
+            let response=init(d,"exact diffuse response",bytemuck::cast_slice(&response),wgpu::BufferUsages::STORAGE);
+            let mut frame=Uniform::zeroed();frame.ao[3]=2.;frame.flags[3]=if diffuse {1.} else {0.};
+            let uniform=init(d,"exact demand frame",bytemuck::bytes_of(&frame),wgpu::BufferUsages::UNIFORM);
+            let rv=receivers.create_view(&Default::default());let av=ambient.create_view(&Default::default());
+            let mv=masks.each_ref().map(|t|t.create_view(&Default::default()));
+            let mut encoder=d.create_command_encoder(&Default::default());let mut ping=0;
+            for step in demand_steps([w,h]) {
+                let next=1-ping;
+                let parameter=init(d,"exact demand interval",bytemuck::cast_slice(&step),wgpu::BufferUsages::UNIFORM);
+                let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
+                        entry(0,uniform.as_entire_binding()),entry(1,wgpu::BindingResource::TextureView(&rv)),
+                        entry(2,wgpu::BindingResource::TextureView(&av)),entry(3,response.as_entire_binding()),
+                        entry(4,wgpu::BindingResource::TextureView(&mv[ping])),entry(5,wgpu::BindingResource::TextureView(&mv[next])),
+                        entry(6,parameter.as_entire_binding()),
+                    ],
+                });
+                {let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(cw.div_ceil(8),ch.div_ceil(8),1);}
+                ping=next;
+            }
+            let row=(cw*4).div_ceil(256)*256;
+            let readback=d.create_buffer(&wgpu::BufferDescriptor {
+                label:Some("exact demand readback"),size:u64::from(row*ch),usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,
+            });
+            encoder.copy_texture_to_buffer(masks[ping].as_image_copy(),wgpu::TexelCopyBufferInfo {
+                buffer:&readback,layout:wgpu::TexelCopyBufferLayout {offset:0,bytes_per_row:Some(row),rows_per_image:Some(ch)},
+            },extent(cw,ch));
+            let submission=r.queue.submit([encoder.finish()]);let(tx,rx)=std::sync::mpsc::channel();
+            readback.map_async(wgpu::MapMode::Read,..,move|v|{let _=tx.send(v);});r.wait(Some(submission))?;rx.recv()??;
+            let mapped=readback.get_mapped_range(..);
+            // Independent oracle: original clipped full-resolution square.
+            let max_step=(w.min(h)/64).clamp(1,16);let mut stride=1;let mut radius=2i32;
+            while stride<=max_step {radius+=2*stride as i32;stride*=2;}
+            for y in 0..ch {for x in 0..cw {
+                let lo=[((x as i32-radius)*2).max(0),((y as i32-radius)*2).max(0)];
+                let hi=[((x as i32+radius+1)*2).min(w as i32),((y as i32+radius+1)*2).min(h as i32)];
+                let expected=consumers.iter().any(|&(px,py)|(px as i32)>=lo[0] && (px as i32)<hi[0] && (py as i32)>=lo[1] && (py as i32)<hi[1]);
+                let at=(y*row+x*4) as usize;
+                let actual=u32::from_ne_bytes(mapped[at..at+4].try_into().unwrap());
+                assert_eq!(actual,u32::from(expected),"{w}x{h}, diffuse={diffuse}, cell ({x},{y})");
+            }}
+          }
+        }
+        r.errors.check()?;Ok(())
+    }
+
+    #[test]
+    fn gi_proposal_keeps_sampled_cap_density_at_float_boundaries() -> Result<()> {
+        let Some(r)=crate::test_renderer()? else {return Ok(())};
+        let source=r#"
+import gi_proposal;
+import vork_sampling;
+import vork_constants;
+export float3 ray_eye() {return float3(0.);}
+[[vk::binding(0,0)]] RWStructuredBuffer<float4> result;
+[shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID) {
+    let a=pixel_hash(id.x+1u);let b=pixel_hash(a);let c=pixel_hash(b);
+    var axis=float3(float(a&65535u),float(b&65535u),float(c&65535u))/65536.-.5;
+    if(dot(axis,axis)<1.e-6) axis=float3(0.,0.,1.);
+    axis=normalize(axis);
+    GiProposal guide={};guide.axis[0]=axis;guide.weight[0]=1.;guide.total=1.;
+    let edge=(id.x&1u)==0u ? 1.-REG_FP32_EPSILON*.5 : 1.-1./65536.;
+    uint sampled;
+    let direction=gi_proposal_direction(guide,axis,float2(edge,float(c>>16u)/65536.),float2(0.),sampled);
+    let minimum=REG_GI_GUIDE_MIX/(2.*REG_PI*(1.-REG_GI_GUIDE_COSINE));
+    result[id.x]=float4(gi_proposal_pdf(guide,axis,direction,sampled)/minimum,
+        gi_proposal_pdf(guide,axis,direction)/minimum,length(direction),float(sampled));
+}
+"#;
+        let entries=[pipelines::buffer_entry(0,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false})];
+        let pipeline=crate::medium::test_pipeline(&r,source,&crate::medium::Native::default(),&entries,(1,1,1))?;
+        let bytes=4096*16;
+        let output=r.device.create_buffer(&wgpu::BufferDescriptor {label:None,size:bytes,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false});
+        let read=r.device.create_buffer(&wgpu::BufferDescriptor {label:None,size:bytes,usage:wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
+        let bind=r.device.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[entry(0,output.as_entire_binding())]});
+        let mut encoder=r.device.create_command_encoder(&Default::default());
+        {let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(4096,1,1);}
+        encoder.copy_buffer_to_buffer(&output,0,&read,0,bytes);
+        let submission=r.queue.submit([encoder.finish()]);let(tx,rx)=std::sync::mpsc::channel();
+        read.map_async(wgpu::MapMode::Read,..,move|v|{let _=tx.send(v);});r.wait(Some(submission))?;rx.recv()??;
+        let mapped=read.get_mapped_range(..);let values:&[[f32;4]]=bytemuck::cast_slice(&mapped);
+        for (i,value) in values.iter().enumerate() {
+            assert!(value[0].is_finite() && value[0]>=1.,"sampled cap omitted at {i}: {value:?}");
+            assert!((value[2]-1.).abs()<1e-6 && value[3]==0.,"invalid cap sample at {i}: {value:?}");
+        }
+        eprintln!("unguarded boundary gaps: {} / {}",values.iter().filter(|v|v[1]<1.).count(),values.len());
+        r.errors.check()?;Ok(())
+    }
+
+    #[test]
+    fn gi_reconstruction_preserves_incident_and_visibility_sums() -> Result<()> {
+        let Some(r)=crate::test_renderer()? else {return Ok(())};
+        let d=&r.device;let (w,h)=(17u32,9u32);let count=(w*h) as usize;
+        let texture=|label,format| d.create_texture(&wgpu::TextureDescriptor {
+            label:Some(label),size:extent(w,h),mip_level_count:1,sample_count:1,
+            dimension:wgpu::TextureDimension::D2,format,
+            usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::STORAGE_BINDING|wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::COPY_SRC,view_formats:&[],
+        });
+        let receivers=texture("conservation planes",wgpu::TextureFormat::Rgba32Float);
+        let ao=[texture("visibility a",wgpu::TextureFormat::Rgba32Float),texture("visibility b",wgpu::TextureFormat::Rgba32Float)];
+        let incident=[texture("incident a",wgpu::TextureFormat::Rgba32Float),texture("incident b",wgpu::TextureFormat::Rgba32Float)];
+        let mut positions=vec![[0f32;4];count];let mut visibility=vec![[0f32;4];count];let mut lighting=vec![[0f32;4];count];let mut guides=vec![[0f32;4];count*2];
+        let mut expected=[0f64;4];
+        for y in 0..h {for x in 0..w {
+            let at=(y*w+x) as usize;let valid=x!=8;
+            positions[at]=[x as f32*0.002,y as f32*0.002,((x*x+y)%5) as f32*0.0002,0.];
+            let v=if x==4 && y==2 {-0.5} else if x==0 && y==0 {0.25} else {1.};
+            let rgb=[if x==0 && y==0 {64.} else {0.},if x==7 && y==h-1 {32.} else {0.},if x==10 && y==3 {-1.} else if x>8 {0.2} else {0.}];
+            let a=[v,if valid {1.+x as f32*0.05} else {0.},0.,0.];
+            let b=if valid {[rgb[0],rgb[1],rgb[2],8.]} else {[0.;4]};
+            visibility[at]=a;lighting[at]=b;
+            for c in 0..3 {expected[c]+=f64::from(lighting[at][c]);}
+            expected[3]+=f64::from(visibility[at][0]);
+            guides[at*2+1]=[0.,0.03,16.,0.];
+        }}
+        r.queue.write_texture(receivers.as_image_copy(),bytemuck::cast_slice(&positions),wgpu::TexelCopyBufferLayout {offset:0,bytes_per_row:Some(w*16),rows_per_image:Some(h)},extent(w,h));
+        for (image,data) in [(&ao[0],&visibility),(&incident[0],&lighting)] {
+            r.queue.write_texture(image.as_image_copy(),bytemuck::cast_slice(data),wgpu::TexelCopyBufferLayout {offset:0,bytes_per_row:Some(w*16),rows_per_image:Some(h)},extent(w,h));
+        }
+        let guide=init(d,"raw visibility moments",bytemuck::cast_slice(&guides),wgpu::BufferUsages::STORAGE);
+        let mut frame=Uniform::zeroed();frame.flags[3]=1.;
+        let uniform=init(d,"conservation frame",bytemuck::bytes_of(&frame),wgpu::BufferUsages::UNIFORM);
+        let layout=slang_layout(d);
+        let pipelines=[(&crate::native::AO_BLUR_HORIZONTAL,"horizontal"),(&crate::native::AO_BLUR_VERTICAL,"vertical")].map(|(shader,entry)| {
+            let module=crate::native::shader_module(d,shader);
+            r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {label:Some("conservative reconstruction"),layout:Some(&layout),module:&module,entry_point:Some(entry),compilation_options:Default::default(),cache:r.cache.as_ref()})
+        });
+        let av=ao.each_ref().map(|t|t.create_view(&Default::default()));let iv=incident.each_ref().map(|t|t.create_view(&Default::default()));
+        let rv=receivers.create_view(&Default::default());let mut encoder=d.create_command_encoder(&Default::default());let mut ping=0;
+        for step in [1u32,2,4,8,16] {
+            let scale=init(d,"conservation scale",bytemuck::cast_slice(&[step,0,0,0]),wgpu::BufferUsages::UNIFORM);
+            for pipeline in &pipelines {
+                let next=1-ping;
+                let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
+                    entry(0,wgpu::BindingResource::TextureView(&rv)),entry(1,uniform.as_entire_binding()),
+                    entry(2,wgpu::BindingResource::TextureView(&av[next])),entry(3,wgpu::BindingResource::TextureView(&av[ping])),
+                    entry(4,wgpu::BindingResource::TextureView(&iv[next])),entry(5,wgpu::BindingResource::TextureView(&iv[ping])),
+                    entry(6,guide.as_entire_binding()),entry(7,scale.as_entire_binding()),
+                ]});
+                {let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(w.div_ceil(8),h.div_ceil(8),1);}
+                ping=next;
+            }
+        }
+        let row=512u32;let plane=u64::from(row*h);
+        let readback=d.create_buffer(&wgpu::BufferDescriptor {label:Some("conservation readback"),size:plane*2,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false});
+        for (i,image) in [&incident[ping],&ao[ping]].into_iter().enumerate() {
+            encoder.copy_texture_to_buffer(image.as_image_copy(),wgpu::TexelCopyBufferInfo {buffer:&readback,layout:wgpu::TexelCopyBufferLayout {offset:plane*i as u64,bytes_per_row:Some(row),rows_per_image:Some(h)}},extent(w,h));
+        }
+        let submission=r.queue.submit([encoder.finish()]);let(tx,rx)=std::sync::mpsc::channel();
+        readback.map_async(wgpu::MapMode::Read,..,move|v|{let _=tx.send(v);});r.wait(Some(submission))?;rx.recv()??;
+        let mapped=readback.get_mapped_range(..);let mut actual=[0f64;4];let mut negative_visibility=false;
+        for y in 0..h {for x in 0..w {
+            let at=(y*row+x*16) as usize;
+            let get=|offset| f64::from(f32::from_ne_bytes([mapped[offset],mapped[offset+1],mapped[offset+2],mapped[offset+3]]));
+            for c in 0..3 {actual[c]+=get(at+c*4);}
+            let v=get(plane as usize+at);actual[3]+=v;negative_visibility|=v<0.;
+        }}
+        for c in 0..4 {assert!((actual[c]-expected[c]).abs()<0.00001*expected[c].abs().max(1.),"channel {c}: {actual:?} != {expected:?}");}
+        assert!(negative_visibility,"signed ambient replacement was clipped");
+        r.errors.check()?;Ok(())
     }
 
     #[test]

@@ -13,17 +13,20 @@ pub fn stage(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn bounded(all: bool, skip_warmup: bool) -> Result<()> {
+pub fn bounded(all: bool, skip_warmup: bool, verbose: bool, gpu: Option<vork_render::GpuSelection>) -> Result<()> {
+    let unbounded = all || vork_render::selected_gpu().context(vork_render::failure::FailureKind::Device)? == Some(vork_render::GpuSelection::Cpu);
     let path = std::env::temp_dir().join(format!("vork-setup-{}-{}", std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
     let result: Result<Option<ExitStatus>> = (|| {
         let mut command = Command::new(std::env::current_exe()?);
         command.args(["setup", "--warmup-worker"]).env(STAGE_FILE, &path);
+        if let Some(index) = gpu { command.args(["--gpu", &index.to_string()]); }
         if all { command.arg("--all"); }
+        if verbose { command.arg("--verbose"); }
         if skip_warmup { command.arg("--skip-warmup"); }
         let mut child = command.spawn().context("start setup checks")?;
-        match wait_bounded(&mut child, &path, Duration::from_secs(600), all)? {
+        match wait_bounded(&mut child, &path, Duration::from_secs(600), unbounded)? {
             Some(status) if !status.success() => return Ok(Some(status)),
             None => output!("Shader warmup stopped at the 600 s limit; completed cache entries are retained. Rendering will compile remaining pipelines on demand. Run `vork setup` again to continue."),
             _ => {}

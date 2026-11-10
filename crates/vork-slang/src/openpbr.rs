@@ -331,6 +331,31 @@ mod replay_tests {
     }
 
     #[test]
+    fn native_replay_initializes_each_phase_before_reading_scratch() {
+        // native_blend::separate relies on this generator contract: no replay
+        // state survives a material call. Keep the phase boundaries explicit.
+        let module = replay_module(&openpbr_fields());
+        let begin = module.split("public void vork_begin_blend(uint node) {").nth(1).unwrap()
+            .split("\n}").next().unwrap();
+        let zero = openpbr_fields().iter().map(|f| format!("{}(0)", f.ty.slang()))
+            .collect::<Vec<_>>().join(",");
+        assert_eq!(begin.trim(), format!(
+            "vork_node_cursor=0u;vork_target_node=node;vork_found_leaf=node==0xffffffffu;\n    vork_selected_closure={{{zero}}};"));
+        // During the metadata pass the sentinel target cannot match a node.
+        // Reads of selection state must stay inside that target guard.
+        let sum = module.split("Blend blend_sum(").nth(1).unwrap();
+        assert!(sum.contains("if(s.node==vork_target_node) {\n        bool left=vork_random_leaf"));
+        let lobe = module.split("public BlendLobe vork_lobe(").nth(1).unwrap()
+            .split("\n}").next().unwrap().split_once(" {\n").unwrap().1;
+        assert!(lobe.starts_with(concat!(
+            "    count=s.count;vork_random_leaf=lobe==0xffffffffu;vork_target_index=lobe;\n",
+            "    vork_root_opacity=1.-min(s.transparency,1.);vork_root_energy=s.energy;\n",
+            "    vork_target_energy=u*s.energy;vork_leaf_scale=!vork_random_leaf && lobe>=s.count ? 0. : 1.;\n",
+            "    if(!vork_random_leaf && lobe>=s.count) vork_target_index=0u;\n",
+            "    vork_leaf_opacity=0.;weight=0.;\n")));
+    }
+
+    #[test]
     #[ignore = "requires pinned Slang toolchain"]
     fn native_blend_selection_and_replay_share_one_outlined_wrapper() -> Result<()> {
         let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: openpbr_fields() };
@@ -339,6 +364,15 @@ mod replay_tests {
             Path::new("outlined-blend.slang"), "outlinedblend")?;
         assert!(program.slang.contains("[noinline]\n#endif\npublic void vork_surface_outlinedblend("), "{}",program.slang);
         assert_eq!(program.slang.matches("surface(ctx, inputs)").count(), 2);
+        // Pin the ordering, including the first surface evaluation: moving the
+        // reset after it would invalidate per-wrapper scratch localization.
+        assert!(program.slang.contains(concat!(
+            "vork_begin_blend(0xffffffffu);\n",
+            "    let selected=vork_lobe(surface(ctx, inputs), lobe, u, weight, count);\n",
+            "    vork_begin_blend(selected.leaf);\n",
+            "    [loop] while(!vork_blend_done()) {surface(ctx, inputs);vork_continue_blend();}\n",
+            "    weight=vork_blend_weight();\n",
+            "    Closure c=vork_replay_closure(selected.geometry_opacity);")));
         Ok(())
     }
 

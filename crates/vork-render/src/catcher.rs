@@ -9,10 +9,10 @@ pub(crate) fn has_catchers(scene:&Scene)->bool {
     fn any(nodes:&[vork_scene::Node])->bool {nodes.iter().any(|n|n.is_shadow_catcher || any(&n.children))}
     any(&scene.nodes)
 }
-pub(crate) fn promote(scene:&mut Scene) {
+#[cfg(test)]
+fn promote(scene:&mut Scene) {
     if has_mattes(scene) && !scene.render.settings.integrator.is_path() {
-        if scene.render.settings.previs { crate::rt::promote_indirect_to_path(scene); }
-        else { scene.render.settings.integrator=vork_scene::Integrator::Path(Default::default()); }
+        crate::rt::promote_to_path(scene);
     }
 }
 

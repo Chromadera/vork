@@ -40,7 +40,7 @@ fn categorize(error: anyhow::Error, default: FailureKind) -> anyhow::Error {
 /// device failure of a working device, though met while opening the encoder.
 /// The causes are for crates below vork-render; vork-render code attaches a
 /// FailureKind where it knows one.
-fn kind(error: &anyhow::Error) -> Option<FailureKind> {
+pub(crate) fn kind(error: &anyhow::Error) -> Option<FailureKind> {
     error.downcast_ref::<FailureKind>().copied()
         .or_else(|| error.downcast_ref::<vork_slang::CompilerUnavailable>().map(|_| FailureKind::Setup))
         .or_else(|| error.downcast_ref::<vork_encode::DeviceLimit>().map(|_| FailureKind::Device))

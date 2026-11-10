@@ -11,16 +11,10 @@ an sRGB picker value must be converted to linear before storing it.
 
 Std extrude supports inward rounded rims: bevel_depth (metres), bevel_resolution
 (quarter-circle steps). Total depth/bounds stay fixed.
-For a rod from A to B, use std/cylinder with height = length(B-A), translate
-its centre to (A+B)/2 and rotate its local +Y axis onto normalize(B-A).
-Reject coincident endpoints. Choose a perpendicular axis with a cross product;
-use a different reference axis when the first is parallel to the rod.
-For a tube arc in XY, sample angle a from start to end and tube angle b in 0..2π:
-position = [(radius+tube*cos(b))*cos(a), (radius+tube*cos(b))*sin(a), tube*sin(b)].
-Normal = [cos(b)*cos(a), cos(b)*sin(a), sin(b)]; connect adjacent rings with triangles.
-Duplicate UV seams, cap partial arcs, and reverse winding for a negative sweep.
-Procedural materials: write a Slang surface program (vork help programs --all);
-use world/object position and std/procedurals rather than loading a sample scene.
+Missing NORMAL attributes use face normals; authored NORMAL values control smoothing.
+Text size is the font em in metres, not visible cap height. Finite pixel/shutter
+sampling can leave small strokes and bevel highlights unresolved; extra bevel
+segments and denoising do not guarantee recovery. Samples cannot add missing geometry.
 
 Normal maps use glTF/MikkTSpace: B = cross(N,T.xyz)*T.w. Derivative frames
 recover handedness from UVs and the original normal, with no image-V sign flip.
@@ -39,4 +33,4 @@ node transforms place the domain. Boundary samples must be strictly positive.
 Ordinary mesh materials shade the surface, including OpenPBR transmission.
 Use surface materials without subsurface shading or displacement on implicit geometry.
 
-Std builders expand in the author loader before scene decoding. Expanded geometry uses buffers; `vork std expand` emits buffer geometry (font paths relative to the working directory).
+Std builders expand in the author loader before scene decoding. Expanded geometry uses buffers; CPU expansion usage and coverage: `vork help std --all`.

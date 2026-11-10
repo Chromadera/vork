@@ -2,7 +2,6 @@
 // secondary endpoints; unsupported local data remains explicit.
 import vork_prelude;
 import vork_constants;
-import surface_medium;
 #ifdef VORK_PROBES
 import probes;
 import probe_visibility_policy;
@@ -10,9 +9,6 @@ import probe_visibility_policy;
 struct DirectionalRadianceSample {float3 radiance;bool local;bool supported;};
 DirectionalRadianceSample directional_provider(float3 world,float3 normal,float3 view,float3 direction,float roughness,bool escaped,Frame frame,Texture2D environment,SamplerState environment_sampler,bool world_permitted=true) {
     var terminal=world_permitted ? reflection_fallback(direction,roughness,frame,environment,environment_sampler) : float3(0.);
-#ifdef VORK_SURFACE_MEDIUM
-    if(!escaped) {terminal*=surface_medium_transmittance(world,direction,REG_FP32_MAX);}
-#endif
 #ifdef VORK_PROBES
     if(!escaped) {
         let sample=probe_directional_field(world,normal,view,direction,roughness,terminal);
@@ -29,9 +25,6 @@ DirectionalRadianceSample receiver_provider(float3 world,float3 normal,float3 vi
     if(capture_endpoint) {
         if(!world_permitted) {return DirectionalRadianceSample(float3(0.),false,true);}
         var terminal=reflection_fallback(direction,1.,frame,environment,environment_sampler);
-#ifdef VORK_SURFACE_MEDIUM
-        terminal*=surface_medium_transmittance(world,direction,REG_FP32_MAX);
-#endif
         let endpoint=probe_field_sample<ProbeMomentVisibility>(world,normal,view,direction,.75,normal,float3(0.));
         return DirectionalRadianceSample(endpoint.owned ? endpoint.radiance : terminal,endpoint.owned,!endpoint.owned || endpoint.valid);
     }

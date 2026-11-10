@@ -22,6 +22,7 @@ export type Buffer = InlineBuffer | FileBuffer | DenseBuffer;
  */
 export type InlineDataSchema = number[] | number[][];
 export type BufferType = "f32" | "i32" | "u32" | "vec2" | "vec3" | "vec4" | "uvec4" | "mat4";
+export type Geometry = BufferGeometry | StdGeometry;
 export type SubdivisionType = "catmull_clark" | "simple";
 export type Topology = ("triangles" | "points" | "curves") | "implicit";
 /**
@@ -54,6 +55,7 @@ export type Input =
   | number
   | number[]
   | boolean
+  | GeometryBinding
   | TextureBinding
   | AttributeBinding
   | GridBinding
@@ -209,7 +211,7 @@ export interface DenseBuffer {
   file?: null;
   grid?: null;
   offset?: number;
-  type: "f32" | "vec3";
+  type: BufferType;
 }
 export interface ClipLayer {
   blend?: Blend;
@@ -227,7 +229,7 @@ export interface Clip {
   name?: string | null;
   target: string;
 }
-export interface Geometry {
+export interface BufferGeometry {
   attributes: {
     [k: string]: NameOr3;
   };
@@ -291,6 +293,18 @@ export interface SubdivisionSurface {
   subdivision_type?: SubdivisionType;
   use_limit_surface?: boolean;
 }
+/**
+ * Authoring shorthand expanded by vork-std before kernel scene decoding.
+ * Builder-specific options are validated by the selected standard-library builder.
+ */
+export interface StdGeometry {
+  /**
+   * Text font path, resolved relative to the scene.
+   */
+  font?: string | null;
+  std: string;
+  [k: string]: unknown;
+}
 export interface Image {
   /**
    * Blender `Image.colorspace_settings.name`. Omitted follows Blender's file default.
@@ -335,7 +349,18 @@ export interface Material {
    * Meaning of geometry_opacity; the renderer owns its integration method.
    */
   opacity?: Opacity | null;
+  /**
+   * Highest priority owns an overlapping dielectric region. Equal priorities
+   * use the most recently entered solid; simultaneous entries use solid order.
+   */
+  priority?: number;
   program?: NameOr2;
+}
+/**
+ * Read-only evaluated geometry of a named mesh object, sampled by the compute clock.
+ */
+export interface GeometryBinding {
+  geometry: string;
 }
 /**
  * An image handle. Sampling and transformations belong to the receiving program.
@@ -602,6 +627,10 @@ export interface LightNode {
    * Environment radiance material instance.
    */
   material?: NameOr | null;
+  /**
+   * Physical world fog material on an environment light.
+   */
+  medium?: NameOr | null;
   name?: string;
   pass_index?: number | null;
   radius?: number;

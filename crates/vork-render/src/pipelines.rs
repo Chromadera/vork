@@ -537,7 +537,6 @@ impl ProgramKernel {
             ShadeStage::Compose=>"camera result composition".into(),
             ShadeStage::Fused=>"camera fused table shading".into(),
             ShadeStage::Indirect=>"camera unsupported indirect work".into(),
-            ShadeStage::Receivers=>"camera medium receivers".into(),
             ShadeStage::Occupancy=>"camera dielectric occupancy".into(),
             ShadeStage::Index=>"camera occupied slots".into(),
             ShadeStage::Classify=>"camera material classify".into(),
@@ -548,7 +547,7 @@ impl ProgramKernel {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ShadeStage {
-    Indirect, Fused, Receivers, Occupancy, Index, Classify, Prefix, Scatter, EvaluateOpaque, Evaluate, EvaluateProgram(u32), Compose }
+    Indirect, Fused, Occupancy, Index, Classify, Prefix, Scatter, EvaluateOpaque, Evaluate, EvaluateProgram(u32), Compose }
 impl ShadeStage {
     pub(crate) fn composes(self)->bool {matches!(self,Self::Compose|Self::Fused)}
     /// Stages that evaluate the built-in material table (Evaluate, EvaluateOpaque, Fused);
@@ -692,13 +691,13 @@ pub(crate) struct CachedPipelines {
     pub(crate) fragments_layout: wgpu::BindGroupLayout,
     pub(crate) fragments_geometry_layout: wgpu::BindGroupLayout,
     pub(crate) field_controls: bool,
+    pub(crate) program_trace: bool,
     fragments_pipeline_layout: wgpu::PipelineLayout,
     fibre_layout: wgpu::PipelineLayout,
     pub(crate) fibre_capture_layout: wgpu::BindGroupLayout,
     control_targets: Vec<Option<wgpu::ColorTargetState>>,
 
     pub(crate) resolve_module: String,
-    pub(crate) resolve_native: Option<medium::Native>,
     control_module: OnceLock<wgpu::ShaderModule>,
     resolve_layout: wgpu::PipelineLayout,
     pub(crate) deform_pipeline: OnceLock<wgpu::ComputePipeline>,
@@ -712,6 +711,7 @@ pub(crate) struct CachedPipelines {
     pub(crate) fused_resolve_pipeline: OnceLock<wgpu::ComputePipeline>,
     pub(crate) post_source_pipeline: OnceLock<wgpu::ComputePipeline>,
     pub(crate) control_resolve_pipeline: OnceLock<wgpu::ComputePipeline>,
+    pub(crate) gi_demand_pipeline: OnceLock<wgpu::ComputePipeline>,
     pub(crate) ao_blur_horizontal_pipeline: OnceLock<wgpu::ComputePipeline>,
     pub(crate) ao_blur_vertical_pipeline: OnceLock<wgpu::ComputePipeline>,
 }
@@ -734,20 +734,16 @@ impl CachedPipelines {
         // Raster fibre resources change the shadow layout even when the material
         // program is identical to one installed for a path scene.
         identity.update(&[u8::from(slang.fibre)]);
-        identity.update(&[u8::from(slang.volume_visibility)]);
         // Coverage changes fallback admission. Preserve opaque setup identities.
         if slang.surface_coverage {identity.update(b"surface coverage");}
         if slang.attribute_coverage {identity.update(b"attribute coverage");}
+        if slang.no_boundary_transactions {identity.update(b"no boundary transactions");}
         if let Some(native)=&slang.medium {
-            identity.update(&native.steps.to_le_bytes());
             identity.update(native.point.as_bytes());identity.update(&native.identity);
-            identity.update(native.transport.as_bytes());
-            for value in [native.sample_pages.max(1), native.froxel_pages.max(1), native.froxel_page_elements, native.visibility_lights] {
-                identity.update(&value.to_le_bytes());
-            }
+
             for flag in native.defines() { identity.update(flag.as_bytes()); identity.update(&[0]); }
-            identity.update(&[u8::from(native.ray_shadows), u8::from(native.mesh_sources), u8::from(native.program_coverage), u8::from(native.implicit), u8::from(native.surface_connection.is_some())]);
-            identity.update(&native.surface_connection.unwrap_or_default().to_le_bytes());
+            // Path compilation specializes homogeneous versus tracked transport.
+            identity.update(&[u8::from(native.mesh_sources),u8::from(native.homogeneous)]);
             for (name,source) in &native.modules {identity.update(name.as_bytes());identity.update(source.as_bytes());}
             for path in &native.includes {identity.update(path.to_string_lossy().as_bytes());}
         }
@@ -1106,18 +1102,27 @@ impl CachedPipelines {
             if self.raster_samples > 1 { "resolve_fused" } else { "resolve_fused_single" }
         } else { "main" };
         try_init(self.output_resolve(effects), || Ok(passes::resolve::pipeline(
-            r, &self.resolve_module, self.resolve_native.as_ref(), entry, Some(&self.resolve_layout),
+            r, &self.resolve_module, entry, Some(&self.resolve_layout),
         )))?;
         Ok(())
     }
 
     pub(crate) fn ensure_effects(&self, r: &Renderer, features: EffectPlan) -> Result<()> {
         let ao_blur_layout = crate::passes::ao::slang_layout(&r.device);
+        let gi_demand_layout = crate::passes::ao::demand_layout(&r.device);
         enum Module {
             Slang(&'static crate::native::Compiled),
             Resolve,
         }
         let jobs = [
+            (
+                &self.gi_demand_pipeline,
+                features.indirect,
+                Module::Slang(&crate::native::GI_DEMAND_BUILD),
+                Some(&gi_demand_layout),
+                "build",
+                "GI exact consumer demand",
+            ),
             (
                 &self.fused_resolve_pipeline,
                 features.fuse_controls() && features.outputs.is_none_or(|o|o.beauty),
@@ -1203,7 +1208,7 @@ impl CachedPipelines {
                         let entry=if label == "fused control and output resolve" {
                             if self.raster_samples > 1 {"resolve_fused"} else {"resolve_fused_single"}
                         } else {entry};
-                        return Ok(passes::resolve::pipeline(r,&self.resolve_module,self.resolve_native.as_ref(),entry,layout));
+                        return Ok(passes::resolve::pipeline(r,&self.resolve_module,entry,layout));
                     }
                     let native_module;
                     let module = match module {
@@ -1233,7 +1238,6 @@ impl CachedPipelines {
         r: &Renderer,
         source: &str,
         resolve: &str,
-        resolve_native: Option<&medium::Native>,
         raster_samples: u32,
         ray_shadows: bool,
         slang: crate::slang_forward::SlangScene,
@@ -1248,7 +1252,7 @@ impl CachedPipelines {
             label: Some("material"),
             entries: &material_entries_for(slang.textures.max(1),slang.samplers.max(1)),
         });
-        let shadow_entries = camera_shadow_entries(ray_shadows);
+        let shadow_entries = camera_shadow_entries_for(ray_shadows,slang.program_trace);
         let shadow_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow read"),
             entries: &shadow_entries,
@@ -1258,17 +1262,17 @@ impl CachedPipelines {
         // Depth and controls read only frame/object + material tables.
         let depth_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("packed depth layout"),
-            bind_group_layouts: &[Some(&global_layout), Some(&mat_layout)],
+            bind_group_layouts: &if slang.program_trace {vec![Some(&global_layout),Some(&mat_layout),Some(&shadow_layout)]} else {vec![Some(&global_layout),Some(&mat_layout)]},
             immediate_size: 0,
         });
         let fragments_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("transparent fragments"),
-            entries: &crate::passes::decoupled::fragments_entries(resolve_native.map_or(0,|n|n.sample_pages)),
+            entries: &crate::passes::decoupled::fragments_entries(),
         });
         let fragments_geometry_layout=crate::passes::decoupled::fragments_geometry_layout(d);
         let fragments_pipeline_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("decoupled transparent fragments"),
-            bind_group_layouts: &[Some(&global_layout), Some(&mat_layout), Some(&fragments_layout), Some(&fragments_geometry_layout)],
+            bind_group_layouts: &if slang.program_trace {vec![Some(&global_layout),Some(&mat_layout),Some(&fragments_layout),Some(&fragments_geometry_layout),Some(&shadow_layout)]} else {vec![Some(&global_layout),Some(&mat_layout),Some(&fragments_layout),Some(&fragments_geometry_layout)]},
             immediate_size: 0,
         });
 
@@ -1279,18 +1283,9 @@ impl CachedPipelines {
         let control_targets: Vec<_> = control_formats(denoise).iter().map(|format|
             format.map(wgpu::ColorTargetState::from)).collect();
         let resolve_module = resolve.to_owned();
-        let mut resolve_entries = passes::resolve::layout_entries(
+        let resolve_entries = passes::resolve::layout_entries(
             if raster_samples > 1 { "resolve_color" } else { "resolve_fused_single" },
         );
-        if resolve_native.is_some_and(|n|n.program_coverage) {
-            resolve_entries.extend(passes::resolve::shadow_closure_entries());
-        }
-        if resolve_native.is_some() {
-            resolve_entries.push(buffer_entry(64,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Uniform));
-            resolve_entries.push(buffer_entry(65,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:true}));
-            resolve_entries.push(buffer_entry(3,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Uniform));
-            if resolve_native.is_some_and(|n|n.ray_shadows) {resolve_entries.extend(crate::rt::layout_entries(59,wgpu::ShaderStages::COMPUTE));resolve_entries.push(buffer_entry(71,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:true}));}
-        }
         let output_entry = wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -1325,7 +1320,8 @@ impl CachedPipelines {
             identity,
             ray_shadows,
             field_controls: slang.field_controls,
-            // Every raster role uses native Slang, including mesh media.
+            program_trace: slang.program_trace,
+            // Every raster role uses native Slang.
             shader: Box::new(crate::slang_forward::SlangForward::new(
                 r,
                 ray_shadows,
@@ -1344,7 +1340,6 @@ impl CachedPipelines {
             camera_evaluations: Mutex::default(),
             control_targets,
             resolve_module,
-            resolve_native: resolve_native.cloned(),
             control_module: OnceLock::new(),
             resolve_layout,
             deform_pipeline: OnceLock::new(),
@@ -1358,6 +1353,7 @@ impl CachedPipelines {
             fused_resolve_pipeline: OnceLock::new(),
             post_source_pipeline: OnceLock::new(),
             control_resolve_pipeline: OnceLock::new(),
+            gi_demand_pipeline: OnceLock::new(),
             ao_blur_horizontal_pipeline: OnceLock::new(),
             ao_blur_vertical_pipeline: OnceLock::new(),
         }
@@ -1444,7 +1440,10 @@ pub(crate) fn shadow_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 }
 /// Stable camera resource table. Optional consumers bind empty records.
 pub(crate) fn camera_shadow_entries(rays:bool)->Vec<wgpu::BindGroupLayoutEntry> {
-    let stages=wgpu::ShaderStages::COMPUTE;
+    camera_shadow_entries_for(rays,false)
+}
+fn camera_shadow_entries_for(rays:bool,trace:bool)->Vec<wgpu::BindGroupLayoutEntry> {
+    let stages=if trace {wgpu::ShaderStages::COMPUTE|wgpu::ShaderStages::FRAGMENT} else {wgpu::ShaderStages::COMPUTE};
     let mut entries=shadow_entries();
 
     if rays {
@@ -1610,15 +1609,6 @@ fn packed_geometry_pipeline(
 #[cfg(all(test, vork_private_tests))]
 include!("pipelines_tests_private.rs");
 
-/// Replace one complete shader hook; drift must fail before pipeline compilation.
-pub(crate) fn replace_hook(source: &str, hook: &str, replacement: &str) -> Result<String> {
-    ensure!(
-        source.matches(hook).count() == 1,
-        "shader hook must occur exactly once: {hook:?}"
-    );
-    Ok(source.replacen(hook, replacement, 1))
-}
-
 /// Control resolve for the raster coverage sample count (msaa4 or single-sample jitter).
 
 /// Native single-sample/MSAA entries, with optional denoising guide output.
@@ -1695,16 +1685,6 @@ pub(crate) fn control_resolve_entries(samples: u32, denoise: bool) -> Vec<wgpu::
 
 #[cfg(test)]
 mod raster_control_tests {
-    #[test]
-    fn hooks_reject_missing_and_duplicate_matches() {
-        assert!(super::replace_hook("", "hook", "replacement").is_err());
-        assert!(super::replace_hook("hook hook", "hook", "replacement").is_err());
-        assert_eq!(
-            super::replace_hook("before hook after", "hook", "replacement").unwrap(),
-            "before replacement after"
-        );
-    }
-
     #[test]
     fn raster_coverage_counts_have_distinct_shared_registry_entries() -> anyhow::Result<()> {
         let Some(r) = crate::test_renderer()? else { return Ok(()); };
@@ -1796,7 +1776,7 @@ pub(crate) fn warm_builtin(r: &Renderer) -> Result<()> {
         for attributes in 0..=crate::constants::PRECOMPILED_ATTRIBUTE_SLOTS as u32 {
             for denoise in [false, true] {
                 let p = if denoise || attributes>0 {
-                    std::sync::Arc::new(CachedPipelines::with_sources(r, "", RESOLVE, None,
+                    std::sync::Arc::new(CachedPipelines::with_sources(r, "", RESOLVE,
                         samples, false, crate::slang_forward::SlangScene { denoise, attributes, ..Default::default() }))
                 } else { r.cached_pipelines(samples) };
                 if attributes == 0 {
@@ -1834,20 +1814,6 @@ pub(crate) fn warm_builtin(r: &Renderer) -> Result<()> {
                 }
                 warm_geometry(r,&p,keys)?;
             }
-        }
-    }
-    // Visibility writes only sample depth; it does not evaluate authored media.
-    // Prewarm common page counts; installation compiles larger layouts on demand.
-    for pages in 1..=crate::camera_native::PRECOMPILED_MEDIUM_PAGES {
-        for attributes in 0..=crate::constants::PRECOMPILED_ATTRIBUTE_SLOTS as u32 {
-            let medium = medium::Native { sample_pages:pages, froxel_pages:1, ..Default::default() };
-            let p = CachedPipelines::with_sources(r,"",RESOLVE,Some(&medium),1,false,
-                crate::slang_forward::SlangScene { attributes, volume_visibility:true,
-                    medium:Some(std::sync::Arc::new(medium.clone())), ..Default::default() });
-            let keys = crate::geometry::VertexLayout::builtin_layouts(attributes as u8).into_iter()
-                .flat_map(|layout| [Role::Visibility,Role::VisibilitySingle,Role::VisibilityMasked,Role::TransparentFragments]
-                    .into_iter().map(move |role|(layout,role))).collect();
-            warm_geometry(r,&p,keys)?;
         }
     }
     r.errors.check()
@@ -1934,9 +1900,9 @@ mod registry_identity_tests {
             crate::slang_forward::SlangScene {no_shadow_containment:true,..base.clone()},
             crate::slang_forward::SlangScene {probes:true,..base.clone()},
         ] {assert_ne!(key(&base),key(&changed));}
-        let medium=|pages|crate::slang_forward::SlangScene {
-            medium:Some(std::sync::Arc::new(medium::Native {sample_pages:pages,..Default::default()})),..base.clone()
+        let medium=|homogeneous|crate::slang_forward::SlangScene {
+            medium:Some(std::sync::Arc::new(medium::Native {homogeneous,..Default::default()})),..base.clone()
         };
-        assert_ne!(key(&medium(1)),key(&medium(2)));
+        assert_ne!(key(&medium(true)),key(&medium(false)));
     }
 }

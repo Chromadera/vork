@@ -2,6 +2,11 @@
 use std::{env, fmt::Write, fs, path::Path};
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/starter.json");
+    let starter = fs::read_to_string("src/starter.json").expect("read starter scene");
+    let starter = starter.replace("{VERSION}", &env::var("CARGO_PKG_VERSION").unwrap());
+    fs::write(Path::new(&env::var("OUT_DIR").unwrap()).join("starter.json"), starter)
+        .expect("write release-pinned starter scene");
     // Explicit opt-in: directory layout must not change test admission.
     println!("cargo:rustc-check-cfg=cfg(vork_private_tests)");
     println!("cargo:rerun-if-changed=build.rs");

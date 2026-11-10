@@ -1,6 +1,6 @@
 """Translate supported Blender World graphs to vork's environment-light contract.
 
-Run inside Blender. Only nodes reachable from the active EEVEE World output
+Run inside Blender. Only nodes reachable from the active Cycles World output
 participate. Unsupported links raise a named error instead of selecting unrelated
 Background or Environment Texture nodes elsewhere in the tree.
 """
@@ -115,6 +115,21 @@ def background(socket, camera):
     node = socket.links[0].from_node
     if node.mute:
         unsupported(node, 'Surface', 'muted-node bypass is not translated')
+    if node.type == 'MIX_SHADER':
+        factor = node.inputs[0]
+        if factor.is_linked:
+            link = factor.links[0]
+            if link.from_node.type != 'LIGHT_PATH' or link.from_socket.name != 'Is Camera Ray':
+                unsupported(node, 'Factor', 'only Is Camera Ray branching is translated')
+            weight = float(camera)
+        else:
+            weight = min(1., max(0., float(factor.default_value)))
+        if weight == 0: return background(node.inputs[1], camera)
+        if weight == 1: return background(node.inputs[2], camera)
+        first, second = background(node.inputs[1], camera), background(node.inputs[2], camera)
+        if first.image is None and second.image is None:
+            return Radiance(None, tuple(a*(1-weight)+b*weight for a,b in zip(first.color, second.color)), Matrix.Identity(3))
+        unsupported(node, 'Surface', 'mixed directional World radiance requires resampling')
     if node.type != 'BACKGROUND':
         unsupported(node, 'Surface', f'{node.type} shader evaluation is not translated')
     strength = constant(node, 'Strength')
@@ -157,7 +172,7 @@ def medium(socket):
     }}}
 
 
-def translate(world):
+def translate(world, *, bake_directory=None, on_bake=None):
     """Return WorldImport with image, environment, background and materials.
 
     The caller writes image pixels as scene-linear HDR bound as `world` and
@@ -171,12 +186,20 @@ def translate(world):
     elif not world.use_nodes:
         lighting = camera = Radiance(None, tuple(world.color), identity)
     else:
-        output = world.node_tree.get_output_node('EEVEE')
+        output = world.node_tree.get_output_node('CYCLES')
         if output is None:
-            raise UnsupportedWorld('World: no active EEVEE output')
+            raise UnsupportedWorld('World: no active Cycles output')
         materials = medium(output.inputs['Volume'])
-        lighting = background(output.inputs['Surface'], False)
-        camera = background(output.inputs['Surface'], True)
+        try:
+            lighting = background(output.inputs['Surface'], False)
+            camera = background(output.inputs['Surface'], True)
+        except UnsupportedWorld:
+            if bake_directory is None: raise
+            from .world_bake import bake
+            result = bake(world, bake_directory)
+            if on_bake is not None:
+                on_bake('Cycles directional World resampled at 2048x1024 into float32 scene-linear EXR; no source geometry or display transform')
+            return result
     if not all(math.isfinite(v) and v >= 0 for v in lighting.color + camera.color):
         raise UnsupportedWorld('World: radiance must be finite and nonnegative')
     node = dict(type='light', name='environment', shape='environment', color=list(lighting.color), energy=1)

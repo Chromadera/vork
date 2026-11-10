@@ -6,9 +6,10 @@ PATH/%06d.exr: one multilayer OpenEXR per frame, scene-linear premultiplied, bef
 .mp4 H.264 (requires opaque final alpha on every composited frame); .mov ProRes 4444 RGBA (keeps final alpha)
 --at SECONDS: one still; needs .png, directory or EXR. --frame-start/--frame-end N: inclusive
 absolute frame indices, default the whole clip; not with --at.
-Sidecars: OUT/meta.json for directories; OUT.meta.json for files, e.g. check.png.meta.json (fps, per-frame camera and depth unit, object_ids pass_index -> node,
+Sidecars: OUT/meta.json for directories; OUT.meta.json for files (fps, per-frame camera and depth unit, object_ids pass_index -> node,
 exposure, warnings [{code,requested,dropped}] for omitted/substituted effects); camera.json in directories or OUT.camera.json for files when camera is a channel (videos always; vork help camera-json).
-EXR sidecar examples: shot.%06d.exr -> shot.exr.meta.json; frames/%06d.exr -> frames/meta.json.
+EXR sidecar names remove %06d and trailing ._- from its filename prefix, keeping
+the extension. A filename of %06d.exr uses directory sidecars in its parent.
 The same naming rule applies to camera.json and timings.json.
 PNG channels: depth and object_index grayscale16 (depth metres per unit in meta.json
 frames[].depth_unit_m); view_normal RGB8 = (v+1)/2; motion RGB16, RG = 0.5+0.5*offset in image

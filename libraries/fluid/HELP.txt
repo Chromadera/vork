@@ -1,11 +1,18 @@
 fluid: APIC/FLIP liquid surfaces, wetting and whitewater (advanced simulation).
-Authoring uses libraries.fluid.build in a source checkout; materials shade surfaces.
+Authoring: from vork.fluid import build (installed Python SDK); materials shade surfaces.
+Install the Python SDK with pip install vork, or from the archive's python directory.
+First use compiles custom simulation shaders and can take several minutes even
+at time zero. Lower image resolution does not reduce shader compilation, simulation
+grid sizes or pressure iterations. --at T replays simulation ticks from zero to T.
+Begin at --at 0 with a coarse grid and small particle budget; then advance time.
+Watch shader/pipeline progress; later runs reuse cached programs. GPU timing depends
+on simulation grids and tick count as well as image resolution.
 Use vork help fluid --all for the simulation reference.
 
 <!-- all -->
 # Fluid simulation reference
 
-Authoring: libraries.fluid.build (Python, source checkout) returns ordinary scene maps.
+Authoring: vork.fluid.build (Python SDK) returns ordinary scene maps.
 GPU modules: #include "fluid/config.slang", "fluid/solver.slang",
 "fluid/surface.slang", "fluid/whitewater.slang". Includes deliberately share the
 program's generated buffer accessors. Declare struct Inputs {int stage=0;}; in

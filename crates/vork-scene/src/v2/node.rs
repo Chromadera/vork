@@ -161,8 +161,9 @@ pub enum NodeKind {
         #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "light.image", "x-help" = "image-name|inline image|null; LM-63 Type C IES (path only); non-environment lights; emits -Z, no peak normalization"))]
         #[schemars(with = "Option<NameOr<Image>>")]
         image: Option<String>,
-        // Retained for legacy input and internal transport tests, absent from the API.
-        #[schemars(skip)]
+        /// Physical world fog material on an environment light.
+        #[schemars(extend("x-source" = "vork (physical medium)", "x-help-path" = "light.medium", "x-help" = "material-name|inline material|null; environment only; authored medium program for world fog"))]
+        #[schemars(with = "Option<NameOr<Material>>")]
         medium: Option<String>,
         /// Environment radiance material instance.
         #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "light.material", "x-help" = "material-name|inline material|null; environment program"))]

@@ -24,7 +24,7 @@ impl Store {
         store.trim();store
     }
     pub fn new(adapter: &wgpu::AdapterInfo) -> Self {
-        let device_identity = blake3::hash(format!("{adapter:?}").as_bytes());
+        let device_identity = device_identity(adapter);
         let mut identity = blake3::Hasher::new();
         identity.update(env!("VORK_BUILD_ID").as_bytes());
         identity.update(device_identity.as_bytes());
@@ -67,6 +67,7 @@ impl Store {
     }
     /// Also trim on startup/shutdown, including stores left by older builds.
     pub fn trim(&self) {
+        network_notice(&self.root);
         let _ = (|| -> std::io::Result<()> {
             let _lock = lock_store(&self.root)?;
             self.make_room(0)?;
@@ -121,6 +122,17 @@ impl Store {
         }
         bytes
     }
+}
+
+/// What makes a driver blob reusable: the GPU model and the driver build, never where the card
+/// sits. The PCI bus address (and anything else wgpu adds to `AdapterInfo` later) changes from one
+/// machine to the next for the same card and driver, so hashing the whole `Debug` output made every
+/// cloud or multi-GPU machine miss caches built for an identical card. A blob the driver does not
+/// accept is still caught when it is loaded: wgpu validates the pipeline-cache header, and a
+/// rejected blob recompiles.
+fn device_identity(adapter: &wgpu::AdapterInfo) -> blake3::Hash {
+    let wgpu::AdapterInfo { name, vendor, device, device_type, driver, driver_info, backend, .. } = adapter;
+    blake3::hash(format!("{name:?}|{vendor}|{device}|{device_type:?}|{driver:?}|{driver_info:?}|{backend:?}").as_bytes())
 }
 
 /// Optional captures reserve their peak owned bytes before allocating readback
@@ -205,8 +217,8 @@ fn lock_store(root: &Path) -> std::io::Result<fs::File> {
         .truncate(false)
         .open(root.join("store.lock"))?;
     file.lock()?;
-    // A killed writer can leave at most this one reservation. No live writer
-    // can own it while we hold the store lock.
+    // Recover the fixed-name reservation used by older writers. No live
+    // writer can own it while we hold the store lock.
     match fs::remove_file(root.join("store.tmp")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
@@ -241,6 +253,16 @@ fn default_root() -> PathBuf {
     }
     // Unusual service accounts without a home retain best-effort caching.
     std::env::temp_dir().join("vork")
+}
+
+// Bind the integrity envelope to the requested key as well as the bytes. A
+// complete entry returned for a different filename is still an ordinary miss.
+fn entry_hasher(path: &Path) -> blake3::Hasher {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"vork-cache-entry-v2\0");
+    hash.update(path.file_name().unwrap_or_default().as_encoded_bytes());
+    hash.update(b"\0");
+    hash
 }
 
 /// A damaged, absent or oversized entry is an ordinary cache miss.
@@ -294,7 +316,9 @@ pub(crate) fn read_mapped(path: &Path) -> Option<MappedPayload> {
     // them. Neither operation mutates the opened file backing this mapping.
     let mapped = unsafe { memmap2::Mmap::map(&file) }.ok()?;
     let (digest, payload) = mapped.split_at_checked(blake3::OUT_LEN)?;
-    if blake3::hash(payload).as_bytes() != digest {
+    let mut checked = entry_hasher(path);
+    checked.update(payload);
+    if checked.finalize().as_bytes() != digest {
         return None;
     }
     let _ = file.set_times(fs::FileTimes::new().set_modified(SystemTime::now()));
@@ -324,7 +348,9 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> Option<Vec<u8>> {
     payload.try_reserve_exact(payload_len).ok()?;
     payload.resize(payload_len, 0);
     file.read_exact(&mut payload).ok()?;
-    if blake3::hash(&payload).as_bytes() != &digest {
+    let mut checked = entry_hasher(path);
+    checked.update(&payload);
+    if checked.finalize().as_bytes() != &digest {
         return None;
     }
     // Touch only metadata on a hit, never rewrite a large pixel payload.
@@ -366,13 +392,21 @@ fn publish_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<bool> {
     if !store.make_room(incoming)? {
         return Ok(false);
     }
-    let temporary = root.join("store.tmp");
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (temporary, mut file) = loop {
+        let temporary = root.join(format!("store-{}-{}-{}.tmp", std::process::id(),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&temporary) {
+            Ok(file) => break (temporary, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    // Cleanup below only owns a file after exclusive creation succeeds. A
+    // collision must never unlink another client's unpublished file.
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        let mut digest = blake3::Hasher::new();
+        let mut digest = entry_hasher(path);
         for part in parts {
             digest.update(part);
         }
@@ -380,6 +414,7 @@ fn publish_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<bool> {
         for part in parts {
             file.write_all(part)?;
         }
+        file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)
     })();
@@ -390,6 +425,33 @@ fn publish_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_identity_ignores_where_the_card_sits() {
+        let card = |bus: &str, device: u32, driver_info: &str| wgpu::AdapterInfo {
+            name: "NVIDIA L4".into(),
+            vendor: 0x10de,
+            device,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            device_pci_bus_id: bus.into(),
+            driver: "NVIDIA".into(),
+            driver_info: driver_info.into(),
+            backend: wgpu::Backend::Vulkan,
+            subgroup_min_size: 32,
+            subgroup_max_size: 32,
+            transient_saves_memory: false,
+        };
+        let here = card("0000:80:02.0", 0x27b8, "610.57.04");
+        assert_eq!(device_identity(&here), device_identity(&card("0000:00:07.0", 0x27b8, "610.57.04")));
+        assert_ne!(device_identity(&here), device_identity(&card("0000:80:02.0", 0x2bb5, "610.57.04")));
+        assert_ne!(device_identity(&here), device_identity(&card("0000:80:02.0", 0x27b8, "610.58.01")));
+        let mut other = here.clone();
+        other.name = "NVIDIA L40S".into();
+        assert_ne!(device_identity(&here), device_identity(&other));
+        let mut other = here.clone();
+        other.backend = wgpu::Backend::Gl;
+        assert_ne!(device_identity(&here), device_identity(&other));
+    }
 
     #[test]
     fn optional_persistence_reservations_bound_bytes_coalesce_and_release() {
@@ -562,6 +624,8 @@ mod tests {
         opened.read_to_end(&mut bytes).unwrap();
         assert_eq!(&bytes[blake3::OUT_LEN..], b"recent");
         assert_eq!(&*mapped, b"recent");
+        // SMB defers the server-side unlink while a reader handle is open.
+        drop(opened);
         drop(mapped);
         fs::remove_dir_all(root).unwrap();
     }
@@ -612,14 +676,33 @@ mod tests {
             store.path("texture", 1, blake3::hash(b"different source"))
         );
         assert!(read(&path).is_none());
+        write(&path, b"writer A").unwrap();
         std::thread::scope(|scope| {
             for payload in [b"writer A", b"writer B"] {
                 let path = &path;
-                scope.spawn(move || write(path, payload).unwrap());
+                scope.spawn(move || {
+                    for _ in 0..16 { write(path, payload).unwrap(); }
+                });
             }
+            let path = &path;
+            scope.spawn(move || {
+                for _ in 0..128 {
+                    if let Some(data) = read(path) {
+                        assert!(data == b"writer A" || data == b"writer B");
+                    }
+                }
+            });
         });
         let data = read(&path).unwrap();
         assert!(data == b"writer A" || data == b"writer B");
+        let other = store.path("texture", 1, blake3::hash(b"other request"));
+        fs::copy(&path, &other).unwrap();
+        assert!(read(&other).is_none(), "a valid envelope from another key is a miss");
+        assert!(read_mapped(&other).is_none());
+        fs::remove_file(&other).unwrap();
+        fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(17).unwrap();
+        assert!(read(&path).is_none(), "a truncated entry is a miss");
+        write(&path, b"repaired after truncation").unwrap();
         let mut broken = fs::read(&path).unwrap();
         *broken.last_mut().unwrap() ^= 1;
         fs::write(&path, broken).unwrap();
@@ -711,3 +794,55 @@ fn available_space(path: &Path) -> Option<u64> {
     };
     (success != 0).then_some(available)
 }
+
+/// Advise once per process; cache availability never controls rendering.
+fn network_notice(root: &Path) {
+    static NOTICE: std::sync::Once = std::sync::Once::new();
+    let Ok(root) = std::path::absolute(root) else { return };
+    let mut existing = root.as_path();
+    while !existing.exists() {
+        let Some(parent) = existing.parent() else { return };
+        existing = parent;
+    }
+    if network_filesystem(existing) {
+        NOTICE.call_once(|| eprintln!("vork: cache is on a network filesystem; consider a local VORK_CACHE_DIR for reliable, faster caching"));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn network_filesystem(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: statfs initializes info on success and path is NUL terminated.
+    if unsafe { libc::statfs(path.as_ptr(), info.as_mut_ptr()) } != 0 { return false }
+    let info = unsafe { info.assume_init() };
+    #[cfg(target_os = "linux")]
+    {
+        // NFS, SMB/CIFS, SMB2, NCP, 9P, AFS, Ceph and Coda (linux/magic.h).
+        matches!(info.f_type as u64, 0x6969 | 0x517b | 0xff534d42 | 0xfe534d42 |
+            0x564c | 0x01021997 | 0x5346414f | 0x6b414653 | 0x00c36400 | 0x73757245)
+    }
+    #[cfg(target_os = "macos")]
+    { info.f_flags & libc::MNT_LOCAL as u32 == 0 }
+}
+
+#[cfg(windows)]
+fn network_filesystem(path: &Path) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" { fn GetDriveTypeW(root: *const u16) -> u32; }
+    use std::path::{Component, Prefix};
+    let Ok(path) = std::path::absolute(path) else { return false };
+    let Some(Component::Prefix(prefix)) = path.components().next() else { return false };
+    let drive = match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => return true,
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return false,
+    };
+    let root: Vec<u16> = format!("{}:\\", char::from(drive)).encode_utf16().chain(Some(0)).collect();
+    // SAFETY: root is a NUL-terminated drive root; this API retains no pointer.
+    unsafe { GetDriveTypeW(root.as_ptr()) == 4 }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn network_filesystem(_: &Path) -> bool { false }

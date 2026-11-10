@@ -1,4 +1,4 @@
-"""Build the authored water experiment. Numerics and schedule come from libraries.fluid."""
+"""Build the authored water experiment. Numerics and schedule come from vork.fluid."""
 import argparse, json, math, os, struct, subprocess
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
@@ -6,8 +6,8 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--vork',default=os.environ.get('VORK','vork'),help='built vork executable for standard mesh builders')
 args=parser.parse_args()
 import sys
-sys.path.insert(0,str(HERE.parents[1]))
-from libraries.fluid import build
+sys.path.insert(0,str(HERE.parents[1]/'packages'/'python'))
+from vork.fluid import build
 metres_per_unit=1/6
 # One authored cross-section drives both rendering and collision, including bevels.
 BOWL_PROFILE=[[0,-.93],[.88,-.93],[.90,-.91],[.90,-.26],[.88,-.24],[.84,-.24],[.83,-.26],[.83,-.87],[0,-.87]]

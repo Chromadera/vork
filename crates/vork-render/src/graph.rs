@@ -53,7 +53,6 @@ pub(crate) enum Pass {
     Path,
     Reflections,
     Ao,
-    Volume,
     PostSource,
     Denoise,
     Compositor,
@@ -70,7 +69,6 @@ impl Pass {
                 | Pass::Path
                 | Pass::Reflections
                 | Pass::Ao
-                | Pass::Volume
                 | Pass::PostSource
                 | Pass::Compositor
                 | Pass::Resolve
@@ -237,25 +235,25 @@ fn declare(b: &mut Builder, plan: &crate::plan::ScenePlan) {
         .reads(&["deformed vertices", "ray structures", "mesh source areas", "light probe volume", "fibre transport"])
         .writes(&["render images"]);
     b.pass(Depth)
-        .reads(&["deformed vertices"])
+        .reads(if e.trace {&["deformed vertices","ray structures"]} else {&["deformed vertices"]})
         .writes(&["depth 4x", "camera eligibility"]);
     // Visibility draws the depth pass's camera-culled draw commands.
     b.pass(Visibility)
         .when(plan.decoupled)
         .run(Run::Color)
-        .reads(&["deformed vertices", "camera eligibility"])
-        .writes(&["visibility keys", "visibility depth", "visibility slots", "volume receiver samples"]);
+        .reads(if e.trace {&["deformed vertices","camera eligibility","ray structures"]} else {&["deformed vertices","camera eligibility"]})
+        .writes(&["visibility keys", "visibility depth", "visibility slots"]);
     b.pass(Clusters)
         .when(plan.cluster)
         .run(Run::Color)
         .writes(&["cluster light lists"]);
     // Controls: unlit surface responses, no lights or shadows.
     b.pass(Forward)
-        .reads(&["deformed vertices", "depth 4x", "camera eligibility", "render images"])
+        .reads(if e.trace {&["deformed vertices", "depth 4x", "camera eligibility", "render images","ray structures"]} else {&["deformed vertices", "depth 4x", "camera eligibility", "render images"]})
         .writes(&MSAA[1..]);
     b.pass(TransparentControls)
         .when(plan.transparent)
-        .reads(&["deformed vertices", "depth 4x"])
+        .reads(if e.trace {&["deformed vertices", "depth 4x","ray structures"]} else {&["deformed vertices", "depth 4x"]})
         .writes(&MSAA[1..]);
     b.pass(Controls).when(!e.fuse_controls()).reads(MSAA).writes(&[
         "denoising guides",
@@ -268,9 +266,7 @@ fn declare(b: &mut Builder, plan: &crate::plan::ScenePlan) {
     // The shade blends transparent slots over the opaque ones. Its ambient is the
     // opaque surfaces' as far as they are transmitted, replacing the controls'
     // nearest-surface (transparent) ambient.
-    b.pass(Volume).when(plan.volume && !e.path).run(Run::Color)
-        .reads(&["ray structures","cluster light lists","volume receiver samples"]).writes(&["volume receiver samples"]);
-    const SHADE_READS: &[&str] = &["render images", "visibility slots", "visibility keys", "volume receiver samples", "cluster light lists", "ray structures", "light probe volume", "fibre transport", "resolved IDs"];
+    const SHADE_READS: &[&str] = &["render images", "visibility slots", "visibility keys", "cluster light lists", "ray structures", "light probe volume", "fibre transport", "resolved IDs"];
     b.pass(Shade)
         .when(plan.decoupled)
         .run(Run::Color)
@@ -283,6 +279,9 @@ fn declare(b: &mut Builder, plan: &crate::plan::ScenePlan) {
             "decoupled AO normals",
             "reflection records",
             "reflection guides",
+            // Budgeted packets trace before reusing camera records. Reserve
+            // their output from Shade even when this view takes the full path.
+            "full-resolution reflection estimates",
             "AOV resolved",
             "refraction pyramid",
             "refraction receivers",
@@ -581,12 +580,12 @@ impl Graph {
             if nodes.is_empty() {
                 if !pass.is_compute() { steps.push(Step {pass,run,work:Work::Encode}); }
             } else {
-                let count=nodes.len();
+                let spans:Vec<_>=nodes.iter().map(|node|node.span).collect();
                 for (index,mut node) in nodes.into_iter().enumerate() {
-                    // Expanded program passes are ordinary nodes in this graph.
-                    // One timestamp interval covers their entire ordered chain.
-                    node.begin=index==0;
-                    node.end=index+1==count;
+                    // Expanded nodes with the same span share one interval.
+                    // Distinct contiguous stages of a pass own separate pairs.
+                    node.begin=index==0 || spans[index-1]!=node.span;
+                    node.end=index+1==spans.len() || spans[index+1]!=node.span;
                     steps.push(Step {pass,run,work:Work::Compute(node)});
                 }
             }
@@ -613,10 +612,18 @@ pub(crate) struct Dispatch {
     hits: Option<wgpu::BindGroup>,
     /// Group 2 read tables: irradiance and shared ray-visibility tables.
     read_table: Option<wgpu::BindGroup>,
-    /// Volume transport and sample page arrays (resolve_native::PAGE_GROUP).
-    pages: Option<wgpu::BindGroup>,
 }
 impl Dispatch {
+    pub(crate) fn encode_packet(&self,encoder:&mut wgpu::CommandEncoder,specialized:bool) {
+        let mut pass=encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(self.variant.as_ref().map_or(&self.pipeline,|p|p.current(specialized)));
+        pass.set_bind_group(0,&self.bind,self.dynamic_offset.as_slice());
+        if let Some(bind)=&self.material {pass.set_bind_group(1,bind,&[]);}
+        if let Some(bind)=&self.read_table {pass.set_bind_group(2,bind,&[]);}
+        if let Some(bind)=&self.hits {pass.set_bind_group(3,bind,&[]);}
+        let [x,y,z]=self.groups;pass.dispatch_workgroups(x,y,z);
+    }
+
     pub(crate) fn new(
         pipeline: &wgpu::ComputePipeline,
         bind: wgpu::BindGroup,
@@ -632,17 +639,13 @@ impl Dispatch {
             material: None,
             hits: None,
             read_table: None,
-            pages: None,
         }
     }
     pub(crate) fn with_pipeline(mut self, pipeline: crate::pipelines::Drawn<wgpu::ComputePipeline>) -> Self {
         self.variant = Some(pipeline);
         self
     }
-    pub(crate) fn with_pages(mut self, pages: wgpu::BindGroup) -> Self {
-        self.pages = Some(pages);
-        self
-    }
+
     pub(crate) fn with_offset(mut self, offset: u32) -> Self {
         self.dynamic_offset = Some(offset);
         self
@@ -681,7 +684,7 @@ pub(crate) struct Compute {
     end: bool,
 }
 impl Compute {
-    fn encode(
+    fn encode<const SEGMENT:bool>(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queries: &wgpu::QuerySet,
@@ -691,8 +694,8 @@ impl Compute {
         range: std::ops::Range<usize>,
     ) {
         let first = range.start == 0;
-        let begin = self.begin && first;
-        let end = self.end && range.end == self.dispatches.len();
+        let begin = SEGMENT || (self.begin && first);
+        let end = SEGMENT || (self.end && range.end == self.dispatches.len());
         let separate_begin=begin && !self.clear.is_empty();
         if separate_begin {self.marker.as_ref().expect("installed compositor timing marker").encode(encoder,queries,timing::query(self.span));}
         if first { for buffer in &self.clear { encoder.clear_buffer(buffer,0,None); } }
@@ -722,9 +725,7 @@ impl Compute {
             if let Some(hits) = &dispatch.hits {
                 pass.set_bind_group(3, hits, &[]);
             }
-            if let Some(pages) = &dispatch.pages {
-                pass.set_bind_group(crate::resolve_native::PAGE_GROUP, pages, &[]);
-            }
+
             let [x, y, z] = dispatch.groups;
             pass.dispatch_workgroups(x, y, z);
         }
@@ -748,6 +749,7 @@ impl Step {
     /// Only queries written by this recorded step may be resolved. Call after
     /// checking the step's run bit, using the same view as the encoder.
     pub(crate) fn timestamp_mask(&self, view: &crate::view::ViewState) -> u64 {
+        if self.pass==Pass::Reflections && view.decoupled.as_ref().is_some_and(|v|v.packets) {return 0;}
         let mask = |name| crate::timing::mask(name);
         match &self.work {
             Work::Compute(work) => mask(work.span),
@@ -758,10 +760,11 @@ impl Step {
                 Pass::Images => mask("images"),
                 Pass::ImageInputs => mask("image inputs"),
                 Pass::Depth => mask("depth"),
+                Pass::Visibility if view.decoupled.as_ref().is_some_and(|v|v.packets) => 0,
                 Pass::Visibility => mask("visibility"),
                 // Banded shading interleaves its stages: one "shade" span covers them.
                 Pass::Shade if crate::passes::decoupled::fused_active(view) => mask("shade"),
-                Pass::Shade if view.decoupled.as_ref().is_some_and(|v| v.bands > 1) => mask("shade"),
+                Pass::Shade if view.decoupled.as_ref().is_some_and(|v| v.packets || v.bands > 1) => mask("shade"),
                 Pass::Shade => mask("shade") | mask("material compose") | if view.decoupled.as_ref().is_some_and(crate::passes::decoupled::classified) {mask("material classify")} else {0},
                 Pass::Refraction => mask("refraction"),
                 Pass::Clusters if view.lighting.clusters.is_some() => mask("clusters"),
@@ -787,7 +790,7 @@ impl Recorder {
         output: bool,
         dispatches: Vec<Dispatch>,
     ) {
-        debug_assert!(pass.is_compute() && (matches!(pass, Pass::Compositor) || self.0.iter().all(|(p, _)| *p != pass)));
+        debug_assert!(pass.is_compute() && (matches!(pass, Pass::Compositor | Pass::Ao) || self.0.iter().all(|(p, _)| *p != pass)));
         self.0.push((
             pass,
             Compute {
@@ -866,6 +869,7 @@ pub(crate) struct State {
 }
 /// Transient and frame-scoped backings shared by all frame slots and views of
 /// one installed scene. Used only while creating slots.
+pub(crate) type PublicationChecks = std::sync::Arc<Mutex<Vec<(wgpu::SubmissionIndex, Vec<(&'static str, wgpu::Buffer)>)>>>;
 pub(crate) struct Transients {
     intervals: HashMap<&'static str, (u16, u16)>,
     state: crate::residency::Cache<Mutex<State>>,
@@ -874,7 +878,8 @@ pub(crate) struct Transients {
     pub(crate) submit: Mutex<crate::values::ChangeTracker>,
     // An aborted exposure may have submitted prefixes and discarded suffixes.
     // This belongs to the installation, not evictable storage or a frame slot.
-    recording_error: std::sync::OnceLock<String>,
+    pub(crate) recording_error: std::sync::Arc<std::sync::OnceLock<String>>,
+    pub(crate) publication_checks: PublicationChecks,
 }
 impl Transients {
     pub(crate) fn new(graph: &Graph, ledger: &std::sync::Arc<crate::residency::Ledger>) -> Self {
@@ -883,11 +888,12 @@ impl Transients {
             state: crate::residency::Cache::new(ledger),
             submit: Mutex::default(),
             recording_error: Default::default(),
+            publication_checks: Default::default(),
         }
     }
     pub(crate) fn check_recording(&self) -> Result<()> {
         if let Some(error) = self.recording_error.get() {
-            bail!("frame recording previously aborted; reinstall the scene before submitting again: {error}");
+            bail!("frame recording or publication previously failed; reinstall the scene before submitting again: {error}");
         }
         Ok(())
     }
@@ -1054,22 +1060,51 @@ pub(crate) fn encode_view(
     r: &crate::Renderer,
     segments: &mut crate::command_finish::Segments,
 ) -> Result<()> {
+    if step.pass==Pass::Reflections && f.decoupled.as_ref().is_some_and(|v|v.packets) {return Ok(());}
     let split = step.separates();
     if split { crate::command_finish::submission_boundary(r, encoder, segments); }
     match (&step.work, step.pass) {
+        #[cfg(test)]
+        (Work::Compute(work), Pass::Path) if r.test_gpu_segment_times.is_some() => {
+            // The frame still resolves its ordinary span. Keep those endpoints
+            // initialized while individual dispatches use their own query sets.
+            let marker=r.timestamp_marker.get_or_init(||timing::Marker::new(&r.device));
+            marker.encode(encoder,&f.queries,timing::query(work.span));
+            for index in 0..work.dispatches.len() {
+                let wall_start=std::time::Instant::now();
+                let at=timing::query(work.span);
+                let queries=r.device.create_query_set(&wgpu::QuerySetDescriptor {label:Some("medium segment qualification"),ty:wgpu::QueryType::Timestamp,count:at+2});
+                let resolve=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some("medium segment query resolve"),size:256,usage:wgpu::BufferUsages::QUERY_RESOLVE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false});
+                let readback=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some("medium segment query readback"),size:16,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false});
+                work.encode::<true>(encoder,&queries,&f.output_bind,f.color_enabled,!f.variants_pending(),index..index+1);
+                encoder.resolve_query_set(&queries,at..at+2,&resolve,0);
+                encoder.copy_buffer_to_buffer(&resolve,0,&readback,0,16);
+                let (submission,_)=segments.interop(r,encoder,"after medium segment qualification");
+                let (tx,rx)=std::sync::mpsc::channel();
+                readback.map_async(wgpu::MapMode::Read,..,move |value|{let _=tx.send(value);});
+                r.wait(submission)?;
+                rx.recv()??;
+                let mapped=readback.get_mapped_range(..);let ticks:&[u64]=bytemuck::cast_slice(&mapped);
+                let (ms,source)=timing::measured_or_wall(ticks[0],ticks[1],r.queue.get_timestamp_period(),wall_start.elapsed().as_secs_f64()*1000.);
+                if source != "gpu_timestamp" { eprintln!("medium segment {index}: timing fallback {source}={ms:.6}ms"); }
+                drop(mapped);readback.unmap();
+                r.test_gpu_segment_times.as_ref().unwrap().lock().unwrap().push((f.sample_index,index,ms,source));
+            }
+            marker.encode(encoder,&f.queries,timing::query(work.span)+1);
+        }
         (Work::Compute(work), _) if split && !work.dispatches.is_empty() => {
             for begin in (0..work.dispatches.len()).step_by(work.separate) {
                 if begin>0 {crate::command_finish::submission_boundary(r,encoder,segments);}
-                work.encode(encoder,&f.queries,&f.output_bind,f.color_enabled,!f.variants_pending(),begin..(begin+work.separate).min(work.dispatches.len()));
+                work.encode::<false>(encoder,&f.queries,&f.output_bind,f.color_enabled,!f.variants_pending(),begin..(begin+work.separate).min(work.dispatches.len()));
             }
         }
-        (Work::Compute(work), _) => work.encode(encoder, &f.queries, &f.output_bind,
+        (Work::Compute(work), _) => work.encode::<false>(encoder, &f.queries, &f.output_bind,
             f.color_enabled, !f.variants_pending(), 0..work.dispatches.len()),
         (Work::Encode, Pass::Depth) => passes::depth::encode(encoder, f, r),
         (Work::Encode, Pass::Clusters) => passes::clusters::encode(encoder, f),
-        (Work::Encode, Pass::Forward) => passes::forward::encode(encoder, f),
+        (Work::Encode, Pass::Forward) => passes::forward::encode(encoder, f, r),
         (Work::Encode, Pass::Visibility) => passes::decoupled::visibility(encoder, f, r, segments)?,
-        (Work::Encode, Pass::Shade) => passes::decoupled::shade(encoder, f, r)?,
+        (Work::Encode, Pass::Shade) => passes::decoupled::shade(encoder, f, r, segments)?,
         (Work::Encode, Pass::Refraction) => passes::decoupled::refraction(encoder, f, r)?,
         (Work::Encode, Pass::AovResolve) => {if let Some(resolve)=&f.aov_resolve {resolve.encode(encoder);}},
 
@@ -1087,6 +1122,28 @@ pub(crate) fn encode_view(
 mod tests {
     use super::*;
     #[test]
+    fn contiguous_compute_stages_own_complete_timestamp_intervals() -> Result<()> {
+        let mut builder=Builder::default();
+        builder.pass(Pass::Ao).writes(&[VIEW_COLOUR]);
+        let graph=Graph::compile(builder,&[VIEW_COLOUR])?;
+        let mut recorder=Recorder::default();
+        for span in ["gi demand","gi pilots","gi pilots","gi beauty","gi beauty","gi reconstruction","gi reconstruction"] {
+            recorder.compute(Pass::Ao,"GI stage",span,false,Vec::new());
+        }
+        let recorded=graph.record(true,recorder)?;
+        let actual:Vec<_>=recorded.iter().map(|step| {
+            let Work::Compute(work)=&step.work else {panic!("compute stage")};
+            (work.span,work.begin,work.end)
+        }).collect();
+        assert_eq!(actual,vec![
+            ("gi demand",true,true),("gi pilots",true,false),("gi pilots",false,true),
+            ("gi beauty",true,false),("gi beauty",false,true),
+            ("gi reconstruction",true,false),("gi reconstruction",false,true),
+        ]);
+        Ok(())
+    }
+
+    #[test]
     fn recording_failure_survives_transient_eviction() -> Result<()> {
         let ledger = std::sync::Arc::new(crate::residency::Ledger::default());
         let transients = Transients {
@@ -1094,6 +1151,7 @@ mod tests {
             state: crate::residency::Cache::new(&ledger),
             submit: Default::default(),
             recording_error: Default::default(),
+            publication_checks: Default::default(),
         };
         transients.record(|| Ok(()))?;
         let error = transients.record(|| {
@@ -1112,10 +1170,26 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn asynchronous_publication_failure_invalidates_all_slots() -> Result<()> {
+        let ledger = std::sync::Arc::new(crate::residency::Ledger::default());
+        let transients = Transients {
+            intervals: Default::default(), state: crate::residency::Cache::new(&ledger),
+            submit: Default::default(), recording_error: Default::default(),
+            publication_checks: Default::default(),
+        };
+        // A slot retains this handle even after its transient storage is evicted.
+        let slot = transients.recording_error.clone();
+        slot.set("medium work budget exhausted in render-image capture".into()).unwrap();
+        let error = transients.record(|| panic!("invalid publication was reused")).unwrap_err();
+        assert!(error.to_string().contains("reinstall"));
+        assert!(error.to_string().contains("render-image capture"));
+        Ok(())
+    }
+    #[test]
     fn decoupled_shading_follows_culling_and_controls() {
         let mut plan = crate::plan::ScenePlan {
             decoupled: true, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
-            volume: false,  effects: Default::default(),
+            effects: Default::default(),
             draws: Vec::new(), casters: Default::default(), transparent: false,
             deform: false, rays: false, cluster: false,
             samples: 1, aovs: false,
@@ -1163,7 +1237,7 @@ mod tests {
         let mut plan=crate::plan::ScenePlan {
             effects:crate::plan::EffectPlan {compositor:true,outputs:Some(crate::compositor::Dependencies {color:true,..Default::default()}),..Default::default()},
             decoupled:true,exposure_samples:1,visibility_samples:1,screen_refraction:false,
-            volume:false,draws:Vec::new(),casters:Default::default(),transparent:false,
+            draws:Vec::new(),casters:Default::default(),transparent:false,
             deform:false,rays:false,cluster:false,samples:1,aovs:false,
         };
         let graph=Graph::new(&plan,true).unwrap();
@@ -1213,7 +1287,7 @@ mod tests {
                         ..Default::default()
                     },
                     decoupled:!path, exposure_samples:1, visibility_samples:1, screen_refraction:false,
-                    volume:false, draws:Vec::new(), casters:Default::default(), transparent:false,
+                    draws:Vec::new(), casters:Default::default(), transparent:false,
                     deform:true, rays:true, cluster:false, samples:1, aovs:false,
                 };
                 let graph=Graph::new(&plan,true).unwrap();
@@ -1251,7 +1325,6 @@ mod tests {
     fn physical_fibre_transport_is_a_live_lighting_dependency() {
         let plan = crate::plan::ScenePlan {
             decoupled: true, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
-            volume: false,
             effects: crate::plan::EffectPlan { fibre: true, ..Default::default() },
             draws: Vec::new(), casters: Default::default(), transparent: true,
             deform: false, rays: false, cluster: false,
@@ -1271,7 +1344,6 @@ mod tests {
             let plan = crate::plan::ScenePlan {
             decoupled: true, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
                 effects: crate::plan::EffectPlan { probes, image_feedback: image_feedback && probes, ..Default::default() },
-                volume: false,
                 draws: Vec::new(), casters: Default::default(),
                 transparent: false, deform: false,
                 rays: probes, cluster: true, samples: 2, aovs: false,
@@ -1296,25 +1368,24 @@ mod tests {
     #[test]
     fn clustered_lists_precede_raster_consumers() {
         for path in [false, true] {
-            for volume in [false, true] {
+            for cluster in [false, true] {
                 for screen_refraction in [false, true] {
                     if path && screen_refraction {continue;}
                     let plan = crate::plan::ScenePlan {
                         decoupled: !path, exposure_samples: 1, visibility_samples: 1, screen_refraction,
                         effects: crate::plan::EffectPlan { path, ..Default::default() },
-                        volume,
                         draws: Vec::new(), casters: Default::default(),
                         transparent: screen_refraction, deform: false,
-                        rays: path, cluster: !path || volume, samples: 2, aovs: false,
+                        rays: path, cluster, samples: 2, aovs: false,
                     };
                     let graph = Graph::new(&plan, true).unwrap();
                     let index = |p| graph.order.iter().position(|s| s.pass == p);
-                    assert_eq!(index(Pass::Clusters).is_some(), !path || volume);
+                    assert_eq!(index(Pass::Clusters).is_some(), cluster);
                     if let Some(clusters) = index(Pass::Clusters) {
                         assert!(clusters < index(if path { Pass::Path } else { Pass::Shade }).unwrap());
                         if screen_refraction {assert!(clusters < index(Pass::Refraction).unwrap());}
                         let step = &graph.order[clusters];
-                        for _volume_run in [false, true] {
+                        for _repeat in [false, true] {
                             let bits = RunBits { color: true, final_sample: false,
                                 probes: false, fibre: false, images: false, pixels: false };
                             assert!(bits.runs(step.run), "each colour sample needs current camera clusters");
@@ -1339,7 +1410,6 @@ mod tests {
     fn denoiser_retains_controls_before_sample_accumulation() {
         let plan = crate::plan::ScenePlan {
             decoupled: false, exposure_samples: 1, visibility_samples: 1, screen_refraction: false,
-            volume: false,
             effects: crate::plan::EffectPlan {
                 denoise: true,
                 ..Default::default()
@@ -1358,6 +1428,30 @@ mod tests {
         assert!(index(Pass::Controls) < index(Pass::PostSource));
         assert!(index(Pass::PostSource) < index(Pass::Denoise));
         assert!(index(Pass::Denoise) < index(Pass::Resolve));
+    }
+    #[test]
+    fn query_controls_retain_acceleration_without_beauty() {
+        for trace in [false,true] {
+            let plan=crate::plan::ScenePlan {
+                decoupled:false,exposure_samples:1,visibility_samples:1,screen_refraction:false,
+                effects:crate::plan::EffectPlan {path:true,trace,..Default::default()},
+                draws:Vec::new(),casters:Default::default(),transparent:false,
+                deform:false,rays:true,cluster:false,samples:1,aovs:false,
+            };
+            let outputs=crate::compositor::Dependencies {normals:true,..Default::default()};
+            let graph=Graph::for_outputs(&plan,true,Some(outputs)).unwrap();
+            assert!(!graph.runs(Pass::Path));
+            let mut declared=Builder::default();declare(&mut declared,&plan);
+            for pass in [Pass::Depth,Pass::Forward,Pass::TransparentControls] {
+                let node=declared.0.iter().find(|node|node.pass==pass).unwrap();
+                assert_eq!(node.reads.contains(&"ray structures"),trace);
+            }
+            if trace {
+                let index=|pass|graph.order.iter().position(|step|step.pass==pass).unwrap();
+                assert!(index(Pass::Rays)<index(Pass::Depth));
+                assert!(index(Pass::Rays)<index(Pass::Forward));
+            }
+        }
     }
     #[test]
     fn passes_prune_by_sinks() {

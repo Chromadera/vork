@@ -25,8 +25,6 @@ mod resolve_native;
 mod camera_native;
 #[path = "src/surface_native.rs"]
 mod surface_native;
-#[path = "src/visibility_native.rs"]
-mod visibility_native;
 
 /// Each shader owns its entry list beside its source (`<module>.entries`).
 fn entries() -> Vec<(String, String, String)> {
@@ -182,6 +180,9 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
         renderer_registry::generate(true),
     )
     .unwrap();
+    let trace_types="../vork-slang/src/trace_types.slang";
+    println!("cargo:rerun-if-changed={trace_types}");
+    fs::copy(trace_types,generated.join("program_trace.slang")).unwrap();
     let sampling="../vork-slang/src/vork_sampling.slang";
     println!("cargo:rerun-if-changed={sampling}");
     fs::copy(sampling,generated.join("vork_sampling.slang")).unwrap();
@@ -218,20 +219,19 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
         if path.file_stem().is_some_and(|s| s == "resolve") {
             let text = fs::read_to_string(&*path).unwrap();
             *path = generated.join(format!("{name}.slang"));
-            fs::write(&*path, resolve_native::source(&text, entry, Default::default())).unwrap();
+            fs::write(&*path, resolve_native::source(&text, entry)).unwrap();
         }
     }
     fs::write(generated.join("camera_config.slang"),camera_native::config_source()).unwrap();
     fs::write(generated.join("decoupled.slang"),camera_native::evaluation_source(&fs::read_to_string("shaders/decoupled.slang").unwrap())).unwrap();
-    let camera_names:Vec<_>=[false,true].into_iter().flat_map(|msaa|[false,true].into_iter().flat_map(move |ray|["evaluate","evaluate_opaque","index","classify","prefix","scatter","combine","combine_diffusion","receivers"].into_iter().map(move |stage|(msaa,ray,stage)))).filter(|(msaa,_,stage)|!*msaa || matches!(*stage,"combine"|"combine_diffusion")).collect();
+    let camera_names:Vec<_>=[false,true].into_iter().flat_map(|msaa|[false,true].into_iter().flat_map(move |ray|["evaluate","evaluate_opaque","index","classify","prefix","scatter","combine","combine_diffusion"].into_iter().map(move |stage|(msaa,ray,stage)))).filter(|(msaa,_,stage)|!*msaa || matches!(*stage,"combine"|"combine_diffusion")).collect();
     for &(msaa,ray,stage) in &camera_names {
         let name=format!("camera_{}_{}_{}",u8::from(msaa),u8::from(ray),stage);
         let path=generated.join(format!("{name}.slang"));
         fs::write(&path,camera_native::entry_source(if stage=="combine_diffusion" {"combine"} else {stage})).unwrap();
         let mut defines=camera_native::defines(ray);
-        defines.extend(["VORK_SURFACE_MEDIUM".into(),"VORK_SURFACE_MEDIUM_SHARED".into()]);
         if matches!(stage,"index"|"classify"|"prefix"|"scatter") {defines.push("VORK_CAMERA_CLASSIFY".into());}
-        if matches!(stage,"combine"|"combine_diffusion"|"receivers") {defines.push("VORK_COMPOSE_STORED".into());}
+        if matches!(stage,"combine"|"combine_diffusion") {defines.push("VORK_COMPOSE_STORED".into());}
         if stage=="combine_diffusion" {defines.push("VORK_RECEIVER_DIFFUSION".into());}
         if stage=="evaluate_opaque" {defines.push("VORK_CAMERA_OPAQUE".into());}
         if msaa {defines.push("VORK_RASTER_MSAA".into());}
@@ -253,7 +253,6 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
                 let path=generated.join(format!("{name}.slang"));
                 fs::write(&path,forward_variant::late_variant_module(&family.source(),family.camera() && rays)).unwrap();
                 let mut defines=vec!["VORK_NO_IMPLICIT".to_owned(),"VORK_AOV_COUNT=0".to_owned(),"VORK_SURFACE_SLANG_OUTLINE".to_owned()];
-                defines.extend(["VORK_SURFACE_MEDIUM".into(),"VORK_SURFACE_MEDIUM_SHARED".into()]);
                 // All shipped surfaces require installation's no-containment proof.
                 // Candidate record layout is independent: opaque connections keep
                 // the compact reader without retaining the solid discovery walk.
@@ -295,26 +294,6 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
             fs::write(path.with_extension("defines"), format!("VORK_ATTRIBUTES={attributes}")).unwrap();
             streams.push((attributes, module, entry, name.clone()));
             units.push((name, path, entry, stage));
-        }
-    }
-    let mut volume_visibility = Vec::new();
-    for pages in 1..=camera_native::PRECOMPILED_MEDIUM_PAGES {
-        let module = format!("volume_fragments_{pages}");
-        let source = fs::read_to_string("shaders/decoupled_fragments.slang").unwrap()
-            .replace("// SAMPLE_STORAGE", &visibility_native::storage(pages));
-        fs::write(generated.join(format!("{module}.slang")),source).unwrap();
-        for attributes in 0..=8u32 {
-            for entry in ["fs","single_fs","masked_fs"] {
-                if attributes>0 && entry!="masked_fs" {continue;}
-                let name = format!("volume_visibility_{pages}_{attributes}_{entry}");
-                let path = generated.join(format!("{name}.slang"));
-                let source = fs::read_to_string("shaders/decoupled_visibility.slang").unwrap()
-                    .replace("import decoupled_fragments;", &format!("import {module};"));
-                fs::write(&path,source).unwrap();
-                fs::write(path.with_extension("defines"),format!("VORK_VOLUME_VISIBILITY VORK_ATTRIBUTES={attributes}")).unwrap();
-                volume_visibility.push((pages,attributes,entry,name.clone()));
-                units.push((name,path,entry,"fragment"));
-            }
         }
     }
     let mut controls = Vec::new();
@@ -515,8 +494,6 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
     writeln!(rust,"pub(crate) const SURFACES: &[(crate::surface_native::SurfaceKernel,bool,bool,bool,u32,&Compiled)]=&[{}];",surfaces.join(",")).unwrap();
     let stream_consts: Vec<_> = streams.iter().map(|(a,m,e,n)|format!("({a}, \"{m}\", \"{e}\", &{})",n.to_uppercase())).collect();
     writeln!(rust,"pub(crate) const STREAMS: &[(u32,&str,&str,&Compiled)] = &[{}];",stream_consts.join(",")).unwrap();
-    let volume_consts: Vec<_> = volume_visibility.iter().map(|(p,a,e,n)|format!("({p},{a},\"{e}\",&{})",n.to_uppercase())).collect();
-    writeln!(rust,"pub(crate) const VOLUME_VISIBILITY: &[(u32,u32,&str,&Compiled)] = &[{}];",volume_consts.join(",")).unwrap();
     let control_consts: Vec<_> = controls.iter().map(|(a,d,s,h,n)|format!("({a},{d},{s},{h},&{})",n.to_uppercase())).collect();
     writeln!(rust,"pub(crate) const CONTROL_GENERICS: &[(u32,bool,usize,bool,&Compiled)] = &[{}];",control_consts.join(",")).unwrap();
     // Every module a runtime variant compile imports, written to its workspace.
@@ -533,7 +510,7 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
             .filter(|f| f.extension().is_some_and(|e| e == "slang"))
         {
             let stem = file.file_stem().unwrap().to_string_lossy().into_owned();
-            if dir==&generated && !["std_opacity","vork_object","vork_constants","openpbr_core","vork_openpbr_constants","vork_sampling","camera_config","decoupled","material_bindings"].contains(&stem.as_str()) {
+            if dir==&generated && !["std_opacity","vork_object","vork_constants","openpbr_core","vork_openpbr_constants","vork_sampling","program_trace","camera_config","decoupled","material_bindings"].contains(&stem.as_str()) {
                 continue;
             }
             let bytes = fs::read(&file).unwrap();

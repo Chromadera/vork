@@ -6,16 +6,36 @@ use ::vork_scene::v2;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vork_mesh::Plan;
+use crate::geometry_topology::{AttributeDomain, Connectivity, RowMap, Topology, Transition};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Refinement {
     pub(crate) plan: Plan,
     pub(crate) positions: Vec<[f32; 3]>,
+    input_indices: Vec<u32>,
+    input_faces: Option<Vec<u32>>,
+    /// Stable source identities stay separate from weighted output rows.
+    input_vertex_ids: Vec<u64>,
     uv: Vec<[f32; 2]>,
 }
 impl Refinement {
+    pub(crate) fn topology(&self) -> Transition<'_> {
+        Transition {
+            input: Topology { vertices: self.positions.len(), connectivity: self.input_faces.as_ref().map_or(
+                Connectivity::Triangles(&self.input_indices), |counts| Connectivity::Polygons { indices: &self.input_indices, counts }) },
+            output: Topology { vertices: self.plan.stencils.len(), connectivity: Connectivity::Triangles(&self.plan.indices) },
+            vertices: RowMap::Stencils(&self.plan), primitives: RowMap::Indexed(&self.plan.primitive_ids), corners: None,
+            source_vertex_ids: &self.input_vertex_ids,
+        }
+    }
+    fn validate_topology(&self) -> Result<()> {
+        self.topology().validate()
+    }
+    fn vertex_attribute<const N: usize>(&self, values: &[[f32;N]]) -> Vec<[f32;N]> {
+        self.topology().remap(AttributeDomain::Vertex,values).expect("validated subdivision vertex domain").into_owned()
+    }
     pub(crate) fn evaluate(&self, cage: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
-        let positions = self.plan.evaluate(cage);
+        let positions = self.vertex_attribute(cage);
         let normals = self.plan.normals(&positions);
         (positions, normals)
     }
@@ -80,9 +100,15 @@ pub(crate) fn prepare(
     crate::gpu_memory::storage_binding(&limits, "subdivision positions", vertices * 12)?;
     ensure!(indices_count*4 <= limits.max_buffer_size,
         "subdivision triangle indices need {} bytes; device max_buffer_size={} bytes", indices_count*4, limits.max_buffer_size);
-    let path = r.disk_cache.path("subdivision", 1, key.finalize());
+    let path = r.disk_cache.path("subdivision", 2, key.finalize());
     if let Some(bytes) = disk_cache::read(&path) {
         if let Ok(mut baked) = serde_json::from_slice::<Baked>(&bytes) {
+            baked.refinement.validate_topology()?;
+            let count=baked.refinement.plan.stencils.len();
+            ensure!(baked.geometry.vertices.len()==count && baked.refinement.uv.len()==count
+                && baked.geometry.attributes.values().all(|rows|rows.len()==count)
+                && baked.geometry.indices==baked.refinement.plan.indices,
+                "cached subdivision output violates its topology/domain contract");
             baked.geometry.refinement = Some(Arc::new(baked.refinement));
             return Ok(baked.geometry);
         }
@@ -97,31 +123,29 @@ pub(crate) fn prepare(
         limit,
     )?;
     let positions: Vec<_> = geometry.vertices.iter().map(|v| v.POSITION).collect();
-    let uv = plan.evaluate(
-        &geometry
-            .vertices
-            .iter()
-            .map(|v| v.TEXCOORD_0)
-            .collect::<Vec<_>>(),
-    );
-    let refinement = Refinement {
+    let mut refinement = Refinement {
         plan,
         positions,
-        uv,
+        input_indices: indices,
+        input_faces: source.face_vertex_counts.clone(),
+        input_vertex_ids: geometry.vertex_ids.clone(),
+        uv: Vec::new(),
     };
+    refinement.validate_topology()?;
+    refinement.uv = refinement.vertex_attribute(&geometry.vertices.iter().map(|vertex|vertex.TEXCOORD_0).collect::<Vec<_>>());
     let (positions, normals) = refinement.evaluate(&refinement.positions);
     ensure!(
         positions.iter().flatten().all(|v| v.is_finite()),
         "subdivision produced non-finite positions"
     );
-    let uv1 = refinement.plan.evaluate(
+    let uv1 = refinement.vertex_attribute(
         &geometry
             .vertices
             .iter()
             .map(|v| v.TEXCOORD_1)
             .collect::<Vec<_>>(),
     );
-    let colors = refinement.plan.evaluate(
+    let colors = refinement.vertex_attribute(
         &geometry
             .vertices
             .iter()
@@ -148,7 +172,7 @@ pub(crate) fn prepare(
     for (name, values) in &geometry.attributes {
         result
             .attributes
-            .insert(name.clone(), refinement.plan.evaluate(values));
+            .insert(name.clone(), refinement.vertex_attribute(values));
     }
     // Reconstruct tangent space for the new topology and normals.
     tangents(&mut result);
@@ -313,11 +337,47 @@ pub(crate) fn frame_resources(
 mod tests {
     use super::*;
     #[test]
+    #[cfg(vork_private_tests)] // Uses private subdivision scenes.
+    fn subdivision_fixture_frames_preserve_repeated_requests() -> Result<()> {
+        let Some(r)=crate::test_renderer()? else {return Ok(())};
+        for (name,source) in [
+            ("skin",include_str!("../../../examples/subdivision-skin.json")),
+            ("morph",include_str!("../../../examples/subdivision-deform.json")),
+            ("hero",include_str!("../../../scenes/subdivision-hero.json")),
+        ] {
+            let mut scene:serde_json::Value=vork_scene::v2::from_test_str(source)?;
+            let resolution=scene["render"]["resolution"].as_array().unwrap();
+            let width=(resolution[0].as_u64().unwrap()/4).max(32) as u32;
+            let height=(resolution[1].as_u64().unwrap()/4).max(32) as u32;
+            scene["render"]["resolution"]=serde_json::json!([width,height]);
+            v2::replace_integrator(&mut scene,serde_json::json!({"integrator":"raster","samples":4,"fast_gi":null,"reflections":"environment"}));
+            let installed=r.install(v2::from_test_value(scene)?,std::path::Path::new("."))?;
+            let mut slot=installed.create_frame_slot(&r,Default::default())?;
+            let mut images=std::collections::BTreeMap::new();
+            for (index,time) in [0f32,0.25,0.,0.25].into_iter().enumerate() {
+                slot.submit(&installed,&r,time)?;
+                let output=slot.collect(&r)?;
+                ensure!(output.rgba.chunks_exact(4).any(|pixel|pixel[..3].iter().any(|&value|value>100)),"{name}: fixture has no visible lit geometry");
+                if let Some(expected)=images.get(&time.to_bits()) {
+                    ensure!(&output.rgba==expected,"{name}: repeated request at {time} changed the image");
+                } else {images.insert(time.to_bits(),output.rgba.clone());}
+                if let Some(directory)=std::env::var_os("GEOCHAIN_OUT") {
+                    image::save_buffer(std::path::PathBuf::from(directory).join(format!("subdivision-{name}-{index}.png")),&output.rgba,width,height,image::ColorType::Rgba8)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn subdivision_follows_skinning_and_morphs() -> Result<()> {
         let p = vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]];
         let refinement = Arc::new(Refinement {
             plan: Plan::new(4, &[0, 1, 2, 3], Some(&[4]), &[], 1, true, false)?,
             positions: p,
+            input_indices: vec![0,1,2,3],
+            input_faces: Some(vec![4]),
+            input_vertex_ids: Vec::new(),
             uv: vec![[0.; 2]; 9],
         });
         let influences = (0..4)

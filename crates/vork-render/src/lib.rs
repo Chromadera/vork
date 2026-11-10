@@ -6,6 +6,7 @@
 //! compiles the pass order; frame.rs owns FrameSlot and walks it; values.rs
 //! prepares per-frame values;
 //! passes/ encodes each GPU pass.
+mod tool_report;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_runtime;
 mod warnings;
@@ -27,6 +28,7 @@ mod gpu_bc7;
 #[allow(dead_code)]
 mod object_abi;
 mod compute;
+mod compute_trace;
 mod implicit_acceleration;
 mod computed_geometry;
 mod curves;
@@ -47,6 +49,11 @@ mod frame;
 mod command_finish;
 mod denoise;
 mod geometry;
+mod geometry_chain;
+mod geometry_sampling;
+mod geometry_reference;
+mod geometry_stage_source;
+mod geometry_topology;
 mod graph;
 mod import;
 /// The renderer's glTF reader, for callers that inspect an asset before rendering it.
@@ -61,7 +68,6 @@ mod forward_variant;
 mod surface_native;
 mod native;
 mod resolve_native;
-mod visibility_native;
 mod slang_forward;
 mod passes;
 mod pipelines;
@@ -105,7 +111,7 @@ pub use frame::{
 use glam::{Mat4, Vec3};
 use install::EvalNode;
 pub use install::{InstallOptions, InstalledScene};
-pub use frame::{Reservations, FrameRedo};
+pub use frame::{Reservations, FrameRedo, FrameRefused};
 use materials::{Material, TextureInstaller};
 use pipelines::CachedPipelines;
 use plan::EffectPlan;
@@ -165,6 +171,12 @@ struct DeformedVertex {
     POSITION: [f32; 3],
     NORMAL: [f32; 3],
     TANGENT: [f32; 4],
+}
+impl DeformedVertex {
+    const BYTES: u64 = std::mem::size_of::<Self>() as u64;
+    const WORDS: usize = std::mem::size_of::<Self>() / std::mem::size_of::<u32>();
+    const NORMAL_WORD: usize = std::mem::offset_of!(Self, NORMAL) / std::mem::size_of::<u32>();
+    const TANGENT_WORD: usize = std::mem::offset_of!(Self, TANGENT) / std::mem::size_of::<u32>();
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -297,17 +309,16 @@ pub struct Renderer {
     denoiser: Mutex<Option<denoise::Engine>>,
     command_finish: OnceLock<command_finish::CommandFinish>,
     timestamp_marker: OnceLock<timing::Marker>,
-    #[cfg(test)]
-    pub(crate) volume_storage_limit: Option<u64>,
     /// Numerical volume references can vary the internal integration grid.
-    #[cfg(test)]
-    pub(crate) reference_medium_grid: Option<(u32,u32,f32)>,
     /// Equal high-bounce, nonadaptive transport for numerical cross-provider tests.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub reference_transport_bounces: Option<u32>,
     #[cfg(test)]
     pub(crate) reference_transparent_bounces: Option<u32>,
+    /// Synchronous qualification-only timestamps, never a renderer setting.
+    #[cfg(test)]
+    pub(crate) test_gpu_segment_times: Option<Mutex<Vec<(usize,usize,f64,&'static str)>>>,
     /// Replaces a view's per-sample camera evaluation estimate (passes/decoupled.rs).
     #[cfg(test)]
     pub(crate) evaluation_estimate: Option<u64>,
@@ -318,6 +329,9 @@ pub struct Renderer {
     /// The largest device-local memory heap (Vulkan) or the recommended
     /// working set (Metal); u64::MAX where the backend reports neither.
     pub(crate) device_memory: u64,
+    /// Initial native headroom, bounded by device memory. Camera scheduling uses
+    /// a stable quota; querying driver residency per view adds frame latency.
+    pub(crate) camera_memory: u64,
     pub(crate) errors: gpu_memory::Errors,
     pub(crate) residency: std::sync::Arc<residency::Ledger>,
     pub device: wgpu::Device,
@@ -349,6 +363,68 @@ impl Drop for Renderer {
         crate::timing::forget(&self.device);
     }
 }
+/// The GPU a process renders on: `vork render --gpu N` / `vork setup --gpu N` (through `select_gpu`) or
+/// `VORK_GPU=N`, the Nth hardware GPU in PCI bus order (nvidia-smi's index). Unset, wgpu's high-performance
+/// choice. One process per GPU is how a multi-GPU machine splits a frame range; the cache is shared, since its
+/// device key ignores where a card sits. `cpu` explicitly selects a software adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuSelection { Hardware(usize), Cpu }
+impl std::str::FromStr for GpuSelection {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self> {
+        if value == "cpu" { return Ok(Self::Cpu); }
+        value.parse().map(Self::Hardware).map_err(|_| anyhow::anyhow!("invalid GPU selection {value:?}; use a hardware GPU index (0, 1, ...) or cpu"))
+    }
+}
+impl std::fmt::Display for GpuSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::Hardware(index) => write!(f, "{index}"), Self::Cpu => f.write_str("cpu") }
+    }
+}
+static GPU_INDEX: OnceLock<GpuSelection> = OnceLock::new();
+pub fn select_gpu(index: GpuSelection) {
+    let _ = GPU_INDEX.set(index);
+}
+pub fn selected_gpu() -> Result<Option<GpuSelection>> {
+    gpu_index_with_override(std::env::var("VORK_GPU").ok().as_deref(), GPU_INDEX.get().copied())
+}
+fn gpu_index_with_override(env: Option<&str>, explicit: Option<GpuSelection>) -> Result<Option<GpuSelection>> {
+    if let Some(selection) = explicit { return Ok(Some(selection)); }
+    gpu_index(env)
+}
+fn gpu_index(env: Option<&str>) -> Result<Option<GpuSelection>> {
+    match env.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(value) => value.parse().map(Some),
+    }
+}
+/// Hardware adapters in PCI bus order (software adapters such as lavapipe excluded); a stable sort, so
+/// adapters that report no bus address keep the driver's order.
+fn gpu_order(adapters: &[wgpu::AdapterInfo]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..adapters.len()).filter(|&i| adapters[i].device_type != wgpu::DeviceType::Cpu).collect();
+    order.sort_by(|&a, &b| adapters[a].device_pci_bus_id.cmp(&adapters[b].device_pci_bus_id));
+    order
+}
+
+#[test]
+fn gpu_selection_follows_pci_bus_order_and_skips_software_adapters() {
+    let card = |bus: &str, device_type| wgpu::AdapterInfo {
+        name: bus.into(), vendor: 0x10de, device: 0x27b8, device_type, device_pci_bus_id: bus.into(),
+        driver: String::new(), driver_info: String::new(), backend: wgpu::Backend::Vulkan,
+        subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: false,
+    };
+    let adapters = [card("0000:80:03.0", wgpu::DeviceType::DiscreteGpu), card("", wgpu::DeviceType::Cpu),
+        card("0000:00:07.0", wgpu::DeviceType::DiscreteGpu), card("0000:80:02.0", wgpu::DeviceType::DiscreteGpu)];
+    assert_eq!(gpu_order(&adapters), [2, 3, 0]);
+    assert_eq!(gpu_index(Some(" 1 ")).unwrap(), Some(GpuSelection::Hardware(1)));
+    assert_eq!(gpu_index(None).unwrap(), None);
+    assert_eq!(gpu_index(Some("")).unwrap(), None);
+    assert_eq!(gpu_index(Some("cpu")).unwrap(), Some(GpuSelection::Cpu));
+    assert_eq!(gpu_index_with_override(Some("cpu"), Some(GpuSelection::Hardware(2))).unwrap(), Some(GpuSelection::Hardware(2)));
+    assert_eq!(gpu_index_with_override(Some("invalid"), Some(GpuSelection::Cpu)).unwrap(), Some(GpuSelection::Cpu));
+    for value in ["first", "CPU", "-1", "1.5", "lavapipe"] { assert!(gpu_index(Some(value)).is_err()); }
+}
+
 fn supported_backends(selection: Option<&str>) -> Result<wgpu::Backends> {
     let Some(selection) = selection else {
         return Ok(wgpu::Backends::METAL | wgpu::Backends::VULKAN);
@@ -413,8 +489,9 @@ impl Renderer {
         Ok(())
     }
 
-    /// Metal has no wgpu pipeline blob; remember completed shader work in the
-    /// same build/device-keyed store, without pretending to inspect Apple's cache.
+    /// Without a persistent pipeline cache (a Metal GPU without binary archives),
+    /// remember completed shader work in the same build/device-keyed store,
+    /// without pretending to inspect Apple's shared shader cache.
     pub fn shader_cache_cold(&self) -> bool {
         matches!(self.pipeline_cache_status, "empty" | "rejected")
             || (self.pipeline_cache_status == "unsupported"
@@ -423,6 +500,10 @@ impl Renderer {
 
     /// Report actual device/tool availability before warming shaders.
     pub fn setup_report(&self, out: &mut impl std::io::Write) -> Result<()> {
+        self.setup_report_verbose(out, false)
+    }
+    /// Include captured subprocess diagnostics only when explicitly requested.
+    pub fn setup_report_verbose(&self, out: &mut impl std::io::Write, verbose: bool) -> Result<()> {
         macro_rules! report {
             ($($arg:tt)*) => { writeln!(out, $($arg)*)? };
         }
@@ -460,24 +541,23 @@ impl Renderer {
         match std::process::Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output() {
             Ok(output) if output.status.success() => {
                 let listing = String::from_utf8_lossy(&output.stdout);
-                if cfg!(any(target_os = "linux", target_os = "windows")) && listing.contains("h264_nvenc") {
-                    match vork_encode::probe_ffmpeg_nvenc(256, 256) {
-                        Ok(()) => report!("FFmpeg NVENC: initialization ready"),
-                        Err(error) => {
-                            report!("FFmpeg NVENC: unusable with this driver; readback MP4 falls back to software libx264 if installed. Update the NVIDIA driver or install a compatible FFmpeg build. {error:#}");
-                            if cfg!(target_os = "linux") { report!("Native NVENC: checked separately at video output initialization; FFmpeg's NVENC API mismatch does not disable the native encoder."); }
-                        }
+                if cfg!(any(target_os = "linux", target_os = "windows")) {
+                    if listing.contains("h264_nvenc") {
+                        tool_report::encoder_probe(out, "FFmpeg h264_nvenc", vork_encode::probe_ffmpeg_nvenc(256, 256), verbose)?;
+                    } else {
+                        report!("FFmpeg h264_nvenc: not installed; readback MP4 uses libx264 if available");
                     }
                 }
-                report!("FFmpeg: {}; {}", if listing.contains("libx264") { "libx264 fallback available" } else if cfg!(target_os = "macos") { "libx264 fallback absent (optional; native VideoToolbox MP4 needs no FFmpeg)" } else { "WARNING: libx264 missing; install ffmpeg with libx264 (Windows: ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/) and add bin to PATH" }, if cfg!(target_os = "linux") { "required for MP4 muxing, including native NVENC" } else if cfg!(target_os = "macos") { "optional for native VideoToolbox MP4" } else { "required for MP4/MOV" });
-                report!("MOV: {}", if listing.contains("prores_ks") { "ffmpeg prores_ks available" } else { "prores_ks unavailable; install an ffmpeg build with prores_ks" });
+                report!("FFmpeg libx264: {}; {}", if listing.contains("libx264") { "fallback available (listed; initialization checked when opening output)" } else if cfg!(target_os = "macos") { "libx264 fallback absent (optional; native VideoToolbox MP4 needs no FFmpeg)" } else { "WARNING: libx264 missing; install ffmpeg with libx264 (Windows: ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/) and add bin to PATH" }, if cfg!(target_os = "linux") { "required for MP4 muxing, including native NVENC" } else if cfg!(target_os = "macos") { "optional for native VideoToolbox MP4" } else { "required for MP4/MOV" });
+                report!("FFmpeg prores_ks: {}", if listing.contains("prores_ks") { "MOV available (listed; initialization checked when opening output)" } else { "prores_ks unavailable; install an ffmpeg build with prores_ks" });
             }
             _ if cfg!(target_os = "macos") => report!("FFmpeg: missing or unusable; native VideoToolbox MP4 is ready without FFmpeg; MOV fallback needs ffmpeg prores_ks (brew install ffmpeg). Encoder availability is checked when opening video output."),
             _ => report!("FFmpeg: missing or unusable; required for MP4/MOV, including Linux native NVENC muxing. Install ffmpeg (Ubuntu: sudo apt install ffmpeg; Windows: winget install Gyan.FFmpeg, or extract ffmpeg-release-essentials.zip from https://www.gyan.dev/ffmpeg/builds/ and add its bin folder to PATH). PNG/EXR remain available."),
         }
         report!("Cache: {}", self.cache_path.parent().unwrap_or(&self.cache_path).display());
         match self.pipeline_cache_status {
-            "unsupported" if self.adapter_info.backend == wgpu::Backend::Metal => report!("Pipeline cache: managed by the Metal driver; setup warms it. Compiled shader assets use the cache above."),
+            "unsupported" if self.adapter_info.device_type == wgpu::DeviceType::Cpu => report!("Pipeline cache: disabled on software adapters to avoid a lavapipe compiler crash. Portable shader artifacts and Mesa's own shader disk cache remain available."),
+            "unsupported" if self.adapter_info.backend == wgpu::Backend::Metal => report!("Pipeline cache: this Metal GPU has no binary archives; Apple's shared shader cache may keep what setup compiles but evicts large pipelines. Compiled shader assets use the cache above."),
             "unsupported" => report!("Pipeline cache: driver does not expose persistent pipeline caching; compiled shader assets still use the cache above."),
             status => report!("Pipeline cache: {status} for this build and GPU driver"),
         }
@@ -503,7 +583,7 @@ impl Renderer {
         for path in scenes {
             // Use real installed material unions, bindings and program links,
             // rather than a Cartesian product of independent capability bits.
-            let scene = Scene::from_json(&vork_std::load_scene(path)?)?;
+            let scene = load_scene_document(path)?;
             for profile in ["std/final", "std/path"] {
                 let mut scene = scene.clone();
                 scene.render.resolution = [64, 64];
@@ -555,29 +635,50 @@ impl Renderer {
                 let _guard = INSTANCE_INIT.lock().map_err(|_| anyhow::anyhow!("GPU instance initialization lock poisoned"))?;
                 if INSTANCE.get().is_none() {
                     // Failed initialization remains retryable in library callers.
-                    let _ = INSTANCE.set(make_instance()?);
+                    let _ = INSTANCE.set(make_instance().map_err(|error| error.context(rt::adapter_help()))?);
                 }
             }
             INSTANCE.get().unwrap()
         };
         let instance_ms = start.elapsed().as_secs_f64() * 1000.;
         let adapter_start = Instant::now();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
-            })
-            .await.map_err(|error| {
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
-                {
-                    let diagnostic = vulkan_runtime::adapter_failure(instance, &error);
-                    return anyhow::Error::new(error).context(diagnostic);
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-                anyhow::Error::new(error).context("No usable GPU adapter exposed by the platform driver; check the graphics driver and device access (Metal requires Apple Silicon)")
-            })?;
+        let selected = if prepare_release { None } else { selected_gpu()? };
+        let adapter = if selected == Some(GpuSelection::Cpu) {
+            instance.enumerate_adapters(backends).await.into_iter().find(|adapter| {
+                adapter.get_info().device_type == wgpu::DeviceType::Cpu
+                    && adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY | rt::HIT_BUFFER_FEATURES)
+            }).ok_or_else(|| anyhow::anyhow!("No CPU Vulkan adapter with ray queries and storage buffer arrays. {}", rt::adapter_help()))?
+        } else if let Some(GpuSelection::Hardware(index)) = selected {
+            let adapters = instance.enumerate_adapters(backends).await;
+            let infos: Vec<_> = adapters.iter().map(wgpu::Adapter::get_info).collect();
+            let order = gpu_order(&infos);
+            let Some(&chosen) = order.get(index) else {
+                anyhow::bail!("GPU {index} was requested (--gpu or VORK_GPU), but this machine has {} GPU(s); use 0 to {}",
+                    order.len(), order.len().saturating_sub(1));
+            };
+            adapters.into_iter().nth(chosen).expect("index from the same enumeration")
+        } else {
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    ..Default::default()
+                })
+                .await.map_err(|error| {
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    {
+                        let diagnostic = vulkan_runtime::adapter_failure(instance, &error);
+                        return anyhow::Error::new(error).context(diagnostic);
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                    anyhow::Error::new(error).context("No usable GPU adapter exposed by the platform driver; check the graphics driver and device access (Metal requires Apple Silicon)")
+                })?
+        };
         let adapter_ms = adapter_start.elapsed().as_secs_f64() * 1000.;
         if !prepare_release { rt::require_adapter(&adapter.get_info(), adapter.features())?; }
+        if !prepare_release && adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+            eprintln!("GPU: software rendering on the CPU; expect slow renders.");
+            eprintln!("First-run CPU shader compilation can take several minutes. vork's pipeline cache is disabled due to a lavapipe compiler crash; Mesa's own shader disk cache can still speed later runs.");
+        }
         let requirements_start = Instant::now();
         let ray_queries = ray_queries(&adapter)?;
         let requirements_ms = requirements_start.elapsed().as_secs_f64() * 1000.;
@@ -786,26 +887,26 @@ impl Renderer {
         };
         // Pipelines the accepted blob already holds; an empty or rejected blob holds none.
         let known_path = disk_cache.path("pipeline-keys", 1, blake3::hash(b""));
-        // Metal has no wgpu blob: the system shader cache holds what earlier processes
-        // (`vork setup`) compiled, recorded by the shader-warm marker (shader_cache_cold).
+        // Metal GPUs without binary archives have no blob: Apple's shared shader cache
+        // holds what earlier processes (`vork setup`) compiled, recorded by the
+        // shader-warm marker (shader_cache_cold). It can evict large pipelines.
         let warm_system_cache = info.backend == wgpu::Backend::Metal
             && disk_cache::read(&disk_cache.path("shader-warm", 1, blake3::hash(b""))).is_some();
         let known = pipelines::Known::load(known_path, pipeline_cache_status == "accepted" || warm_system_cache);
         let compiler = pipelines::Compiler::new(&device, cache.as_ref(), known);
         let pipelines = pipelines::Registry::default();
         errors.check()?;
+        let camera_memory=residency::available(&device).unwrap_or(device_memory).min(device_memory);
         Ok(Self {
             denoiser: Mutex::new(None),
             command_finish: OnceLock::new(),
             timestamp_marker: OnceLock::new(),
-            #[cfg(test)]
-            volume_storage_limit: None,
-            #[cfg(test)]
-            reference_medium_grid: None,
             #[cfg(any(test, feature = "test-support"))]
             reference_transport_bounces: None,
             #[cfg(test)]
             reference_transparent_bounces: None,
+            #[cfg(test)]
+            test_gpu_segment_times: None,
             #[cfg(test)]
             evaluation_estimate: None,
             #[cfg(test)]
@@ -817,6 +918,7 @@ impl Renderer {
             release_preparation: prepare_release,
             max_texture_allocation,
             device_memory,
+            camera_memory,
             residency,
             startup: start.elapsed(),
             startup_stages_ms: [
@@ -846,7 +948,6 @@ impl Renderer {
         &self,
         source: &str,
         resolve: &str,
-        native: Option<&medium::Native>,
         raster_samples: u32,
         ray_shadows: bool,
         slang: slang_forward::SlangScene,
@@ -860,7 +961,6 @@ impl Renderer {
             self,
             source,
             resolve,
-            native,
             raster_samples,
             ray_shadows,
             slang,
@@ -885,7 +985,6 @@ impl Renderer {
                 self,
                 "",
                 RESOLVE,
-                None,
                 raster_samples,
                 false,
                 Default::default(),
@@ -976,6 +1075,28 @@ impl Renderer {
         base: &Path,
         options: InstallOptions,
     ) -> Result<InstalledScene> {
+        let origins = scene.origins.clone();
+        let program_files = scene.programs.iter().filter_map(|(name, program)|
+            program.file.as_ref().map(|file| (name.clone(), file.clone()))).collect::<Vec<_>>();
+        self.install_with_options_inner(scene, base, options)
+            .map_err(|error| {
+                let kind = failure::kind(&error);
+                let text = format!("{error:#}").replace('\\', "/");
+                // File-backed compiler diagnostics name their file, not the scene table key.
+                let programs = program_files.iter().filter(|(_, file)| {
+                    let file = file.replace('\\', "/");
+                    [format!("{file}:"), format!("{file}("), format!("read {file}")]
+                        .iter().any(|label| text.contains(label))
+                }).map(|(name, _)| format!("program {name}")).collect::<Vec<_>>();
+                let error = if programs.is_empty() { error } else { error.context(programs.join("; ")) };
+                let error = vork_scene::v2::diagnostics::authored_error(&origins, error);
+                match kind {
+                    Some(kind) if error.downcast_ref::<failure::FailureKind>().is_none() => error.context(kind),
+                    _ => error,
+                }
+            })
+    }
+    fn install_with_options_inner(&self, scene: Scene, base: &Path, options: InstallOptions) -> Result<InstalledScene> {
         options.initial_time.numeric().context("initial scene time must be finite")?;
         self.errors.check()?;
         let start = Instant::now();
@@ -986,18 +1107,29 @@ impl Renderer {
         }
         // Delivery drivers retain release admission, including test-support builds.
         #[cfg(any(test, feature = "test-support"))]
-        let allow_media = options.test_participating_media;
+        let experimental_media = options.test_participating_media;
         #[cfg(not(any(test, feature = "test-support")))]
-        let allow_media = false;
+        let experimental_media = false;
         scene.validate()?;
-        let stages=install::admit_delivery_effects(self,&scene,base,allow_media)?;
-        scene.delivery=!allow_media;
-        if !allow_media {
-            programs::normalize_launch_bindings(self,&mut scene,base,&stages)?;
+        scene.delivery=!experimental_media;
+        if scene.delivery {
+            let original=programs::mesh_stages(self,&scene,base)?;
+            fn world_medium(nodes:&[vork_scene::v2::Node])->bool {
+                nodes.iter().any(|node|matches!(node.kind,vork_scene::v2::NodeKind::Light {medium:Some(_),..}) || world_medium(&node.children))
+            }
+            if original.values().any(|stage|stage.medium) || world_medium(&scene.nodes) {
+                let (_,facts)=install::admit_delivery_effects(self,&scene,base,true)?;
+                if facts.media {
+                    ensure!(scene.propagation.is_none(), "stage 1 fog does not support authored propagation; use straight rays or render the fog externally");
+                    ensure!(scene.materials.iter().all(|(name,m)| !original.get(name).is_some_and(|s|s.surface) || m.program=="std/openpbr"), "stage 1 fog does not support custom surface callbacks; use std/openpbr or render the fog externally");
+                    ensure!(!scene.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit)), "stage 1 fog does not support implicit geometry; bake triangle meshes first");
+                }
+            }
+            programs::normalize_launch_bindings(self,&mut scene,base,&original)?;
         }
-        catcher::promote(&mut scene);
+        let (stages,transport_facts)=install::admit_delivery_effects(self,&scene,base,true)?;
         let automatic_probes=rt::automatic_indirect_requested(&scene);
-        rt::resolve_scene_providers(self,&mut scene,base)?;
+        rt::resolve_scene_providers(self,&mut scene,base,transport_facts,&stages)?;
         rt::resolve_indirect(&mut scene,self.device.features())?;
         rt::resolve_reflections(&mut scene);
         rt::resolve_refraction(&mut scene, self.adapter_info.device_type, self.device.features());
@@ -1008,10 +1140,10 @@ impl Renderer {
         animation::fold_material_inputs(&mut scene, base)?;
         if scene.propagation.is_some() && !scene.render.settings.integrator.is_path() {
             eprintln!("warning: authored curved propagation uses std/path transport for this scene and its render-image captures");
-            rt::promote_indirect_to_path(&mut scene);
+            rt::promote_to_path(&mut scene);
         }
         let camera_controls=camera_program::promote(self,&mut scene,base,&options.initial_time)?;
-        if !scene.render.settings.integrator.is_path() && camera_program::scene_spectral(self,&scene,base)? {rt::promote_indirect_to_path(&mut scene);}
+        if !scene.render.settings.integrator.is_path() && camera_program::scene_spectral(self,&scene,base)? {rt::promote_to_path(&mut scene);}
         if scene.render.settings.integrator.denoiser().is_some() {
             if let Err(error) = denoise::ensure_runtime(self) {
                 crate::warnings::dropped("denoiser_unavailable", serde_json::json!({"denoise":true}), format!("warning: OIDN unavailable; rendering without denoising: {error:#}. Keep the bundled oidn runtime beside vork, or use --set denoise=false."));
@@ -1083,7 +1215,25 @@ impl Renderer {
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_media_for_test(&self, scene: Scene, base: &Path) -> Result<InstalledScene> {
         self.install_with_options(scene, base, InstallOptions {
-            test_participating_media: true, ..Default::default()
+            test_participating_media: true, test_volume_bounces: 64, ..Default::default()
+        })
+    }
+    /// Isolate direct medium connections for single-scattering analytic oracles.
+    /// Production media retains complete-camera multiple scattering.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_single_scatter_media_for_test(&self, scene: Scene, base: &Path) -> Result<InstalledScene> {
+        self.install_with_options(scene, base, InstallOptions {
+            test_participating_media: true, test_volume_bounces: 0, ..Default::default()
+        })
+    }
+    /// Decision D finite-carrier experiment; never enables delivery admission.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_convex_media_for_test(&self, scene: Scene, base: &Path) -> Result<InstalledScene> {
+        self.install_with_options(scene, base, InstallOptions {
+            test_participating_media: true, test_volume_bounces: 64,
+            test_convex_media: true, test_convex_work_limit: Some(131072), ..Default::default()
         })
     }
     pub fn install(&self, scene: Scene, base: &Path) -> Result<InstalledScene> {
@@ -1116,12 +1266,18 @@ pub fn validate(scene: &Scene) -> Result<()> {
     Ok(())
 }
 /// Load and validate a scene file; its directory is the install base.
+fn load_scene_document(path: &Path) -> Result<Scene> {
+    let bytes = std::fs::read(path)?;
+    let mut document = serde_json::from_slice(vork_scene::v2::diagnostics::without_bom(&bytes))?;
+    vork_std::expand_scene(&mut document, path.parent().unwrap_or(Path::new(".")))?;
+    Scene::from_json_with_source(&serde_json::to_vec(&document)?, &bytes, Some(path))
+}
 /// A repository scene with its authored render settings: `X.json` plus, when
 /// present, the sibling profile `X.profile.json` (the repo's convention for its
 /// own scenes, used by tests and harnesses; users pick profiles at render time).
 #[doc(hidden)]
 pub fn load_authored(path: &Path) -> Result<Scene> {
-    let mut scene = Scene::from_json(&vork_std::load_scene(path)?).with_context(|| format!("load scene {}", path.display()))?;
+    let mut scene = load_scene_document(path).with_context(|| format!("load scene {}", path.display()))?;
     let sibling = path.with_file_name(format!("{}.profile.json", path.file_stem().unwrap_or_default().to_string_lossy()));
     if sibling.exists() {
         let profile = vork_scene::Profile::load(&sibling.to_string_lossy())?;
@@ -1154,15 +1310,14 @@ pub fn test_scene(mut document: serde_json::Value, base: &Path) -> Result<Scene>
 /// Production profiles and CLI overrides never accept these controls.
 #[cfg(any(test, feature = "test-support"))]
 pub fn load_test_fixture(path: &Path, techniques: &str) -> Result<Scene> {
-    let mut scene = Scene::from_json(&vork_std::load_scene(path)?)?;
+    let mut scene = load_scene_document(path)?;
     scene.apply_settings(serde_json::from_str(techniques)?, "test fixture")?;
     validate(&scene).with_context(|| format!("load test fixture {}", path.display()))?;
     Ok(scene)
 }
 /// Load content and resolved settings, apply the optional rewrite, then validate renderer support.
 pub(crate) fn load_with_settings(path: &Path, settings: vork_scene::Settings, profile: &str, edit: Option<shot::SceneEdit>) -> Result<Scene> {
-    let mut scene = vork_std::load_scene(path)
-        .and_then(|bytes| Scene::from_json(&bytes)).with_context(|| format!("load scene {}", path.display()))?;
+    let mut scene = load_scene_document(path).with_context(|| format!("load scene {}", path.display()))?;
     scene.apply_settings(settings, profile)
         .with_context(|| format!("load scene {} with profile {profile}", path.display()))?;
     if let Some(edit) = edit {
@@ -1173,7 +1328,7 @@ pub(crate) fn load_with_settings(path: &Path, settings: vork_scene::Settings, pr
     Ok(scene)
 }
 pub fn load(path: &Path) -> Result<Scene> {
-    let scene = Scene::from_json(&vork_std::load_scene(path)?).with_context(|| format!("load scene {}", path.display()))?;
+    let scene = load_scene_document(path).with_context(|| format!("load scene {}", path.display()))?;
     validate(&scene).with_context(|| format!("load scene {}", path.display()))?;
     Ok(scene)
 }
@@ -1296,7 +1451,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    #[ignore = "requires a Vulkan device with a persistent pipeline cache"]
+    #[ignore = "requires a Vulkan device or Metal binary archives (a persistent pipeline cache)"]
     fn shader_cache_retries_failed_driver_publication() -> Result<()> {
         let mut renderer = Renderer::new()?;
         if renderer.adapter_info.device_type == wgpu::DeviceType::Cpu
@@ -1337,6 +1492,57 @@ mod tests {
         assert!(renderer.compiler.known_snapshot().is_none());
         drop(renderer);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    /// A Metal binary archive that wgpu's header accepts but Metal cannot open is
+    /// rejected with a reason, never a failed render: the process compiles into
+    /// a fresh archive and rewrites the entry, which the next process accepts.
+    #[test]
+    #[ignore = "requires a Metal GPU with binary archives"]
+    fn metal_contract_corrupt_archive_recompiles_and_rewrites() -> Result<()> {
+        const CHILD: &str = "VORK_CORRUPT_ARCHIVE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let root = std::env::temp_dir().join(format!("vork-corrupt-archive-{}", std::process::id()));
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "tests::metal_contract_corrupt_archive_recompiles_and_rewrites", "--ignored", "--nocapture"])
+                .env(CHILD, "1").env("VORK_CACHE_DIR", &root).status()?;
+            let _ = std::fs::remove_dir_all(&root);
+            anyhow::ensure!(status.success(), "corrupt archive child failed");
+            return Ok(());
+        }
+        let compile = |renderer: &Renderer| -> Result<()> {
+            let module = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("archive contract"),
+                source: wgpu::ShaderSource::Wgsl("@group(0) @binding(0) var<storage, read_write> out: array<u32>;\n@compute @workgroup_size(1) fn main() { out[0] = 7u; }".into()),
+            });
+            let _pipeline = renderer.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("archive contract"), layout: None, module: &module,
+                entry_point: Some("main"), compilation_options: Default::default(),
+                cache: renderer.cache.as_ref(),
+            });
+            renderer.errors.check()?;
+            renderer.settle_pipelines()
+        };
+        let first = metal_contract_renderer()?;
+        anyhow::ensure!(first.cache.is_some(), "Metal binary archives required: {:?}", first.adapter_info);
+        compile(&first)?;
+        let saved = disk_cache::read_pipeline(&first.cache_path).expect("archive saved");
+        let path = first.cache_path.clone();
+        drop(first);
+        // Keep wgpu's valid header (GPU and OS key); replace the archive body.
+        let header = 64;
+        let mut corrupt = saved[..header].to_vec();
+        corrupt.extend(std::iter::repeat_n(0xA5, saved.len() - header));
+        anyhow::ensure!(disk_cache::write_entry(&path, &corrupt)?, "corrupt entry not written");
+        let second = metal_contract_renderer()?;
+        assert_eq!(second.pipeline_cache_status, "rejected");
+        let reason = second.pipeline_cache_rejection.clone().unwrap_or_default();
+        assert!(reason.contains("binary archive"), "{reason}");
+        assert!(second.cache.is_some(), "a rejected archive recovers with an empty one");
+        compile(&second)?;
+        drop(second);
+        let third = metal_contract_renderer()?;
+        assert_eq!(third.pipeline_cache_status, "accepted");
         Ok(())
     }
     #[test]
@@ -1591,9 +1797,13 @@ include!("lib_path_dielectric_tests_private.rs");
 #[cfg(test)]
 mod implicit_cell_tests;
 #[cfg(test)]
+mod sample_clamp_tests;
+#[cfg(test)]
 mod implicit_scene_tests;
 #[cfg(test)]
 mod path_texture_tests;
+#[cfg(all(test, vork_private_tests))]
+mod trace_tests;
 #[cfg(all(test, vork_private_tests))]
 include!("lib_path_medium_tests_private.rs");
 
@@ -1626,8 +1836,6 @@ mod visibility_regressions;
 #[cfg(test)]
 mod instance_attribute_tests;
 
-#[cfg(test)]
-mod world_tail_tests;
 
 #[cfg(test)]
 mod light_connection_tests;

@@ -16,7 +16,8 @@ from runtime_platform import check_runtime_platform
 import struct
 
 PAYLOAD = b"compiled shader fixture"
-ENVELOPE = blake3(PAYLOAD).digest() + PAYLOAD
+def envelope(name):
+    return blake3(b'vork-cache-entry-v2\0' + name.encode() + b'\0' + PAYLOAD).digest() + PAYLOAD
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -91,7 +92,7 @@ class PackageReleaseTests(unittest.TestCase):
             cache = root / 'cache'
             cache.mkdir()
             shader = 'a' * 64 + '.slang-variant-v1.entry'
-            (cache / shader).write_bytes(ENVELOPE)
+            (cache / shader).write_bytes(envelope(shader))
             (cache / ('b' * 64 + '.pipeline-v1.entry')).write_bytes(b'driver')
             export(binary, [cache], root / 'bundle')
             package(binary, root / 'bundle', root / 'shaders')
@@ -109,23 +110,33 @@ class PackageReleaseTests(unittest.TestCase):
             root=Path(tmp); binary=root/'vork'; binary.write_bytes(b'binary')
             cache=root/'cache'; cache.mkdir()
             name='a'*64+'.slang-variant-v1.entry'
-            for index,data in enumerate((b'x'*64, ENVELOPE[:-1]+b'!', b'x'*32, b'')):
+            for index,data in enumerate((b'x'*64, envelope(name)[:-1]+b'!', b'x'*32, b'')):
                 (cache/name).write_bytes(data)
                 output=root/str(index)
                 with self.assertRaisesRegex(ValueError,'corrupt shader artifact'):
                     export(binary,[cache],output)
                 self.assertFalse(output.exists())
 
+    def test_misplaced_valid_entry_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); binary = root / 'vork'; binary.write_bytes(b'binary')
+            cache = root / 'cache'; cache.mkdir()
+            name = 'a' * 64 + '.slang-variant-v1.entry'
+            other = 'b' * 64 + '.slang-variant-v1.entry'
+            (cache / other).write_bytes(envelope(name))
+            with self.assertRaisesRegex(ValueError, 'corrupt shader artifact'):
+                export(binary, [cache], root / 'output')
+
     def test_valid_duplicate_wins_in_either_store_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); binary=root/'vork'; binary.write_bytes(b'binary')
             good=root/'good'; good.mkdir(); bad=root/'bad'; bad.mkdir()
             name='a'*64+'.slang-program-v2.entry'
-            (good/name).write_bytes(ENVELOPE); (bad/name).write_bytes(b'x'*64)
+            (good/name).write_bytes(envelope(name)); (bad/name).write_bytes(b'x'*64)
             for index,caches in enumerate(([good,bad],[bad,good])):
                 output=root/str(index)
                 export(binary,caches,output)
-                self.assertEqual((output/name).read_bytes(),ENVELOPE)
+                self.assertEqual((output/name).read_bytes(),envelope(name))
                 package(binary,output,root/f'packaged-{index}')
 
     def test_prepare_shader_command(self):
@@ -138,7 +149,7 @@ class PackageReleaseTests(unittest.TestCase):
             cache = root / 'cache'
             cache.mkdir()
             shader = 'a' * 64 + '.slang-variant-v1.entry'
-            (cache / shader).write_bytes(ENVELOPE)
+            (cache / shader).write_bytes(envelope(shader))
             subprocess.run([sys.executable, str(ROOT / 'scripts/prepare-shaders'),
                             '--binary', str(binary), '--cache', str(cache),
                             '--output', str(root / 'shaders')], check=True)
@@ -180,7 +191,7 @@ class PackageReleaseTests(unittest.TestCase):
             cache = root / 'cache'
             cache.mkdir()
             shader = 'a' * 64 + '.slang-variant-v1.entry'
-            (cache / shader).write_bytes(ENVELOPE)
+            (cache / shader).write_bytes(envelope(shader))
             export(root / 'vork', [cache], root / 'shaders')
             subprocess.run([sys.executable, str(ROOT / 'scripts/package-release'), '--binary', str(root / 'vork'),
                             '--platform', 'linux-x64', '--output', str(root / 'out'),
@@ -195,6 +206,11 @@ class PackageReleaseTests(unittest.TestCase):
                 })
                 self.assertEqual(sdk_metadata['engines'],
                                  json.loads((ROOT / 'packages/ts/package.json').read_text())['engines'])
+                builder = package.extractfile('python/vork/fluid.py').read()
+                self.assertEqual(builder, (ROOT / 'packages/python/vork/fluid.py').read_bytes())
+                namespace = {}
+                exec(compile(builder, 'fluid.py', 'exec'), namespace)
+                self.assertTrue(callable(namespace['build']))
                 for path in ('sdk/index.js', 'sdk/index.d.ts', 'sdk/scene.schema.json'):
                     self.assertIn(path, package.getnames())
                 expected = {line for line in (ROOT / 'dist/example-payload.txt').read_text().splitlines()
@@ -213,7 +229,7 @@ class PackageReleaseTests(unittest.TestCase):
                 self.assertNotIn('LICENSE-MIT', package.getnames())
                 self.assertNotIn('LICENSE-APACHE', package.getnames())
                 self.assertFalse(any(p.startswith('integrations/') for p in package.getnames()))
-                self.assertEqual(package.extractfile('shaders/' + shader).read(), ENVELOPE)
+                self.assertEqual(package.extractfile('shaders/' + shader).read(), envelope(shader))
                 path = 'libraries/blender/filmic.exr'
                 self.assertEqual(package.extractfile(path).read(), (ROOT / path).read_bytes())
                 self.assertNotIn('libraries/blender/agx.exr', package.getnames())

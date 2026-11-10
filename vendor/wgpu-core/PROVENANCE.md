@@ -49,3 +49,9 @@ release shader catalogue use normal scene/pipeline construction without a GPU
 or driver. Vulkan and Metal admission/compilation are unchanged. Regression:
 GPU-free `scripts/prepare-shaders`, followed by the installed archive on L4.
 Remove when upstream accepts native shader descriptors on no-op.
+
+Local patch: Metal pipeline caches. `src/pipeline_cache.rs` gives Metal an adapter
+key from the device name (Metal reports no PCI ids), and `CreatePipelineCacheError::Rejected`
+(`src/pipeline.rs`, `src/device/resource.rs`) carries a backend's refusal of cache
+data as a validation error without losing the device. Regression: wgpu-hal
+`metal::device::binary_archive_tests`. Remove with the wgpu-hal Metal binary archive patch.

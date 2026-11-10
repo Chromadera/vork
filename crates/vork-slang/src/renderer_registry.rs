@@ -204,9 +204,14 @@ constants! {
     // a 1mm floor covers depth quantization near the lens without mixing silhouettes.
     REG_AO_FILTER_DEPTH_SCALE: f32 = 0.005 => "f32";
     REG_AO_FILTER_MIN_THICKNESS: f32 = 0.001 => "f32";
-    // A separable five-tap binomial filter reconstructs sparse rotated horizons
-    // with ten reads instead of a 25-tap square, guided by depth and normal.
-    REG_AO_BLUR_RADIUS: i32 = 2 => "i32";
+    // Finite-support variance-aware diffuse reconstruction, before receiver response.
+    REG_GI_PILOT_RAYS: u32 = 4u32 => "u32";
+    REG_GI_GUIDE_COSINE: f32 = 0.999 => "f32";
+    REG_GI_GUIDE_MIX: f32 = 0.5 => "f32";
+    // Independent pilots choose a beauty budget before beauty sampling starts.
+    REG_GI_ADAPTIVE_RATIO: u32 = 8u32 => "u32";
+    REG_GI_CONCENTRATION: f32 = 16. => "f32";
+    REG_GI_FILTER_RADIUS: i32 = 2 => "i32";
     REG_BINOMIAL5_WEIGHTS: [f32; 3] = [6.,4.,1.] => "array<f32,3>";
     // Preserve normal discontinuities when reconstructing rotated horizon samples.
     REG_AO_BLUR_NORMAL_POWER: f32 = 8. => "f32";

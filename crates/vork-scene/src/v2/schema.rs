@@ -5,7 +5,7 @@ pub(super) fn authored_schema() -> schemars::Schema {
         .for_deserialize()
         .into_generator()
         .into_root_schema_for::<super::Scene>();
-    schema.as_object_mut().unwrap().insert("$id".into(), serde_json::json!("https://voyager.so/vork/schema/scene.schema.json"));
+    schema.as_object_mut().unwrap().insert("$id".into(), serde_json::json!(crate::SCHEMA_URL));
     schema.get_mut("properties").unwrap()["version"]["const"] = serde_json::json!(2);
     schema.as_object_mut().unwrap().insert(
         "x-standards".into(),
@@ -90,7 +90,7 @@ pub(super) fn authored_schema() -> schemars::Schema {
     defs["Buffer"]["oneOf"].as_array_mut().unwrap().push(serde_json::json!({
         "title":"DenseBuffer","required":["dims"],"properties":{
             "dims":dims,"file":{"type":"null"},"grid":{"type":"null"},
-            "offset":{"type":"integer","minimum":0,"maximum":0},"count":{"type":"null"},"type":{"enum":["f32","vec3"]}
+            "offset":{"type":"integer","minimum":0,"maximum":0},"count":{"type":"null"}
         }
     }));
     defs["Program"]["oneOf"][0]["properties"]["source_origin"]=serde_json::json!({"type":"null"});
@@ -129,6 +129,13 @@ pub fn schema() -> schemars::Schema {
             if let Some(additional) = &additional { branch["additionalProperties"] = additional.clone(); }
         }
     }
+    // The public editor schema includes authoring shorthand, before std expansion.
+    let mut geometry = defs["Geometry"].take();
+    geometry["title"] = serde_json::json!("BufferGeometry");
+    let mut builder = schemars::schema_for!(super::StdGeometry).to_value();
+    builder.as_object_mut().unwrap().remove("$schema");
+    builder["not"] = serde_json::json!({"required": ["name"]});
+    defs["Geometry"] = serde_json::json!({"anyOf": [geometry, builder]});
     schema
 }
 
@@ -569,6 +576,103 @@ fn api_page_fields(store: &str) -> String {
     result
 }
 
+/// Compact authoring syntax, independent of the lowered Rust storage type.
+/// Named objects stay named so resource definitions do not recursively expand at
+/// each use. Structural containers and unions retain their actual JSON shape.
+fn help_shape(schema: &serde_json::Value, value: &serde_json::Value) -> String {
+    fn shape(schema: &serde_json::Value, value: &serde_json::Value, stack: &mut Vec<String>, depth: usize) -> String {
+        if let Some(reference) = value["$ref"].as_str() {
+            let name = reference.rsplit('/').next().unwrap_or("object");
+            let Some(target) = schema.pointer(reference.trim_start_matches('#')) else { return name.into(); };
+            if target.get("properties").is_some() { return format!("{name} object"); }
+            if stack.iter().any(|seen| seen == reference) || depth >= 6 { return name.into(); }
+            stack.push(reference.into());
+            let result = shape(schema, target, stack, depth + 1);
+            stack.pop();
+            return result;
+        }
+        if depth >= 6 { return "…".into(); }
+        if let Some(value) = value.get("const") { return value.to_string(); }
+        if let Some(values) = value["enum"].as_array() {
+            return values.iter().map(|value| value.to_string()).collect::<Vec<_>>().join("|");
+        }
+        for keyword in ["oneOf", "anyOf"] {
+            if let Some(branches) = value[keyword].as_array() {
+                let mut alternatives = Vec::new();
+                for branch in branches {
+                    let next = shape(schema, branch, stack, depth + 1);
+                    if !alternatives.contains(&next) { alternatives.push(next); }
+                }
+                return alternatives.join("|");
+            }
+        }
+        if let Some(types) = value["type"].as_array() {
+            return types.iter().map(|kind| {
+                let mut branch = value.clone();
+                branch["type"] = kind.clone();
+                shape(schema, &branch, stack, depth + 1)
+            }).collect::<Vec<_>>().join("|");
+        }
+        match value["type"].as_str() {
+            Some("object") | None if value.get("properties").is_some() => {
+                // Tagged objects show their discriminator, never a fictitious wrapper.
+                let tags = value["properties"].as_object().into_iter().flatten()
+                    .filter_map(|(name, property)| property.get("const").map(|v| format!("\"{name}\":{v}")))
+                    .collect::<Vec<_>>();
+                if tags.is_empty() { "object".into() }
+                else { format!("{{{}, …}}", tags.join(", ")) }
+            }
+            Some("object") => {
+                match value.get("additionalProperties") {
+                    Some(items) if items.is_object() => format!("{{name: {}}}", shape(schema, items, stack, depth + 1)),
+                    _ => "object".into(),
+                }
+            }
+            Some("array") => {
+                if let Some(items) = value["prefixItems"].as_array() {
+                    format!("[{}]", items.iter().map(|item| shape(schema, item, stack, depth + 1)).collect::<Vec<_>>().join(", "))
+                } else {
+                    let item = shape(schema, &value["items"], stack, depth + 1);
+                    if let Some(count) = value["minItems"].as_u64().filter(|count| *count <= 8 && value["maxItems"].as_u64() == Some(*count)) {
+                        format!("[{}]", vec![item; count as usize].join(", "))
+                    } else if item.contains('|') {
+                        format!("({item})[]")
+                    } else {
+                        format!("{item}[]")
+                    }
+                }
+            }
+            Some(kind) => kind.into(),
+            None => "JSON value".into(),
+        }
+    }
+    shape(schema, value, &mut Vec::new(), 0)
+}
+
+/// Use exactly the same author-schema annotations and wire-path presentation as
+/// field facts. Shapes augment the advanced/exact store, not the default root.
+fn help_shapes(schema: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    fn visit(schema: &serde_json::Value, value: &serde_json::Value, shapes: &mut std::collections::BTreeMap<String, String>) {
+        if let Some(path) = value["x-help-path"].as_str().filter(|_| value["x-help"].is_string()) {
+            shapes.insert(path.into(), help_shape(schema, value));
+        }
+        match value {
+            serde_json::Value::Object(map) => for child in map.values() { visit(schema, child, shapes); },
+            serde_json::Value::Array(array) => for child in array { visit(schema, child, shapes); },
+            _ => {},
+        }
+    }
+    let mut shapes = std::collections::BTreeMap::new();
+    visit(schema, &schema["$defs"], &mut shapes);
+    visit(schema, &schema["properties"], &mut shapes);
+    let (fields, _) = tagged_help(schema);
+    shapes.into_iter().map(|(path, shape)| {
+        let line = present_help(&format!("{path}: {shape}"), &fields);
+        let (path, shape) = line.split_once(": ").unwrap();
+        (path.into(), shape.into())
+    }).collect()
+}
+
 /// Checked-in documentation produced without requiring the TypeScript toolchain.
 pub fn documents() -> Vec<(&'static str, String)> {
     let schema = authored_schema().to_value();
@@ -580,6 +684,7 @@ pub fn documents() -> Vec<(&'static str, String)> {
         .collect::<Vec<_>>()
         .join("\n");
     let advanced = advanced_fields(&schema);
+    let shapes = help_shapes(&schema);
     // One field store for `vork help TOPIC --all` and `vork help field PATH`:
     // advanced lines carry their tuning guidance in place of the plain line.
     let store = reference
@@ -592,6 +697,14 @@ pub fn documents() -> Vec<(&'static str, String)> {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let root_store = store.clone();
+    let store = store.lines().map(|line| {
+        let path = line.split_once(": ").map(|(path, _)| path).unwrap_or("");
+        match shapes.get(path) {
+            Some(shape) => format!("{line}; JSON shape: {shape}"),
+            None => line.into(),
+        }
+    }).collect::<Vec<_>>().join("\n");
     let mut rows = Vec::new();
     fn fields(area: &str, object: &serde_json::Value, rows: &mut Vec<String>) {
         if let Some(properties) = object["properties"].as_object() {
@@ -647,7 +760,7 @@ pub fn documents() -> Vec<(&'static str, String)> {
     let end = "<!-- generated-api:end -->";
     let (before, rest) = index.split_once(start).expect("API start marker");
     let (_, after) = rest.split_once(end).expect("API end marker");
-    let index = format!("{before}{start}\n{}{end}{after}", api_page_fields(&store));
+    let index = format!("{before}{start}\n{}{end}{after}", api_page_fields(&root_store));
 
     fn call_keys(text: &str) -> String {
         let (before, rest) = text.split_once("<!-- generated-call-keys:start -->").expect("call keys start");
@@ -682,6 +795,51 @@ pub fn documents() -> Vec<(&'static str, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn starter_schema_matches_release() {
+        let starter: serde_json::Value = serde_json::from_str(crate::STARTER_SCENE).unwrap();
+        assert_eq!(starter["$schema"], crate::SCHEMA_URL);
+    }
+
+    #[test]
+    fn author_help_shapes_preserve_containers_and_bound_recursion() {
+        use serde_json::json;
+        let schema = json!({"$defs": {
+            "Buffer": {"type":"object", "properties":{"data":{"type":"array","items":{"type":"number"}}}},
+            "Resource": {"anyOf":[{"type":"string"},{"$ref":"#/$defs/Buffer"}]},
+            "Dictionary": {"type":"object","additionalProperties":{"$ref":"#/$defs/Resource"}},
+            "Cycle": {"$ref":"#/$defs/Cycle"}
+        }});
+        for (value, expected) in [
+            (json!({"type":"object","additionalProperties":{"$ref":"#/$defs/Resource"}}), "{name: string|Buffer object}"),
+            (json!({"$ref":"#/$defs/Resource"}), "string|Buffer object"),
+            (json!({"$ref":"#/$defs/Dictionary"}), "{name: string|Buffer object}"),
+            (json!({"anyOf":[{"$ref":"#/$defs/Resource"},{"type":"null"}]}), "string|Buffer object|null"),
+            (json!({"type":"array","prefixItems":[{"type":"number"},{"type":"string"}],"items":false}), "[number, string]"),
+            (json!({"type":"array","items":{"type":"integer"},"minItems":3,"maxItems":3}), "[integer, integer, integer]"),
+            (json!({"oneOf":[{"type":"object","properties":{"type":{"const":"mesh"},"geometry":{"$ref":"#/$defs/Resource"}}},{"type":"object","properties":{"type":{"const":"light"}}}]}), "{\"type\":\"mesh\", …}|{\"type\":\"light\", …}"),
+            (json!({"$ref":"#/$defs/Cycle"}), "Cycle"),
+        ] {
+            assert_eq!(super::help_shape(&schema, &value), expected);
+        }
+        let mut deep = json!({"type":"number"});
+        for _ in 0..20 { deep = json!({"type":"array","items":deep}); }
+        assert!(super::help_shape(&schema, &deep).contains('…'));
+    }
+
+    #[test]
+    fn generated_help_uses_authorable_resource_edges_without_growing_root() {
+        let schema = super::authored_schema().to_value();
+        let shapes = super::help_shapes(&schema);
+        assert_eq!(shapes["program.bindings"], "{name: string|Buffer object}");
+        assert_eq!(shapes["node.instances.attributes (mesh)"], "{name: string|Buffer object}");
+        let documents = super::documents();
+        let reference = &documents.iter().find(|(path, _)| *path == "crates/vork-scene/src/v2/reference.txt").unwrap().1;
+        assert!(reference.lines().any(|line| line.starts_with("program.bindings: ") && line.ends_with("; JSON shape: {name: string|Buffer object}")));
+        let index = &documents.iter().find(|(path, _)| *path == "docs/help/index.md").unwrap().1;
+        assert!(!index.contains("JSON shape:"));
+    }
+
     #[test]
     fn tagged_help_uses_wire_fields_and_discriminators_through_references() {
         let schema = super::authored_schema().to_value();
@@ -764,7 +922,7 @@ mod tests {
         let full = super::reference(&schema);
         assert_eq!(store.lines().count(), full.lines().count());
         for (path, line) in &advanced {
-            assert!(store.lines().any(|entry| entry == line), "missing advanced field: {path}: {line:?} vs {:?}",
+            assert!(store.lines().any(|entry| entry.split_once("; JSON shape:").map_or(entry, |(facts, _)| facts) == line), "missing advanced field: {path}: {line:?} vs {:?}",
                 store.lines().find(|entry| entry.contains(line.split(';').nth(1).unwrap_or(line))));
             assert!(line.contains("; default "), "missing default: {path}");
             assert!(line.contains("; when to change: "), "missing guidance: {path}");

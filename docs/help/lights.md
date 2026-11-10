@@ -1,5 +1,8 @@
 LIGHTS
 Area lights emit along local -Z; use target to aim them at the subject.
+Aiming a finite area light rotates its whole emitting surface. Check its transformed
+extent against walls and glazing; its centre being outside does not ensure clearance.
+Inspect direct and reflected source visibility before attributing bright shapes to transport.
 Use one environment light for sky or HDR lighting; RGB render.background is only a backdrop.
 Without an environment light the world is dim grey (0.05).
 std/environment_image takes an Image input. vork std environment preprocesses HDR
@@ -8,15 +11,10 @@ For `vork std environment`, fps is a positive number or rational string (e.g.
 "30000/1001"). Use a separate output directory/stem: generated EXR frames must
 not alias input frames, including through symlinks. Invalid rates and output/source
 collisions fail before frame writes. SDK helper fps options remain numeric.
-DAYLIGHT STARTING RECIPE
-Build sky and sun with `vork std sky '{"name":"daylight"}'` and merge the
-returned fragment into your scene (keep both the environment and solar light).
-In render, set "display":{"program":"std/agx","inputs":{"exposure":-3}}.
-About -3 stops is a daylight starting point, not a universal exposure; there is
-no implicit auto-exposure. Render a representative frame, then read the stdout
-`exposure:` summary (clipped, near-black and mean; also in meta.json exposure).
-Inspect highlights and shadows in the image and adjust render.display.inputs.exposure
-for the shot. Keep the physical sun energy while choosing the display exposure.
+Light energy is watts for local lights, W/m² for sun, and a multiplier for environment.
+OpenPBR emission_luminance is cd/m², not light watts; emission_color is linear RGB.
+AgX exposure is stops (radiance multiplied by 2^exposure), default 0; there is no auto-exposure.
+The stdout exposure summary and meta.json report clipped, near-black and mean values.
 <!-- all -->
 LIGHTING REFERENCE
 std/sky sun direction: [cos(el)*sin(rot),sin(el),-cos(el)*cos(rot)] (radians;

@@ -147,10 +147,7 @@ impl Scene {
             let dynamic = !matches!(geometry.topology, Topology::Volume | Topology::Implicit) && (geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.ids.iter()).any(|b| computed.contains(b.as_str())) || geometry.count.is_some());
             if dynamic {
                 ensure!(matches!(geometry.topology, Topology::Triangles | Topology::Points), "computed geometry requires triangles or points");
-                ensure!(geometry.subdivision.is_none() && geometry.morphs.is_empty() && geometry.face_vertex_counts.is_none(), "computed geometry requires fixed triangle topology without subdivision or morphs");
-                for name in geometry.attributes.keys() {
-                    ensure!(!matches!(name.as_str(), "JOINTS_0" | "WEIGHTS_0"), "computed geometry does not support skin attributes");
-                }
+                ensure!(geometry.subdivision.is_none() && geometry.face_vertex_counts.is_none(), "computed geometry requires fixed triangle topology without subdivision; place subdivision after the compute stage");
             }
             if let Some(ids) = &geometry.ids {
                 ensure!(matches!(geometry.topology,Topology::Points),"geometry.ids requires points");
@@ -428,6 +425,12 @@ impl Scene {
                         .map_err(|issue| anyhow::anyhow!("material {name}: {issue}"))?;
                 }
                 match value {
+                    Input::Geometry(GeometryBinding {geometry}) => {
+                        ensure!(self.programs.get(&m.program).is_some_and(|program|program.is_compute()),
+                            "material {name}: input {key}: Geometry requires a compute program; bind the collider on the geometry producer");
+                        let target=nodes_by_name.get(geometry.as_str()).with_context(||format!("material {name}: input {key}: {}; name a native mesh object",diagnostics::unknown("mesh node",geometry,nodes_by_name.keys().copied())))?;
+                        ensure!(matches!(target.kind,NodeKind::Mesh {..}),"material {name}: input {key}: geometry reference {geometry:?} requires a native mesh; use a named triangle collision proxy");
+                    },
                     Input::Grid(GridBinding { grid }) => ensure!(
                         self.buffers.get(grid).is_some_and(|b| b.is_volume_grid()),
                         "material {name}: input {key}: {}",

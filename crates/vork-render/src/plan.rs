@@ -18,6 +18,7 @@ pub(crate) struct EffectPlan {
     #[cfg(test)]
     pub(crate) force_standalone_controls: bool,
     pub(crate) path: bool,
+    pub(crate) trace: bool,
     pub(crate) implicit: bool,
     pub(crate) subsurface: bool,
     /// A full-resolution reflection output exists, traced through scene rays.
@@ -106,7 +107,6 @@ impl CasterPlan {
 }
 pub(crate) struct ScenePlan {
     pub effects: EffectPlan,
-    pub volume: bool,
     pub draws: Vec<DrawFlags>,
     pub casters: CasterPlan,
     pub transparent: bool,
@@ -155,7 +155,6 @@ impl ScenePlan {
         animation: &crate::animation::Plan,
         rays: bool,
         compute: Option<&crate::compute::Compute>,
-        volume: bool,
     ) -> Self {
         let flags: Vec<_> = draws
             .iter()
@@ -218,13 +217,12 @@ impl ScenePlan {
                 _ => false,
             }),
             effects,
-            volume,
             transparent,
             draws: flags,
             casters,
             deform,
             rays,
-            cluster: light_plan.nodes.iter().any(|&i| !matches!(nodes[i].node.kind, NodeKind::Light { shape: vork_scene::LightShape::Sun, .. })) && (!effects.path || volume),
+            cluster: light_plan.nodes.iter().any(|&i| !matches!(nodes[i].node.kind, NodeKind::Light { shape: vork_scene::LightShape::Sun, .. })) && !effects.path,
         }
     }
 }

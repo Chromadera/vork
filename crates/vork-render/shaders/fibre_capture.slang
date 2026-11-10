@@ -6,8 +6,14 @@ __exported import stream;
 __exported import surface;
 import variant;
 import material;
+// Generated capture entries share the global texture slots 0..3.
+#ifdef VORK_METAL
+[[vk::binding(0,2)]] Texture2D<float> fibre_first : register(t4);
+[[vk::binding(1,2)]] Texture2D<float> fibre_last : register(t5);
+#else
 [[vk::binding(0,2)]] Texture2D<float> fibre_first;
 [[vk::binding(1,2)]] Texture2D<float> fibre_last;
+#endif
 
 float3 fibre_light_view(float3 world) {return frame.eye.w==0. ? -normalize(frame.eye.xyz) : normalize(frame.eye.xyz-world);}
 Surface fibre_surface<P:IProgram>(Varying v,bool front) {

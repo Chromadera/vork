@@ -1,6 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "level": 3,
-  "settings": {"seed": 0, "denoise": false},
+  "settings": {
+    "seed": 0
+  },
   "description": "Fast blocking look: direct light, ray shadows and environment reflections; no indirect light or probes."
 }

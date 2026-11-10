@@ -18,6 +18,8 @@ use vork_encode::{Backend, EncodeSettings, Encoder};
 /// Output and scheduling values for a shot; structural GPU resources stay installed.
 #[derive(Clone)]
 pub struct Shot {
+    /// Finish submitted frames and close output files when requested by the caller.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub scene: PathBuf,
     /// Empty selects the built-in control set and every scene-declared AOV.
     pub outputs: Vec<Output>,
@@ -67,20 +69,28 @@ impl RenderedShot {
     /// callers instead drop this value to reclaim GPU owners normally.
     #[doc(hidden)]
     pub fn exit_process(self) -> ! {
+        let code = if self.report["interrupted"] == true { 130 } else { 0 };
+        // _exit skips the pipeline cache's destructor. Its Metal binary archive
+        // backs onto temporary files (read lazily while the process runs);
+        // remove them here, after every output is delivered. Live owners and
+        // any unfinished background compiles keep the in-memory archive.
+        #[cfg(target_os = "macos")]
+        wgpu::hal::metal::release_archive_files_for_exit();
         // libc exit can run CUDA/NVENC atexit hooks against intentionally live
         // owners. Match process delivery: the OS reclaims completed resources
         // and discards unfinished optional compiler work without driver teardown.
         #[cfg(unix)]
         // SAFETY: Shot::render joined file writers, reaped muxers and finished
         // outputs; the caller flushed Rust streams before consuming this value.
-        unsafe { libc::_exit(0) }
+        unsafe { libc::_exit(code) }
         #[cfg(not(unix))]
-        std::process::exit(0)
+        std::process::exit(code)
     }
 }
 impl Default for Shot {
     fn default() -> Self {
         Self {
+            stop: None,
             scene: PathBuf::new(),
             outputs: vec![Output::Color],
             out: Vec::new(),
@@ -235,6 +245,7 @@ impl Shot {
             diagnostics,
             exr_codec,
             edit,
+            stop,
         } = self;
         ensure_usage!(
             !out.is_empty(),
@@ -261,6 +272,9 @@ impl Shot {
         });
         let parse_start = Instant::now();
         let profile = match profile { Some(profile) => profile, None => vork_scene::Profile::load(vork_scene::DEFAULT_PROFILE)? };
+        if profile.level == 3 {
+            eprintln!("Hint: std/previs omits indirect light; interiors lit by bounced light can look black. Use --profile std/path for full bounce lighting (or std/draft for a quick approximation).");
+        }
         let profile_record = serde_json::json!({"name": profile.name, "version": profile.version, "level": profile.level});
         let overrides = vork_scene::CallOverrides::resolve(settings)
             .map_err(|error| error.context(FailureKind::Usage))?;
@@ -635,9 +649,13 @@ impl Shot {
         let mut camera_frames = Vec::new();
         let mut still_camera = None;
         let mut still_exposure = None;
+        let mut still_dropped_light_samples = 0;
         let mut frame_exposures = Vec::new();
         let mut first_frame_ms = 0.;
         let mut submit_cpu = vec![None; slots.len()];
+        // Frames the shader refused (non-finite radiance, say). A video cannot
+        // skip a frame; per-frame files can, so the rest of the range renders.
+        let mut refused: Vec<(u32, String)> = Vec::new();
         let mut redos = 0u32;
         let mut redo_ms = 0.;
         for slot in &mut slots {
@@ -650,8 +668,11 @@ impl Shot {
         let mut next_submit = 0;
         let mut redo_started = None;
         while frame < frames {
+            let stopping = stop.as_ref().is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed));
+            if stopping && frame > 0 && frame == next_submit { break; }
             let attempt = (|| -> Result<_> {
                 while next_submit < frames && next_submit < frame + in_flight {
+                    if stopping && next_submit > 0 { break; }
                     let i = next_submit % slots.len();
                     let slot = &mut slots[i];
                     let cpu_start = thread_cpu_ms();
@@ -685,6 +706,19 @@ impl Shot {
             let (p, submission, cpu_start, collect_start) = match attempt {
                 Ok(result) => result,
                 Err(error) => {
+                    if let Some(refusal) = error.downcast_ref::<crate::FrameRefused>().filter(|_| !video && installed.transients.check_recording().is_ok()) {
+                        // Only an installation whose publications remain valid can
+                        // skip an isolated refusal. Failed retained producers require
+                        // reinstallation, so their queued successors cannot be delivered.
+                        eprintln!("warning: frame {} refused and not written: {refusal}", output_index(frame));
+                        refused.push((output_index(frame), refusal.0.clone()));
+                        if !still_pass {
+                            for writer in &png_outputs { writer.skip(index(frame))?; }
+                        }
+                        frame += 1;
+                        vork_slang::progress::completed(frame);
+                        continue;
+                    }
                     let Some(redo) = error.downcast_ref::<crate::FrameRedo>() else { return Err(error); };
                     redo_started.get_or_insert_with(Instant::now);
                     // The exposure's own frame keys its shadow requests: a
@@ -696,6 +730,7 @@ impl Shot {
                 }
             };
             if let Some(started) = redo_started.take() { redo_ms += started.elapsed().as_secs_f64() * 1000.; }
+            if let Some(warning) = dropped_light_warning(output_index(frame), p.timing.dropped_light_samples) { eprintln!("{warning}"); }
             let i = frame % slots.len();
             let slot = &mut slots[i];
             let collect_wall_ms = collect_start.elapsed().as_secs_f64() * 1000.;
@@ -730,9 +765,9 @@ impl Shot {
                 first_frame_ms = loop_start.elapsed().as_secs_f64() * 1000.;
                 drop(foreground.take());
             }
-            metadata_frames.push(serde_json::json!({"index":output_index(frame),"time":frame_time(frame),"camera":installed.camera_name_at_request(&frame_request(frame))?,"depth_unit_m":p.camera.depth_unit_m,"exposure":p.exposure.map(|e|e.json())}));
+            metadata_frames.push(serde_json::json!({"index":output_index(frame),"time":frame_time(frame),"camera":installed.camera_name_at_request(&frame_request(frame))?,"depth_unit_m":p.camera.depth_unit_m,"dropped_light_samples":p.timing.dropped_light_samples,"exposure":p.exposure.map(|e|e.json())}));
             if let Some(e) = p.exposure { frame_exposures.push((index(frame), e)); }
-            samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"sample_count":p.timing.sample_count}));
+            samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"timing_source":diagnostics.then_some(p.timing.timing_source),"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"dropped_light_samples":p.timing.dropped_light_samples,"sample_count":p.timing.sample_count}));
             if !still_pass {
                 for writer in &png_outputs { writer.push(index(frame), p.clone())?; }
             }
@@ -768,6 +803,8 @@ impl Shot {
                 }
             };
             vork_slang::progress::completed(1);
+            still_dropped_light_samples = pixels.timing.dropped_light_samples;
+            if let Some(warning) = dropped_light_warning(still_index.unwrap(), still_dropped_light_samples) { eprintln!("{warning}"); }
             still_exposure = pixels.exposure;
             still_camera = Some(pixels.camera);
             for writer in &png_outputs {
@@ -790,6 +827,18 @@ impl Shot {
         let save_start = Instant::now();
         renderer.save_idle_pipelines().map_err(device)?;
         let pipeline_save_ms = save_start.elapsed().as_secs_f64() * 1000.;
+        // The other frames are written; withholding meta.json leaves the output
+        // marked incomplete, and the exit status reports the refusal.
+        if !refused.is_empty() {
+            let mut reasons: Vec<&str> = refused.iter().map(|(_, reason)| reason.as_str()).collect();
+            reasons.sort_unstable();
+            reasons.dedup();
+            let list = refused.iter().map(|(index, _)| index.to_string()).collect::<Vec<_>>().join(", ");
+            return Err(device(anyhow::anyhow!("{} of {frames} frames refused and not written ({}): {list}; the other frames were written, without meta.json",
+                refused.len(), reasons.join("; "))));
+        }
+        let interrupted = stop.as_ref().is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed));
+        let frames = if interrupted { metadata_frames.len() } else { frames };
         let mut sidecars = Vec::new();
         for path in &video_paths {
             let camera_path = sidecar(path, "camera.json");
@@ -853,7 +902,7 @@ impl Shot {
             };
             let mut frames = if !is_video(path) && still_pass {
                 vec![serde_json::json!({"index":still_index.unwrap(),"time":at.unwrap(),"camera":installed.camera_name_at_request(&still_request())?,
-                    "depth_unit_m":still_camera.as_ref().unwrap().depth_unit_m,"exposure":still_exposure.map(|e: crate::Exposure|e.json())})]
+                    "depth_unit_m":still_camera.as_ref().unwrap().depth_unit_m,"dropped_light_samples":still_dropped_light_samples,"exposure":still_exposure.map(|e: crate::Exposure|e.json())})]
             } else { metadata_frames.clone() };
             let still_rows: Vec<_> = still_exposure.map(|e| (0, e)).into_iter().collect();
             let mut rows = if !is_video(path) && still_pass { &still_rows[..] } else { &frame_exposures[..] };
@@ -878,6 +927,7 @@ impl Shot {
                 sidecars.push(timing_path);
             }
         }
+        report["interrupted"] = interrupted.into();
         report["warnings"] = serde_json::to_value(warnings.snapshot())?;
         report["sidecars"] = serde_json::to_value(sidecars)?;
         report["exposure"] = exposures.into();
@@ -890,6 +940,10 @@ impl Shot {
             _renderer: renderer,
         })
     }
+}
+
+fn dropped_light_warning(frame: u32, count: u64) -> Option<String> {
+    (count != 0).then(|| format!("warning: frame {frame}: {count} non-finite light sample{} dropped", if count == 1 { "" } else { "s" }))
 }
 
 /// An output's exposure over its frames: mean shares and luma, and the worst frame for
@@ -918,6 +972,47 @@ fn exposure_summary(rows: &[(usize, crate::Exposure)]) -> Option<serde_json::Val
 #[cfg(test)]
 mod sidecar_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a supported GPU, pinned Slang and ffmpeg; scheduled explicitly in main CI"]
+    fn cancellation_closes_a_partial_sequence_and_records_only_saved_frames() -> Result<()> {
+        if crate::test_renderer()?.is_none() { return Ok(()); }
+        let root = std::env::temp_dir().join(format!("vork-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let scene = root.join("scene.json");
+        std::fs::write(&scene, vork_scene::STARTER_SCENE)?;
+        let destination = root.join("frames");
+        let rendered = Shot {
+            stop: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))),
+            scene, out: vec![destination.clone(), root.join("clip.mov")], resolution: Some([32, 24]),
+            frame_start: Some(0), frame_end: Some(3),
+            settings: [("samples".into(), serde_json::json!(1)), ("denoise".into(), serde_json::json!(false))].into_iter().collect(),
+            ..Default::default()
+        }.render()?;
+        assert_eq!(rendered.report["interrupted"], true);
+        assert_eq!(rendered.report["frames"], 1);
+        let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(destination.join("meta.json"))?)?;
+        assert_eq!(metadata["frames"].as_array().unwrap().len(), 1);
+        let probe = std::process::Command::new("ffprobe").args([
+            "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+        ]).arg(root.join("clip.mov")).output()?;
+        assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "1");
+        // Match the CLI ownership contract: files are finished before GPU owners
+        // are discarded by process exit. Dropping here would also wait for optional
+        // pipeline preparation, which is separate from cancellation/file closure.
+        std::mem::forget(rendered);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_light_warning_names_frame_and_count() {
+        assert_eq!(dropped_light_warning(795, 0), None);
+        assert_eq!(dropped_light_warning(795, 1).unwrap(), "warning: frame 795: 1 non-finite light sample dropped");
+        assert_eq!(dropped_light_warning(796, 4294967299).unwrap(), "warning: frame 796: 4294967299 non-finite light samples dropped");
+    }
 
     #[test]
     fn exposure_summary_excludes_empty_frames() {

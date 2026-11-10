@@ -20,7 +20,7 @@ import decoupled_slots;
 // The batch's samples first..first+count of samples, one key layer each; first is
 // a multiple of the batch size, a divisor of 32, so they share one mask word.
 // Metal numbers buffers in declaration order, matching the binding order.
-struct MergePass { uint first; uint count; uint samples; };
+struct MergePass { uint first; uint count; uint samples; uint packet_pixels; uint first_row; };
 [[vk::binding(4,0)]] ConstantBuffer<MergePass> merge_pass;
 uint allocate(SlotLayout layout, uint head) {
     uint n;InterlockedAdd(overflow[0],1u,n);
@@ -68,7 +68,9 @@ static const uint GATHERED=4u;
 void merge(uint3 gid : SV_DispatchThreadID) {
     uint w,h,layers;keys.GetDimensions(w,h,layers);
     if (gid.x>=w || gid.y>=h) {return;}
-    let layout=SlotLayout(w*h,merge_pass.samples);
+    gid.y+=merge_pass.first_row;
+    if (gid.y>=h) {return;}
+    let layout=SlotLayout(w*h,merge_pass.samples,merge_pass.packet_pixels,merge_pass.first_row*w);
     let pixel=gid.y*w+gid.x;
     let word=REG_VISIBILITY_KEY_WORDS+merge_pass.first/32u;
     // Each distinct key of the batch gathers its coverage bits before one slot

@@ -53,7 +53,6 @@ struct VertexIn {
 };
 struct Varying {
     // The decoupled visibility pass's sample (decoupled_visibility.slang masked_vs), for hashed alpha.
-    [[vk::location(21+(VORK_ATTRIBUTES>8 ? VORK_ATTRIBUTES-8 : 0))]] nointerpolation uint medium_capacity : MEDIUM_CAPACITY;
     [[vk::location(20+(VORK_ATTRIBUTES>8 ? VORK_ATTRIBUTES-8 : 0))]] nointerpolation uint sample : VISIBILITY_SAMPLE;
     [[vk::location(19+(VORK_ATTRIBUTES>8 ? VORK_ATTRIBUTES-8 : 0))]] nointerpolation uint primitive : AUTHORED_PRIMITIVE;
     [[vk::location(18+(VORK_ATTRIBUTES>8 ? VORK_ATTRIBUTES-8 : 0))]] nointerpolation uint curve_strand : CURVE_STRAND;

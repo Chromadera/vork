@@ -20,11 +20,7 @@ uint pack_unorm(float4 v) {uint4 q=uint4(round(saturate(v)*255.));return q.x|(q.
 [[vk::binding(4,0)]] RWStructuredBuffer<uint> pixels;
 [[vk::binding(47,0)]] RWStructuredBuffer<uint> nonfinite;
 [[vk::binding(70,0)]] RWStructuredBuffer<uint> output_errors;
-#ifdef VORK_VOLUME_BINDINGS
-import frame;
-#else
 [[vk::binding(5,0)]] ConstantBuffer<Frame> frame;
-#endif
 [[vk::binding(6,0)]] Texture2D<float4> normals;
 [[vk::binding(7,0)]] Texture2D<float4> ambient;
 [[vk::binding(8,0)]] Texture2D<float4> ao_texture;
@@ -34,9 +30,7 @@ import frame;
 
 [[vk::binding(9,0)]] Texture2D<float4> motion;
 [[vk::binding(10,0)]] RWStructuredBuffer<float4> accumulation;
-#if !defined(VORK_VOLUME_BINDINGS) || !defined(VORK_PROGRAM_COVERAGE)
 [[vk::binding(12,0)]] SamplerState env_sampler;
-#endif
 // The forward BRDF's prefiltered environment remains the miss radiance.
 // Split-sum response follows the split-sum F0*energy.x + F90*energy.y approximation;
 // screen marching is local to vork, with no imported scene/framegraph machinery.
@@ -111,7 +105,6 @@ float3 screen_reflection(int2 p) {
     for (uint c=0u;c<REG_REFLECTION_CLASSES;c++) {sum+=reflections.Load(int4(p,int(c),0)).rgb;}
     return sum;
 }
-// WORLD MEDIUM: medium.rs installs the volume integration entries here.
 bool colour_requires_controls() {
     return !fused_controls && (frame.flags.w>0. || (frame.projection.z==REG_REFLECTIONS_RAY && frame.sampling.w>0u));
 }

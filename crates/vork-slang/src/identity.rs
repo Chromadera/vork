@@ -1,6 +1,6 @@
 //! Conservative compiler-input identity. Slang owns lexing, preprocessing and
-//! import resolution. Repros retain the bytes actually read, including failed
-//! resolution probes; native code generation replays that same filesystem.
+//! import resolution. Depfiles identify the closure; vork retains its bytes and
+//! conservative search probes in an owned workspace for subsequent compilation.
 use super::*;
 
 pub struct PreparedModules {
@@ -84,20 +84,27 @@ impl InputIdentity {
     }
 }
 
-struct Snapshot {
-    repro: PathBuf,
+pub(super) struct Snapshot {
+    root: PathBuf,
+    frozen: PathBuf,
+    directories: BTreeMap<PathBuf, PathBuf>,
     files: BTreeMap<PathBuf, Vec<u8>>,
     reads: BTreeMap<PathBuf, Option<Vec<u8>>>,
-    uncertain: Vec<PathBuf>,
     resolved: BTreeMap<PathBuf, PathBuf>,
     canonical: BTreeMap<PathBuf, PathBuf>,
 }
 
-/// Capture each actual proof pass, not a post-compilation read of its depfile.
+/// Verify the retained inputs used to produce each actual proof pass.
 /// Shared imports must agree between passes, including failed search probes.
-pub(super) fn check_imports(compiler: &Compiler, work: &Workspace, repro: PathBuf) -> Result<()> {
-    let receipt = Snapshot::read(compiler, repro)?.receipt(work, Vec::new());
-    if let Some(expected) = &compiler.expected { receipt.verify(expected)?; }
+pub(super) fn check_imports(
+    compiler: &Compiler,
+    work: &Workspace,
+    snapshot: &Snapshot,
+) -> Result<()> {
+    let receipt = snapshot.receipt(work, Vec::new());
+    if let Some(expected) = &compiler.expected {
+        receipt.verify(expected)?;
+    }
     if let Some(captured) = &compiler.captured {
         let mut captured = captured.lock().unwrap();
         if let Some(previous) = captured.as_mut() {
@@ -118,178 +125,285 @@ fn part(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
+/// The compiler discovers dependencies, but never supplies serialized filesystem
+/// state. Only code produced from our retained files may be published.
 impl Snapshot {
-    fn read(compiler: &Compiler, repro: PathBuf) -> Result<Self> {
-        let directory = repro.with_extension("");
-        if directory.exists() {
-            fs::remove_dir_all(&directory)?;
+    fn mirror(&self, path: &Path) -> PathBuf {
+        if path.starts_with(&self.root) {
+            return path.to_path_buf();
         }
-        let output = compiler_output(
-            Command::new(&compiler.executable)
-                .arg("-extract-repro")
-                .arg(&repro),
-        )?;
-        ensure!(
-            output.status.success(),
-            "extract Slang dependency snapshot: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let manifest = read_compiler_text(directory.join("manifest.txt"))?;
-        Self::read_manifest(repro, &directory, &manifest)
-    }
-
-    fn read_manifest(repro: PathBuf, directory: &Path, manifest: &str) -> Result<Self> {
-        let mut files = BTreeMap::new();
-        let mut extracted = BTreeMap::new();
-        let mut reads = BTreeMap::new();
-        let mut uncertain = Vec::new();
-        let mut uncertain_details = Vec::new();
-        let mut resolved = BTreeMap::new();
-        let mut section = "";
-        for line in manifest.lines() {
-            if line.starts_with('[') {
-                section = line;
-                continue;
-            }
-            if section == "[files]" {
-                let (name, path) = line
-                    .split_once(" -> ")
-                    .context("Slang snapshot file mapping")?;
-                let bytes = fs::read(directory.join(name))?;
-                let path = PathBuf::from(path);
-                extracted.insert(name.to_owned(), (path.clone(), bytes.clone()));
-                reads.insert(path.clone(), Some(bytes.clone()));
-                files.insert(path, bytes);
-            } else if section == "[paths]" {
-                let (path, name) = line
-                    .split_once(" -> ")
-                    .context("Slang snapshot resolution mapping")?;
-                let bytes = if matches!(name, "[not loaded]" | "[not found]") {
-                    None
-                } else if let Some((target, bytes)) = extracted.get(name) {
-                    resolved.insert(PathBuf::from(path), target.clone());
-                    Some(bytes.clone())
-                } else if let Some(bytes) = reads.get(&PathBuf::from(path)) {
-                    bytes.clone()
-                } else {
-                    uncertain.push(PathBuf::from(path));
-                    uncertain_details.push(line.to_owned());
-                    continue;
-                };
-                reads.insert(PathBuf::from(path), bytes);
-            }
-        }
-        let canonical = reads
-            .iter()
-            .filter_map(|(path, bytes)| {
-                let absolute = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    repro.parent().unwrap().join(path)
-                };
-                bytes.as_ref().and_then(|_| {
-                    absolute
-                        .canonicalize()
+        let path = self
+            .canonical
+            .get(path)
+            .cloned()
+            .or_else(|| {
+                self.directories.iter().rev().find_map(|(alias, target)| {
+                    path.strip_prefix(alias)
                         .ok()
-                        .map(|target| (absolute, target))
+                        .map(|suffix| target.join(suffix))
                 })
             })
-            .collect();
-        // An unrecognized external resolver record cannot be omitted from an
-        // identity. Fail closed instead of guessing its binding or caching a
-        // partial dependency graph.
-        let root = repro.parent().context("Slang snapshot directory")?;
-        ensure!(
-            uncertain.iter().all(|path| {
+            .unwrap_or_else(|| path.to_path_buf());
+        let mut result = self.frozen.clone();
+        let mut depth = 0;
+        for component in path.components() {
+            match component {
+                std::path::Component::Prefix(prefix) => {
+                    // A Windows verbatim/UNC prefix is not a safe path component.
+                    result.push(format!("prefix-{}", blake3::hash(prefix.as_os_str().to_string_lossy().as_bytes()).to_hex()));
+                }
+                std::path::Component::Normal(name) => { result.push(name); depth += 1; }
+                std::path::Component::ParentDir if depth > 0 => {
+                    result.pop();
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    fn command(&self, original: &Command) -> Command {
+        let mut command = Command::new(original.get_program());
+        command.current_dir(&self.root);
+        let mut include = false;
+        for arg in original.get_args() {
+            let path = Path::new(arg);
+            if include || self.files.contains_key(path) {
                 let absolute = if path.is_absolute() {
-                    path.clone()
+                    path.to_path_buf()
                 } else {
-                    root.join(path)
+                    self.root.join(path)
                 };
-                absolute.starts_with(root)
-                    && !path
-                        .components()
-                        .any(|c| c == std::path::Component::ParentDir)
-            }),
-            "unrecognized external Slang dependency snapshot mapping; cannot establish a safe cache identity: {uncertain_details:?}"
+                command.arg(self.mirror(&absolute));
+            } else {
+                command.arg(arg);
+            }
+            include = arg == "-I";
+        }
+        command
+    }
+
+    fn receipt(&self, work: &Workspace, identity: Vec<u8>) -> InputIdentity {
+        InputIdentity {
+            identity,
+            reads: self
+                .reads
+                .iter()
+                .filter(|(p, _)| !p.starts_with(&work.0))
+                .map(|(p, b)| (p.clone(), b.clone()))
+                .collect(),
+            reusable: true,
+            resolved: self.resolved.clone(),
+            canonical: self.canonical.clone(),
+        }
+    }
+
+    pub(super) fn dependencies(&self) -> Vec<PathBuf> {
+        self.files.keys().cloned().collect()
+    }
+
+    fn check_dependencies(&self, depfile: &Path) -> Result<()> {
+        let actual: BTreeSet<_> = depfile_paths(&read_compiler_text(depfile)?)
+            .into_iter()
+            .collect();
+        let expected: BTreeSet<_> = self.files.keys().map(|p| self.mirror(p)).collect();
+        ensure!(
+            actual == expected,
+            "Slang dependency resolution escaped its captured workspace; cannot cache the result: actual {actual:?}, expected {expected:?}"
         );
-        Ok(Self {
-            repro,
-            files,
-            reads,
-            uncertain,
-            resolved,
-            canonical,
-        })
+        Ok(())
     }
 }
 
-impl Snapshot {
-    fn receipt(&self, work: &Workspace, identity: Vec<u8>) -> InputIdentity {
-        let locate = |path: &Path| {
-            if path.is_absolute() {
-                path.to_path_buf()
+/// Slang does not preserve requested symlink spellings in its depfile. Inspect
+/// each direct search/source directory once; unrelated, inaccessible or vanished
+/// entries are not compiler inputs. The injected reader also tests this I/O bound.
+fn dependency_aliases<'a>(
+    directories: impl IntoIterator<Item = &'a PathBuf>,
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+    mut read_directory: impl FnMut(&Path) -> std::io::Result<fs::ReadDir>,
+) -> BTreeMap<PathBuf, PathBuf> {
+    let mut found = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    for directory in directories {
+        if !visited.insert(directory) { continue; }
+        let Ok(entries) = read_directory(directory) else { continue; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !entry.file_type().is_ok_and(|kind| kind.is_symlink()) { continue; }
+            let Ok(target) = path.canonicalize() else { continue; };
+            if files.contains_key(&target) {
+                found.insert(path, target);
             } else {
-                work.0.join(path)
+                for loaded in files.keys() {
+                    if let Ok(suffix) = loaded.strip_prefix(&target) {
+                        found.insert(path.join(suffix), loaded.clone());
+                    }
+                }
             }
-        };
-        let reusable = !self
-            .uncertain
-            .iter()
-            .any(|p| !locate(p).starts_with(&work.0))
-            && !self.reads.keys().any(|p| {
-                locate(p).starts_with(&work.0)
-                    && p.components().any(|c| c == std::path::Component::ParentDir)
-            });
-        let reads: BTreeMap<PathBuf, Option<Vec<u8>>> = self
-            .reads
-            .iter()
-            .filter_map(|(path, bytes)| {
-                let path = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    work.0.join(path)
-                };
-                (!path.starts_with(&work.0)).then(|| (path, bytes.clone()))
-            })
-            .chain(
-                self.files
-                    .iter()
-                    .filter(|(p, _)| !p.starts_with(&work.0))
-                    .map(|(p, b)| (p.clone(), Some(b.clone()))),
-            )
-            .collect();
-        let resolved: BTreeMap<_, _> = self
-            .resolved
-            .iter()
-            .filter(|(p, _)| !locate(p).starts_with(&work.0))
-            .map(|(p, t)| (locate(p), locate(t)))
-            .collect();
-        let canonical: BTreeMap<_, _> = self
-            .canonical
-            .iter()
-            .filter(|(path, _)| !path.starts_with(&work.0))
-            .map(|(p, t)| (p.clone(), t.clone()))
-            .collect();
-        let reusable = reusable
-            && resolved.iter().all(|(p, t)| {
-                canonical
-                    .get(p)
-                    .is_some_and(|c| t.canonicalize().ok().as_ref() == Some(c))
-            });
-        InputIdentity {
-            identity,
-            reads,
-            reusable,
-            resolved,
-            canonical,
         }
     }
+    found
+}
+
+pub(super) fn capture_command(
+    work: &Workspace,
+    command: &mut Command,
+    depfile: &Path,
+) -> Result<(std::process::Output, Snapshot)> {
+    let output = compiler_output(command)?;
+    ensure!(
+        output.status.success(),
+        "Slang identity: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dependencies = depfile_paths(&read_compiler_text(depfile)?);
+    let mut snapshot = Snapshot {
+        root: work.0.clone(),
+        frozen: work.0.join("captured-inputs"),
+        files: BTreeMap::new(),
+        reads: BTreeMap::new(),
+        directories: BTreeMap::new(),
+        resolved: BTreeMap::new(),
+        canonical: BTreeMap::new(),
+    };
+    let mut directories = BTreeSet::new();
+    let mut include = false;
+    for arg in command.get_args() {
+        if include {
+            let path = PathBuf::from(arg);
+            directories.insert(if path.is_absolute() {
+                path
+            } else {
+                work.0.join(path)
+            });
+        }
+        include = arg == "-I";
+    }
+    for path in &dependencies {
+        snapshot.files.insert(path.clone(), fs::read(path)?);
+        directories.insert(path.parent().context("dependency parent")?.to_path_buf());
+    }
+    // Depfiles canonicalize symlinks, losing names such as helper.slang ->
+    // implementation.slang. Recover only immediate aliases in the compiler's
+    // search/source directories. Never enumerate their descendants.
+    let aliases_found = if snapshot.files.keys().any(|p| !p.starts_with(&work.0)) {
+        dependency_aliases(
+            directories.iter().filter(|p| !p.starts_with(&work.0)),
+            &snapshot.files,
+            |directory| fs::read_dir(directory),
+        )
+    } else {
+        BTreeMap::new()
+    };
+    // Slang's depfile omits unsuccessful lookups. Probe a conservative superset:
+    // every suffix of each loaded path in every search/source directory. This
+    // includes dotted module paths, textual includes and same-leaf aliases,
+    // without parsing Slang source or trying to emulate its preprocessor.
+    let mut suffixes = BTreeSet::new();
+    for path in dependencies
+        .iter()
+        .chain(aliases_found.keys())
+        .filter(|p| !p.starts_with(&work.0))
+    {
+        let components: Vec<_> = path
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        for start in 0..components.len() {
+            suffixes.insert(components[start..].iter().collect::<PathBuf>());
+        }
+    }
+    for directory in directories.iter().filter(|p| !p.starts_with(&work.0)) {
+        if let Ok(target) = directory.canonicalize() {
+            snapshot
+                .directories
+                .insert(directory.clone(), target.clone());
+            snapshot.canonical.insert(directory.clone(), target);
+        }
+    }
+    let mut probes: BTreeSet<_> = dependencies
+        .iter()
+        .chain(aliases_found.keys())
+        .cloned()
+        .collect();
+    for directory in directories.iter().filter(|p| !p.starts_with(&work.0)) {
+        for ancestor in directory.ancestors() {
+            for suffix in &suffixes {
+                probes.insert(ancestor.join(suffix));
+            }
+        }
+    }
+    if snapshot.frozen.exists() {
+        fs::remove_dir_all(&snapshot.frozen)?;
+    }
+    for path in probes {
+        let bytes = fs::read(&path).ok();
+        if let Some(bytes) = &bytes {
+            if !path.starts_with(&work.0) {
+                let target = path.canonicalize()?;
+                snapshot.canonical.insert(path.clone(), target.clone());
+                snapshot.resolved.insert(path.clone(), target);
+                let mirror = snapshot.mirror(&path);
+                fs::create_dir_all(mirror.parent().unwrap())?;
+                fs::write(mirror, bytes)?;
+            }
+        }
+        snapshot.reads.insert(path, bytes);
+    }
+    for (alias, target) in aliases_found {
+        // Keep a physical alias in the retained tree. Its canonical destination
+        // is another retained file, never the mutable external source.
+        let saved = snapshot.canonical.remove(&alias);
+        let mirror = snapshot.mirror(&alias);
+        if let Some(target) = saved {
+            snapshot.canonical.insert(alias.clone(), target);
+        }
+        let target = snapshot.mirror(&target);
+        if mirror != target {
+            fs::create_dir_all(mirror.parent().unwrap())?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &mirror)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(&target, &mirror)?;
+        }
+    }
+    for (path, bytes) in &snapshot.files {
+        ensure!(
+            snapshot.reads.get(path) == Some(&Some(bytes.clone())),
+            "Slang import {} changed during compilation; retry the command",
+            path.display()
+        );
+    }
+    // The discovery pass is never the published result when it read external
+    // files. Recompile from retained bytes, checking the compiler's closure.
+    let external = snapshot.files.keys().any(|p| !p.starts_with(&work.0));
+    let output = if external {
+        let output = compiler_output(&mut snapshot.command(command))?;
+        ensure!(
+            output.status.success(),
+            "Slang captured inputs: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        snapshot.check_dependencies(depfile)?;
+        output
+    } else {
+        output
+    };
+    ensure!(
+        snapshot.receipt(work, Vec::new()).current(),
+        "Slang inputs changed during compilation; retry the command"
+    );
+    Ok((output, snapshot))
 }
 
 impl Compiler {
     pub fn input_policy(&self) -> String {
-        format!("snapshot-v3-checked-module-imports:{VERSION}:{}", self.executable.display())
+        format!("workspace-v4-depfile-inputs:{VERSION}:{}", self.executable.display())
     }
     pub fn with_identity(&self, identity: &InputIdentity) -> Self {
         Self {
@@ -357,6 +471,15 @@ impl Compiler {
     ) -> Result<PreparedModules> {
         let _progress = crate::progress::Job::start(false);
         self.version()?;
+        let cwd = std::env::current_dir()?;
+        let mut include = false;
+        let absolute_args: Vec<String> = args.iter().map(|arg| {
+            let value = if include { cwd.join(arg).to_string_lossy().into_owned() } else { (*arg).to_owned() };
+            include = *arg == "-I";
+            value
+        }).collect();
+        let args: Vec<&str> = absolute_args.iter().map(String::as_str).collect();
+        let args = args.as_slice();
         let work = Workspace::new()?;
         for (name, source) in modules {
             let path = work.0.join(format!("{name}.slang"));
@@ -364,7 +487,6 @@ impl Compiler {
             fs::write(path, source)?;
         }
         let main = work.0.join(format!("{main}.slang"));
-        let repro = work.0.join("capture.repro");
         let depfile = work.0.join("capture.d");
         let mut command = Command::new(&self.executable);
         command
@@ -372,30 +494,31 @@ impl Compiler {
             .current_dir(&work.0)
             .arg(INITIALIZATION)
             .arg("-I")
-            .arg(&work.0)
-            .args(args);
+            .arg(&work.0);
+        // Slang only writes depfiles when code generation is enabled. Emitting
+        // a module with no native target runs the frontend without optimization.
+        let mut options = args.iter();
+        while let Some(arg) = options.next() {
+            if *arg == "-target" { options.next(); command.args(["-target", "none"]); } else { command.arg(arg); }
+        }
         for (entry, stage) in entries {
             command.args(["-entry", entry, "-stage", stage]);
         }
-        let output = compiler_output(
-            command
-                .args(["-no-codegen", "-notes-disable", "88", "-o"])
+        command
+                .args(["-notes-disable", "88", "-o"])
                 .arg(work.0.join("capture.slang-module"))
                 .arg("-depfile")
-                .arg(&depfile)
-                .arg("-dump-repro")
-                .arg(&repro),
-        )?;
+                .arg(&depfile);
+        let (output, snapshot) = capture_command(&work, &mut command, &depfile)?;
         ensure!(
             output.status.success(),
             "Slang identity: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let snapshot = Snapshot::read(self, repro)?;
         let mut dependencies: Vec<_> = snapshot.files.keys().cloned().collect();
         dependencies.sort_by_key(|path| path.strip_prefix(&work.0).unwrap_or(path).to_path_buf());
         let mut identity = Vec::new();
-        part(&mut identity, if normalize_root.is_some() { b"slang-input-snapshot-v1" } else { b"slang-input-snapshot-v3-checked-module-imports" });
+        part(&mut identity, if normalize_root.is_some() { b"slang-input-workspace-v4" } else { b"slang-input-workspace-v4-depfile-inputs" });
         part(&mut identity, VERSION.as_bytes());
         part(&mut identity, INITIALIZATION.as_bytes());
         let external = snapshot.files.keys().any(|path| !path.starts_with(&work.0));
@@ -455,8 +578,6 @@ impl Compiler {
             if eligible {
                 let mut command = Command::new(&self.executable);
                 command
-                    .arg("-repro-file-system")
-                    .arg(&snapshot.repro)
                     .arg(&path)
                     .current_dir(&work.0)
                     .arg(INITIALIZATION)
@@ -464,7 +585,7 @@ impl Compiler {
                     .arg(&work.0)
                     .args(args)
                     .args(["-E", "-line-directive-mode", "none"]);
-                let tokens = compiler_output(&mut command)?;
+                let tokens = compiler_output(&mut snapshot.command(&command))?;
                 ensure!(
                     tokens.status.success(),
                     "preprocess Slang identity: {}",
@@ -626,8 +747,6 @@ impl PreparedModules {
         // Options must precede the serialized input: Slang loads its imports
         // while parsing that argument, before seeing any later defines.
         command
-            .arg("-repro-file-system")
-            .arg(&self.snapshot.repro)
             .current_dir(&self.work.0)
             .arg(INITIALIZATION)
             .arg("-I")
@@ -641,13 +760,19 @@ impl PreparedModules {
         if metal && !self.args.iter().any(|a| a == "-line-directive-mode") {
             command.args(["-line-directive-mode", "none"]);
         }
-        let result = compiler_output(command.arg("-o").arg(&output))?;
+        let depfile = self.work.0.join("native.d");
+        command.arg("-depfile").arg(&depfile).arg("-o").arg(&output);
+        let result = compiler_output(&mut self.snapshot.command(&command))?;
         ensure!(
             result.status.success(),
             "slangc {}: {}",
             result.status,
             String::from_utf8_lossy(&result.stderr)
         );
+        let allowed: BTreeSet<_> = self.snapshot.files.keys().map(|p| self.snapshot.mirror(p))
+            .chain(std::iter::once(self.module.clone())).collect();
+        ensure!(depfile_paths(&read_compiler_text(&depfile)?).iter().all(|p| allowed.contains(p)),
+            "Slang code generation escaped its captured dependency closure; cannot cache the result");
         let mut code = fs::read(output)?;
         if metal
             && self.args.windows(2).any(|a| {
@@ -668,18 +793,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_missing_import_probes_invalidate_when_a_file_appears() -> Result<()> {
+    fn retained_paths_stay_inside_the_owned_workspace() -> Result<()> {
         let work = Workspace::new()?;
+        let snapshot = Snapshot {
+            root: work.0.clone(), frozen: work.0.join("captured-inputs"),
+            directories: BTreeMap::new(), files: BTreeMap::new(), reads: BTreeMap::new(),
+            resolved: BTreeMap::new(), canonical: BTreeMap::new(),
+        };
+        let paths = if cfg!(windows) {
+            vec![r"C:\..\..\external.slang", r"\\?\C:\external.slang", r"\\server\share\external.slang"]
+        } else { vec!["/../../external.slang"] };
+        for path in paths {
+            let retained = snapshot.mirror(Path::new(path));
+            assert!(retained.starts_with(&snapshot.frozen), "{retained:?}");
+            assert_eq!(retained.file_name().unwrap(), "external.slang");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identified_modules_sweep_workspace_path_lengths() -> Result<()> {
+        const CHILD: &str = "VORK_TEST_SNAPSHOT_PATH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let compiler = Compiler::discover();
+            let material = "public float value(){return 0.25;}";
+            let main = "import material; RWStructuredBuffer<float> result; [numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){result[id.x]=value();}";
+            for target in ["spirv", "metal"] {
+                let ids = BTreeMap::from([("material".into(), b"proven-material".to_vec())]);
+                let prepared = compiler.prepare_identified_modules(
+                    &[("main", main), ("material", material)], "main",
+                    &[("main", "compute")], &["-target", target], &ids)?;
+                assert!(!prepared.compile()?.is_empty());
+                assert!(prepared.receipt().valid());
+            }
+            return Ok(());
+        }
+        // Each subprocess gets its own TMPDIR (and Windows TEMP/TMP); never
+        // mutate the multithreaded test runner's process environment.
+        let root = Workspace::new()?;
+        for length in 1..=40 {
+            let directory = root.0.join("x".repeat(length));
+            fs::create_dir(&directory)?;
+            let output = Command::new(std::env::current_exe()?)
+                .args(["--exact", "identity::tests::identified_modules_sweep_workspace_path_lengths", "--nocapture"])
+                .env(CHILD, "1").env("TMPDIR", &directory)
+                .env("TEMP", &directory).env("TMP", &directory).output()?;
+            ensure!(output.status.success(), "workspace path length {length}: {}{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nested_import_and_textual_include_probes_track_new_files() -> Result<()> {
+        let compiler = Compiler::discover();
         let external = Workspace::new()?;
-        let missing = external.0.join("higher_priority.slang");
-        let manifest = format!("[files]\n[paths]\n{} -> [not found]\n", missing.display());
-        let snapshot = Snapshot::read_manifest(work.0.join("input.slang-repro"), &work.0, &manifest)?;
-        let receipt = snapshot.receipt(&work, vec![]);
-        assert!(receipt.valid());
-        fs::write(&missing, "export static const float value = 2.;")?;
-        assert!(!receipt.valid(), "a newly resolved import must invalidate the receipt");
-        let manifest = format!("[files]\n[paths]\n{} -> [unknown]\n", missing.display());
-        assert!(Snapshot::read_manifest(work.0.join("input.slang-repro"), &work.0, &manifest).is_err());
+        let first = external.0.join("first");
+        let second = external.0.join("second");
+        fs::create_dir_all(first.join("nested"))?;
+        fs::create_dir_all(second.join("nested"))?;
+        fs::write(second.join("nested/helper.slang"), "#include \"value.h\"\npublic float value(){return VALUE;}")?;
+        fs::write(second.join("nested/value.h"), "#define VALUE 0.25\n")?;
+        let first_text = first.display().to_string();
+        let second_text = second.display().to_string();
+        let modules = [("main", "import nested.helper; RWStructuredBuffer<float> result; [numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){result[id.x]=value();}")];
+        for target in ["spirv", "metal"] {
+            let args = ["-target", target, "-I", &first_text, "-I", &second_text];
+            let before = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &args)?;
+            let code = before.compile()?;
+            assert!(before.receipt().valid());
+            fs::write(first.join("nested/helper.slang"), "public float value(){return 0.75;}")?;
+            assert!(!before.receipt().valid());
+            let after = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &args)?;
+            assert_ne!(before.identity(), after.identity());
+            assert_ne!(code, after.compile()?);
+            assert_eq!(code, before.compile()?);
+            fs::remove_file(first.join("nested/helper.slang"))?;
+        }
         Ok(())
     }
 
@@ -806,6 +996,7 @@ mod tests {
     #[test]
     fn native_snapshot_tracks_resolution_and_codegen_uses_captured_bytes() -> Result<()> {
         let compiler = Compiler::discover();
+        for target in ["spirv", "metal"] {
         let work = Workspace::new()?;
         let first = work.0.join("first");
         let second = work.0.join("second");
@@ -820,7 +1011,7 @@ mod tests {
         ];
         let first_text = first.display().to_string();
         let second_text = second.display().to_string();
-        let args = ["-target", "spirv", "-I", &first_text, "-I", &second_text];
+        let args = ["-target", target, "-I", &first_text, "-I", &second_text];
         let base = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &args)?;
         let binary = base.compile()?;
         let mut artifacts = BTreeMap::new();
@@ -881,12 +1072,14 @@ mod tests {
             "new higher-priority file must invalidate"
         );
         assert_ne!(edited.compile()?, shadowed.compile()?);
+        }
         Ok(())
     }
 
     #[test]
     fn proven_generated_modules_do_not_reintroduce_original_comments() -> Result<()> {
         let compiler = Compiler::discover();
+        for target in ["spirv", "metal"] {
         let work = Workspace::new()?;
         let abi = Abi {
             aov_count: 0,
@@ -898,7 +1091,7 @@ mod tests {
         let main = "import material; RWStructuredBuffer<float> result; [numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){result[id.x]=value();}";
         let proof = compiler.prepare_program(&abi, material, &origin)?;
         let ids = BTreeMap::from([("material".into(), proof.identity().to_vec())]);
-        let args = ["-target", "spirv"];
+        let args = ["-target", target];
         let base = compiler.prepare_identified_modules(
             &[("main", main), ("material", material)],
             "main",
@@ -930,6 +1123,7 @@ mod tests {
         )?;
         assert_ne!(base.identity(), edited.identity());
         assert_ne!(binary, edited.compile()?);
+        }
         Ok(())
     }
 
@@ -1002,6 +1196,122 @@ mod tests {
                 compiler.prepare_program(&abi, &source, &origin)?.identity(),
                 "the WGSL proof alone does not see this dependency"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn alias_discovery_never_walks_subtrees_or_fails_on_unreadable_entries() -> Result<()> {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let work = Workspace::new()?;
+        let loaded = work.0.join("implementation.slang");
+        fs::write(&loaded, "public float value(){return 0.25;}")?;
+        symlink(&loaded, work.0.join("helper.slang"))?;
+        symlink("loop", work.0.join("loop"))?;
+        symlink("gone", work.0.join("dangling"))?;
+        let blocked = work.0.join("unreadable");
+        fs::create_dir(&blocked)?;
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0))?;
+        let files = BTreeMap::from([(loaded.clone(), fs::read(&loaded)?)]);
+        let mut opened = Vec::new();
+        let mut scan = || dependency_aliases([&work.0, &work.0, &blocked], &files, |directory| {
+            opened.push(directory.to_path_buf());
+            // Also exercise permission failure when tests run as root.
+            if directory == blocked { return Err(std::io::ErrorKind::PermissionDenied.into()); }
+            fs::read_dir(directory)
+        });
+        let before = scan();
+        for i in 0..200 {
+            let directory = work.0.join(format!("tree/{i}/child"));
+            fs::create_dir_all(&directory)?;
+            for j in 0..100 { fs::write(directory.join(format!("{j}.slang")), "unrelated")?; }
+        }
+        let after = scan();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))?;
+        assert_eq!(before, BTreeMap::from([(work.0.join("helper.slang"), loaded)]));
+        assert_eq!(after, before);
+        assert_eq!(opened, [work.0.clone(), blocked.clone(), work.0.clone(), blocked]);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn imported_program_ignores_unreadable_descendants() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let compiler = Compiler::discover();
+        let external = Workspace::new()?;
+        fs::write(external.0.join("helper.slang"), "public float value(){return 0.25;}")?;
+        std::os::unix::fs::symlink("loop", external.0.join("loop"))?;
+        let include = external.0.to_string_lossy();
+        let modules = [("main", "import helper; RWStructuredBuffer<float> result; [numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){result[id.x]=value();}")];
+        for layout in ["unreadable", "one/two/unreadable", "home/Library"] {
+            let blocked = external.0.join(layout);
+            fs::create_dir_all(&blocked)?;
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0))?;
+            let result = (|| -> Result<()> {
+                for target in ["spirv", "metal"] {
+                    let args = ["-target", target, "-I", &include];
+                    let prepared = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &args)?;
+                    assert!(prepared.receipt().valid());
+                    assert!(!prepared.compile()?.is_empty());
+                }
+                Ok(())
+            })();
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))?;
+            result?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relative_program_origins_and_native_search_paths_use_callers_directory() -> Result<()> {
+        let compiler = Compiler::discover();
+        let unique = Workspace::new()?;
+        let local = Workspace(std::env::current_dir()?.join(unique.0.file_name().unwrap()));
+        fs::create_dir(&local.0)?;
+        fs::write(local.0.join("helper.slang"), "public float value(){return 0.25;}")?;
+        let relative = local.0.file_name().unwrap().to_str().unwrap();
+        let modules = [("main", "import helper; RWStructuredBuffer<float> result; [numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){result[id.x]=value();}")];
+        for target in ["spirv", "metal"] {
+            let prepared = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &["-target", target, "-I", relative])?;
+            assert!(prepared.receipt().valid());
+            assert!(!prepared.compile()?.is_empty());
+        }
+        assert_eq!(include_paths(Path::new("material.slang")), [PathBuf::from(".")]);
+        let source = format!("import \"{relative}/helper.slang\"; {SOURCE}");
+        let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: openpbr_fields() };
+        compiler.prepare_program(&abi, &source, Path::new("material.slang"))?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn file_symlink_names_are_captured_and_probed() -> Result<()> {
+        let compiler = Compiler::discover();
+        let external = Workspace::new()?;
+        let first = external.0.join("first");
+        let second = external.0.join("second");
+        fs::create_dir(&first)?;
+        fs::create_dir(&second)?;
+        let implementation = external.0.join("implementation.slang");
+        fs::write(&implementation, "public float value(){return 0.25;}")?;
+        std::os::unix::fs::symlink(&implementation, second.join("helper.slang"))?;
+        let first_text = first.display().to_string();
+        let second_text = second.display().to_string();
+        let modules = [("main", "import helper; RWStructuredBuffer<float> result; [numthreads(1,1,1)] void main(uint3 id:SV_DispatchThreadID){result[id.x]=value();}")];
+        for target in ["spirv", "metal"] {
+            let args = ["-target", target, "-I", &first_text, "-I", &second_text];
+            let before = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &args)?;
+            let code = before.compile()?;
+            assert!(before.receipt().valid());
+            fs::write(first.join("helper.slang"), "public float value(){return 0.75;}")?;
+            assert!(!before.receipt().valid());
+            let after = compiler.prepare_modules(&modules, "main", &[("main", "compute")], &args)?;
+            assert_ne!(before.identity(), after.identity());
+            assert_ne!(code, after.compile()?);
+            assert_eq!(code, before.compile()?);
+            fs::remove_file(first.join("helper.slang"))?;
         }
         Ok(())
     }

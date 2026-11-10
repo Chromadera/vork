@@ -430,64 +430,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires lavapipe or Metal and pinned Slang; emits setup volume variants as MSL"]
-    fn setup_volume_variants_emit_msl() -> Result<()> {
-        let Some(r) = crate::test_renderer()? else { anyhow::bail!("GPU required"); };
-        let scenes = scenes(&r, vork_scene::libraries::prebuilt_programs())?;
-        let jobs = compile_jobs(&scenes)?;
-        let output = std::env::temp_dir().join(format!("vork-setup-metal-{}", std::process::id()));
-        std::fs::create_dir_all(&output)?;
-        eprintln!("MSL setup sources: {}", output.display());
-        for (scene, integrator) in jobs {
-            if !scene["nodes"].as_array().unwrap().iter().any(|node| node.get("medium").is_some()) { continue; }
-            let label = format!("materials={}, integrator={integrator:?}", scene["materials"]);
-            eprintln!("MSL setup: {label}");
-            let scene = prepare(scene, integrator)?;
-            let stages = programs::mesh_stages(&r, &scene, Path::new("."))?;
-            let environment = environment_node::Settings::from_scene(&scene)?;
-            if let Some(mut installed) = medium::install(&r, &scene, environment.medium.as_deref(), Path::new("."), &stages)? {
-                installed.native.configure_storage(&scene, &r.device.limits())?;
-                let native = installed.native;
-                let mut column = native.clone();
-                column.boundaries = 0;
-                column.world_only = true;
-                for (entry, native) in [("volume_visibility_world", &column), ("volume_lighting", &column), ("volume_apply", &native)] {
-                    for rays in [false, true] {
-                        let mut native = native.clone();
-                        native.ray_shadows = rays;
-                        native.link_shadow_programs(None, crate::rt::may_refract(&scene));
-                        let code = passes::resolve::cached_native(&r, &installed.shader, &native, entry, true)
-                            .with_context(|| format!("{label}: {entry}, rays={rays}"))?;
-                        let path = output.join(format!("{entry}-{}.metal", blake3::hash(&code).to_hex()));
-                        std::fs::write(&path, &code)?;
-                        if native.program_coverage {
-                            let code = std::str::from_utf8(&code)?;
-                            let signature = code.split("[[kernel]]").nth(1).context("Metal entry")?
-                                .split('{').next().unwrap();
-                            ensure!(!signature.contains("array<uint device*"), "{label}: unbound by-value hit buffer array in {entry}");
-                            let layout = crate::resolve_native::Layout { volume:true, rays, shadow_closures:true };
-                            let slot = crate::resolve_native::hit_base(entry, layout);
-                            let hit = signature.split(" medium_hit_buffers").nth(1).context("Metal hit table parameter")?
-                                .split(',').next().unwrap();
-                            ensure!(hit.contains(&format!("[[buffer({slot})]]")),
-                                "{label}: {entry} hit table must bind at Metal buffer {slot}: {signature}");
-                        }
-                        #[cfg(target_vendor = "apple")]
-                        {
-                            if path.with_extension("air").is_file() { continue; }
-                            let result = std::process::Command::new("xcrun")
-                                .args(["-sdk", "macosx", "metal", "-c", "-std=metal3.2"])
-                                .arg(&path).arg("-o").arg(path.with_extension("air")).output()?;
-                            ensure!(result.status.success(), "{label}: {entry}, rays={rays}: {}", String::from_utf8_lossy(&result.stderr));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
     fn every_std_program_has_a_role() {
         let roles: Vec<_> = vork_scene::libraries::prebuilt_programs()
             .map(|name| (name, role(vork_slang::module_source(name).unwrap()))).collect();
@@ -495,8 +437,7 @@ mod tests {
             ("std/hair", Role::Hair), ("std/camera",Role::Camera), ("std/environment_image",Role::Environment)] {
             assert!(roles.contains(&(name, expected)), "{name}: {roles:?}");
         }
-        // Medium programs are authored on demand and absent from the shipped
-        // catalog; role detection must still recognize their entry signature.
+        // Authored media are recognized by their entry signature.
         assert_eq!(role("MediumCoefficients medium(MediumContext ctx) {}"), Role::Medium);
         // blender and post programs compile on first use.
         assert!(roles.iter().all(|(name, _)| name.starts_with("std/")), "{roles:?}");

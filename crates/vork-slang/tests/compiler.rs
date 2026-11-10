@@ -626,3 +626,153 @@ fn hair_dropped_stages_survive_compiler_cache_serialization() {
     let cached: vork_slang::Program = serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
     assert_eq!(cached.dropped_stages, program.dropped_stages);
 }
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn geometric_queries_remain_unknown_to_effect_analysis() {
+    let abi = Abi { aov_count: 0, context: Abi::spec_context(), closure: vork_slang::openpbr_fields() };
+    let compiler = Compiler::discover();
+    for (index, field) in ["h.hit", "h.distance > 0.", "h.position.x > 0.", "h.geometric_normal.x > 0.", "h.shading_normal.x > 0.", "h.object_id == 0u", "h.instance_index == 0u", "h.primitive_id == 0u", "h.barycentrics.x > 0.", "h.uv.x > 0.", "h.front_facing"].iter().enumerate() {
+        let source = format!("import vork; struct Inputs {{}}; Closure surface(ShadingContext ctx, Inputs inputs) {{ let h=trace(float3(0.),float3(0.,1.,0.),0.,1.); Closure c={{}}; c.transmission_weight=({field}) ? 1. : 0.;c.geometry_opacity=({field}) ? .5 : 1.; return c; }}");
+        let program = compiler.compile_surface(&abi, &source, Path::new("trace-effects.slang"), &format!("trace{index}")).unwrap();
+        assert!(program.capabilities.transmission, "{field} must remain scene-dependent");
+        assert!(program.capabilities.dependencies.trace, "{field} must retain the AS dependency");
+        assert!(program.effect_probe().unwrap().coverage_varies(&[],false), "{field} can vary with the scene snapshot");
+    }
+    let source = "import vork; struct Inputs {}; Closure surface(ShadingContext ctx, Inputs inputs) { Closure c={}; if(false) { c.transmission_weight=trace(float3(0.),float3(0.,1.,0.),0.,1.).distance; } return c; }";
+    let program = compiler.compile_surface(&abi, source, Path::new("trace-unused.slang"), "traceUnused").unwrap();
+    assert!(!program.capabilities.dependencies.trace);
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn geometric_queries_require_bounded_caller_loops() {
+    let compiler = Compiler::discover();
+    for (index, condition) in ["k<8u", "k<uint(ctx.time)", "trace(ctx.POSITION,ctx.NORMAL,0.,1.).hit", "inputs.repeat", "k<inputs.limit", "sample(inputs.picture,float2(0.),fixed).x>0."].iter().enumerate() {
+        let source = format!("import vork; struct Inputs {{bool repeat=false;uint limit=8u;Image picture;}}; Closure surface(ShadingContext ctx, Inputs inputs) {{ ShadingContext fixed={{}};float hits=0.; for(uint k=0u;{condition};k++) {{hits+=trace(ctx.POSITION,ctx.NORMAL,0.,1.).hit ? 1. : 0.;}} Closure c={{}};c.base_color=float3(hits);return c;}}");
+        let result = compiler.compile_surface(&abi(), &source, Path::new("trace-loops.slang"), &format!("traceLoops{index}"));
+        if index == 0 {result.unwrap();} else {assert!(format!("{:#}",result.unwrap_err()).contains("provably finite"));}
+    }
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn geometric_queries_refuse_geometry_and_output_stages() {
+    let compiler=Compiler::discover();
+    for (index, stage) in [
+        "float3 displace(DisplacementContext ctx,Inputs i) {return float3(trace(float3(0.),float3(0.,1.,0.),0.,1.).distance);}",
+        "Closure lit(ShadingContext ctx,Inputs i,Lighting l) {Closure c={};c.base_color=trace(ctx.POSITION,ctx.NORMAL,0.,1.).position;return c;}",
+        "void aov(ShadingContext ctx,Inputs i,inout AovOutputs o) {write_aov(o,i.a,trace(ctx.POSITION,ctx.NORMAL,0.,1.).distance);}",
+    ].iter().enumerate() {
+        let source=format!("import vork;struct Inputs {{Aov a;}};Closure surface(ShadingContext c,Inputs i) {{return Closure();}} {stage}");
+        let result=compiler.compile_surface(&abi(),&source,Path::new("trace-stage.slang"),&format!("traceStage{index}"));
+        assert!(format!("{:#}",result.unwrap_err()).contains("trace is supported only in surface"));
+    }
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn reachable_queries_retain_native_work_effects() {
+    let abi=abi();let compiler=Compiler::discover();
+    let source="import vork;struct Inputs {};Closure surface(ShadingContext ctx,Inputs i) {let discarded=trace(ctx.POSITION,ctx.NORMAL,0.,1.);Closure c={};return c;}";
+    let program=compiler.compile_surface(&abi,source,Path::new("trace-discarded.slang"),"discardedTrace").unwrap();
+    assert!(program.capabilities.dependencies.trace);
+    let native=abi.native_module();
+    let start=native.find("__exported import program_trace;").unwrap();
+    let query=&native[start..native[start..].find("public struct Lighting").unwrap()+start];
+    let types=include_str!("../src/trace_types.slang");
+    let compile=|body:&str,provider:Option<&str>| {
+        let main=format!("import query;{} [[vk::binding(0,0)]] RWStructuredBuffer<uint> output;[shader(\"compute\")][numthreads(1,1,1)] void main() {{{body}}}",if provider.is_some(){"import provider;"}else{""});
+        let mut modules=vec![("query",query),("program_trace",types),("main",main.as_str())];
+        if let Some(provider)=provider {modules.push(("provider",provider));}
+        compiler.compile_modules(&modules,"main",&[("main","compute")],&["-target","spirv","-O2","-emit-spirv-directly"])
+    };
+    let plain=compile("output[0]=7u;",None).unwrap();
+    let unreachable=compile("if(false) {let ignored=trace(float3(0.),float3(0.,1.,0.),0.,1.);}output[0]=7u;",None).unwrap();
+    assert_eq!(plain,unreachable,"unreachable queries must leave identical native code");
+    let ignored="let ignored=trace(float3(0.),float3(0.,1.,0.),0.,1.);output[0]=7u;";
+    assert!(format!("{:#}",compile(ignored,None).unwrap_err()).contains("unresolved external"));
+    let live="output[0]=trace(float3(0.),float3(0.,1.,0.),0.,1.).hit ? 1u : 0u;";
+    assert!(format!("{:#}",compile(live,None).unwrap_err()).contains("unresolved external"));
+    let provider="import program_trace;[[vk::binding(1,0)]] RWStructuredBuffer<uint> counter;export TraceHit native_geometric_trace(float3 o,float3 d,float lo,float hi,uint mask,uint object) {uint index;InterlockedAdd(counter[0],1u,index);TraceHit h={};h.hit=index<16u;return h;}";
+    for body in [live,ignored] {
+    let counted=compile(body,Some(provider)).unwrap();
+    let words:Vec<_>=counted.chunks_exact(4).map(|b|u32::from_le_bytes(b.try_into().unwrap())).collect();
+    let mut cursor=5;let mut atomics=0;
+    while cursor<words.len() {let instruction=words[cursor];if instruction&0xffff==234 {atomics+=1;}cursor+=(instruction>>16) as usize;}
+    assert!(atomics>0,"reachable queries must retain work accounting");
+
+    }
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn authored_fog_candidates_use_the_physical_point_contract() {
+    let compiler = Compiler::discover();
+    let abi = abi();
+    for (name, homogeneous) in [("fog-constant", true), ("fog-height", false)] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(format!("{name}.slang"));
+        let source = fs::read_to_string(&path).unwrap();
+        let program = compiler.compile_medium(&abi, &source, &path, &name.replace("-", "")).unwrap();
+        assert_eq!(program.homogeneous, homogeneous);
+        assert_eq!(program.inputs.fields.len(), if homogeneous {4} else {6});
+        assert!(program.inputs.fields.iter().all(|field| !matches!(field.ty, Type::Image | Type::FloatGrid | Type::VectorGrid)));
+        let words = program.inputs.pack(&BTreeMap::new(), |_, _| unreachable!()).unwrap();
+        let words = words.iter().copied().map(Some).collect::<Vec<_>>();
+        assert!(program.bounded_work_for_inputs(&abi, &words).unwrap()>0);
+        assert!(!program.time_dependent_for_inputs(&abi, &words).unwrap());
+        assert!(!program.scattering_free_for_inputs(&abi, &words).unwrap());
+        assert!(program.emission_free_for_inputs(&abi, &words).unwrap());
+    }
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn medium_work_proof_refuses_unknown_loops_even_with_bounded_coefficients() {
+    let compiler=Compiler::discover();let abi=abi();
+    for (body,bounded) in [
+        ("float v=0.;for(uint j=0u;j<4u;j++){v+=c.position.y;}m.absorption=float3(abs(v));",true),
+        ("float v=0.;while(v<c.position.x){v+=1.;}m.absorption=float3(clamp(v,0.,1.));",false),
+    ] {
+        let source=format!("struct Inputs {{}}; MediumCoefficients medium(MediumContext c,Inputs i){{MediumCoefficients m={{}};{body}return m;}}");
+        let program=compiler.compile_medium(&abi,&source,Path::new("work.slang"),"workproof").unwrap();
+        let proof=program.bounded_work_for_inputs(&abi,&[]);
+        assert_eq!(proof.is_ok(),bounded,"{body}: {proof:?}");
+        if let Err(error)=proof {assert!(format!("{error:#}").contains("loop count is not provably finite"),"{error:#}");}
+    }
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn exponential_world_proof_accepts_world_and_identity_local_coordinates() {
+    let compiler=Compiler::discover();let abi=abi();
+    for coordinate in ["c.position.y","c.world_position.y"] {
+        let source=format!("struct Inputs {{}}; MediumCoefficients medium(MediumContext c,Inputs i){{MediumCoefficients m={{}};m.absorption=float3(.5*exp(-.7*{coordinate}));return m;}}");
+        let program=compiler.compile_medium(&abi,&source,Path::new("world-height.slang"),"worldheight").unwrap();
+        let (absorption,scattering,gradient)=program.exponential_for_inputs(&abi,&[]).unwrap().expect(coordinate);
+        assert_eq!(absorption,[0.5;3]);assert_eq!(scattering,[0.;3]);
+        assert_eq!(gradient,[0.,-0.7,0.]);
+    }
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn height_medium_preserves_provably_vacuum_channels() {
+    let compiler=Compiler::discover();let abi=abi();
+    let program=compiler.compile_medium(&abi,include_str!("fixtures/fog-height.slang"),Path::new("height.slang"),"heightvacuum").unwrap();
+    let inputs=serde_json::from_value(serde_json::json!({"absorption":[0,0.5,1],"scattering":[0,0,0],"emission":[0,0,0],"falloff":0.7})).unwrap();
+    let words=program.inputs.pack(&inputs,|_,_|unreachable!()).unwrap();
+    let proof=words.into_iter().map(Some).collect::<Vec<_>>();
+    assert!(program.scattering_free_for_inputs(&abi,&proof).unwrap());
+    assert!(program.emission_free_for_inputs(&abi,&proof).unwrap());
+    assert!(program.exponential_for_inputs(&abi,&proof).unwrap().is_some());
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn exponential_world_proof_refuses_vanished_positive_amplitude() {
+    let compiler=Compiler::discover();let abi=abi();
+    let source="struct Inputs {}; MediumCoefficients medium(MediumContext c,Inputs i) {MediumCoefficients m={};m.absorption=float3(exp(-c.world_position.y-1000.));return m;}";
+    let program=compiler.compile_medium(&abi,source,Path::new("thin-world.slang"),"thinworld").unwrap();
+    assert!(program.exponential_for_inputs(&abi,&[]).unwrap().is_none());
+}

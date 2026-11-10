@@ -13,10 +13,6 @@ import stream;
 import surface;
 import bsdf;
 import variant;
-#ifdef VORK_BOUNDED_MEDIUM
-import vork_medium_types;
-import vork_medium_bounds;
-#endif
 
 // What a transparent surface refracts: the opaque image it sees through
 // (its size, each pixel's receiver normal and depth, negative for background,
@@ -135,7 +131,6 @@ float3 transmission_radiance<V:IVariant,O:ITransmission,P:IProgram>(Varying v,Su
         var escaped=c.geometry_thin_walled || (!entering && dot(into,into)>0.);
         var exit_transmission=float3(1.);
         var exit_tint=float3(1.);
-        var medium_source=float3(0.);var medium_transmission=float3(1.);
         if (V.has_solid_transmission && !c.geometry_thin_walled && ((entering && dot(into,into)>0.) || rear_tir)) {
             var inside=rear_tir ? reflect(-view,n) : into;
             {
@@ -147,11 +142,6 @@ float3 transmission_radiance<V:IVariant,O:ITransmission,P:IProgram>(Varying v,Su
                 // ray into the scene; do not invent an exit normal, thickness, or black wall.
                 if (!boundary.found) {out_dir=inside;escaped=true;break;}
                 if (bounce>=frame.environment_links.z) {break;}
-#ifdef VORK_BOUNDED_MEDIUM
-                let interior=medium_transport_segment(exit,inside,medium_receiver(boundary.distance),.5,v.object);
-                medium_source+=medium_transmission*interior.source;
-                medium_transmission*=interior.transmission;
-#endif
                 chord+=boundary.distance;exit+=inside*boundary.distance;
                 out_dir=refract(inside,boundary.normal,eta);
                 if (dot(out_dir,out_dir)>0.) {
@@ -201,7 +191,7 @@ float3 transmission_radiance<V:IVariant,O:ITransmission,P:IProgram>(Varying v,Su
         }
         // Exit-interface transmission belongs to the escaped scene radiance;
         // interior sources are integrated before that boundary.
-        var behind=transmitted_scene*attenuation*medium_transmission*exit_transmission+medium_source;
+        var behind=transmitted_scene*attenuation*exit_transmission;
         // Light from behind passes the base substrate, so the coat and fuzz attenuate it too.
         if (V.layered && (c.coat_weight>0. || c.fuzz_weight>0.)) { let l=layers<V>(interface_closure,view);behind*=l.throughput*l.scale; }
         let transmission=c.transmission_weight*(1.-interface_fresnel);

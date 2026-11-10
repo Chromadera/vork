@@ -78,17 +78,10 @@ struct ReflectionSlots {
     bool merged;
     uint first_word;
     uint last_word;
-#ifdef VORK_REFLECTION_MEDIUM
-    uint first_sample;
-    uint last_sample;
-#endif
-    __init(StructuredBuffer<uint> slots,uint2 size,int2 selected,Frame frame,uint world_class,uint begin=0u,uint end=0xffffffffu,bool merged=true) {
+    __init(StructuredBuffer<uint> slots,uint2 size,int2 selected,Frame frame,uint world_class,uint begin=0u,uint end=0xffffffffu,bool merged=true,uint packet_pixels=0u,uint first_pixel=0u) {
         this.merged=merged;
-#ifdef VORK_REFLECTION_MEDIUM
-        first_sample=begin;last_sample=min(end,frame.sampling.w);
-#endif
         first_word=begin/32u;last_word=min((end==0xffffffffu ? frame.sampling.w : end)+31u,frame.sampling.w+31u)/32u;
-        this.layout=SlotLayout(size.x*size.y,frame.sampling.w);
+        this.layout=SlotLayout(size.x*size.y,frame.sampling.w,packet_pixels,first_pixel);
         this.pixel=uint(selected.y)*size.x+uint(selected.x);this.selected=selected;this.size=size;this.world_class=world_class;
         // Only opaque single-sample views omit the slot buffer. Transparent
         // views retain all merged receivers even with a single camera sample.
@@ -109,10 +102,6 @@ struct ReflectionSlots {
             // A traceable slot's mask words, then the next slot.
             if (word<last_word) {
                 bits=1u;if (merged) {bits=slots[at+REG_VISIBILITY_KEY_WORDS+word];}
-#ifdef VORK_REFLECTION_MEDIUM
-                if(word==first_word) {bits&=0xffffffffu<<(first_sample%32u);}
-                if(word+1u==last_word && last_sample%32u!=0u) {bits&=(1u<<(last_sample%32u))-1u;}
-#endif
                 word++;continue;
             }
             if (dense<(merged ? REG_VISIBILITY_SLOTS : 1u)) {
@@ -151,13 +140,13 @@ float3 reflection_sample<T:IReflectionTrace>(ReflectionSite site,uint2 cell,uint
     return T.trace(site,cell,index,incident,ray,pdf);
 }
 void reflection_integrate<T:IReflectionTrace>(uint3 gid,Frame frame,uint2 size,
-    StructuredBuffer<uint> reflection_slots,StructuredBuffer<uint> reflection_records[REG_VISIBILITY_REFLECTION_WORDS],StructuredBuffer<uint> reflection_guides,StructuredBuffer<uint> sampling,uint2 range,RWStructuredBuffer<float4> accumulation,RWTexture2DArray<float4> output,bool merged=true) {
+    StructuredBuffer<uint> reflection_slots,StructuredBuffer<uint> reflection_records[REG_VISIBILITY_REFLECTION_WORDS],StructuredBuffer<uint> reflection_guides,StructuredBuffer<uint> sampling,uint2 range,RWStructuredBuffer<float4> accumulation,RWTexture2DArray<float4> output,bool merged=true,uint packet_pixels=0u,uint first_pixel=0u) {
     if (any(gid.xy>=size) || gid.z>=REG_REFLECTION_CLASSES) {return;}
     let receiver=reflection_receiver(reflection_guides,size,gid.xy,gid.z);
     if (!receiver.eligible) {output[gid]=float4(0.);return;}
     let connection_probability=T.connection_probability();
     var sum=float3(0.);
-    var slots=ReflectionSlots(reflection_slots,size,receiver.pixel,frame,gid.z,range.x,range.y,merged);
+    var slots=ReflectionSlots(reflection_slots,size,receiver.pixel,frame,gid.z,range.x,range.y,merged,packet_pixels,first_pixel);
     ReflectionSite site;uint index;
     let count=sampling[frame.sampling.x];
     while (slots.next(reflection_slots,reflection_records,sampling,frame,site,index)) {

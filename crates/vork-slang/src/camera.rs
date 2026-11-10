@@ -20,7 +20,7 @@ impl Compiler {
         let compiled = self.compile(abi, source, origin, tag, false, |inputs, declarations| {
             ensure!(declarations.contains("camera"),
                 "camera material requires CameraRay camera(CameraContext, Inputs) and optional float3 sensor(SensorContext, Inputs)");
-            ensure!(inputs.fields.iter().all(|f| !matches!(f.ty, Type::Attribute(_)|Type::Aov|Type::FloatGrid|Type::VectorGrid|Type::Image)),
+            ensure!(inputs.fields.iter().all(|f| !matches!(f.ty, Type::Geometry | Type::Attribute(_)|Type::Aov|Type::FloatGrid|Type::VectorGrid|Type::Image)),
                 "camera and sensor inputs must be numeric");
             let decode = inputs.slang_decode();
             let mut wrapper = "[shader(\"compute\")][numthreads(1,1,1)] void vork_entry() {}\n".to_owned();

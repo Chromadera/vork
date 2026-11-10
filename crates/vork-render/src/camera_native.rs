@@ -2,14 +2,13 @@
 // One field list owns the upload struct and its Slang declaration.
 // Explicit padding aligns the trailing uint4 in both constant-buffer layouts.
 macro_rules! camera_config_fields {
-    ($consumer:ident) => { $consumer! { materials:u32=>uint, material:u32=>uint, samples:u32=>uint, direct:u32=>uint, diffusion:u32=>uint, aovs:u32=>uint, capacity:u32=>uint, words:u32=>uint, ray_shadows:u32=>uint, lit:u32=>uint, screen:u32=>uint, medium:u32=>uint, medium_capacity:u32=>uint, flags:u32=>uint, transparent:u32=>uint, transmittance_offset:u32=>uint, fibre_light_count:u32=>uint, band:u32=>uint, receiver_record_offset:u32=>uint, seed:u32=>uint, transport_parts:u32=>uint, transport_part:u32=>uint, transport_pad0:u32=>uint, transport_pad1:u32=>uint, boundaries:[u32;4]=>uint4 } };
+    ($consumer:ident) => { $consumer! { materials:u32=>uint, material:u32=>uint, samples:u32=>uint, direct:u32=>uint, diffusion:u32=>uint, aovs:u32=>uint, capacity:u32=>uint, words:u32=>uint, ray_shadows:u32=>uint, lit:u32=>uint, screen:u32=>uint, flags:u32=>uint, transparent:u32=>uint, transmittance_offset:u32=>uint, fibre_light_count:u32=>uint, band:u32=>uint, receiver_record_offset:u32=>uint, seed:u32=>uint, transport_parts:u32=>uint, transport_part:u32=>uint, packet_pixels:u32=>uint, packet_first_pixel:u32=>uint, packet_pad1:u32=>uint, packet_pad2:u32=>uint, boundaries:[u32;4]=>uint4 } };
 }
 #[allow(unused_imports)] // Build-time generator expands the macro locally.
 pub(crate) use camera_config_fields;
 
 use std::fmt::Write;
 /// Prebuilt visibility variants are an install-time cache, never an admission limit.
-pub const PRECOMPILED_MEDIUM_PAGES:u32=8;
 // Camera samples and retained-map intervals use ordered arithmetic in shipped
 // and runtime variants. Metal carries this contract into its native compiler.
 pub const COMPILER_FLAGS: &[&str] = &["-fp-mode", "precise"];
@@ -67,7 +66,7 @@ pub fn config_source()->String {
     macro_rules! declare {
         ($($field:ident:$rust:ty=>$slang:ident),*) => {concat!("public struct CameraConfig {", $("public ",stringify!($slang)," ",stringify!($field),";",)* "};\n")};
     }
-    format!("{}[[vk::binding({binding},4)]] public ConstantBuffer<CameraConfig> camera_config : register(b27);\n",camera_config_fields!(declare))
+    format!("{}[[vk::binding({binding},4)]] public ConstantBuffer<CameraConfig> camera_config : register(b26);\n",camera_config_fields!(declare))
 }
 pub struct BufferTable {
     pub name:&'static str,
@@ -77,9 +76,9 @@ pub struct BufferTable {
     pub resources:&'static [&'static str],
 }
 pub const TABLES:[BufferTable;3]=[
-    BufferTable {name:"camera_read_words",element:"uint",read_only:true,binding:3,resources:&["slots","draw_table","object_draws"]},
-    BufferTable {name:"camera_write_words",element:"uint",read_only:false,binding:4,resources:&["reflection_guides","subsurface_records","evaluation_metadata","evaluation_bins","evaluation_allocator"]},
-    BufferTable {name:"camera_write_vectors",element:"float4",read_only:false,binding:5,resources:&["aov_values","refraction_receivers"]},
+    BufferTable {name:"camera_read_words",element:"uint",read_only:true,binding:2,resources:&["slots","draw_table","object_draws"]},
+    BufferTable {name:"camera_write_words",element:"uint",read_only:false,binding:3,resources:&["reflection_guides","subsurface_records","evaluation_metadata","evaluation_bins","evaluation_allocator"]},
+    BufferTable {name:"camera_write_vectors",element:"float4",read_only:false,binding:4,resources:&["aov_values","refraction_receivers"]},
 ];
 #[allow(dead_code)] // Used by build_slang.rs.
 pub fn evaluation_source(source:&str)->String {
@@ -98,17 +97,14 @@ pub fn evaluation_source(source:&str)->String {
     declarations.push_str(r#"
 #ifdef VORK_METAL
 struct CameraReflectionFields {RWStructuredBuffer<uint> buffers[REG_VISIBILITY_REFLECTION_WORDS];};
-[[vk::binding(6,3)]] ParameterBlock<CameraReflectionFields> camera_reflections : register(b24);
+[[vk::binding(5,3)]] ParameterBlock<CameraReflectionFields> camera_reflections : register(b23);
 #define reflection_records camera_reflections.buffers
 #else
-[[vk::binding(6,3)]] RWStructuredBuffer<uint> camera_reflections[REG_VISIBILITY_REFLECTION_WORDS];
+[[vk::binding(5,3)]] RWStructuredBuffer<uint> camera_reflections[REG_VISIBILITY_REFLECTION_WORDS];
 #define reflection_records camera_reflections
 #endif
 "#);
     source=format!("{declarations}\n{source}");
-    let mut medium=String::new();
-    writeln!(medium,"#ifdef VORK_METAL\nstruct CameraMediumPages {{RWStructuredBuffer<uint> buffers[];}};\n[[vk::binding(2,3)]] ParameterBlock<CameraMediumPages> camera_medium : register(b20);\n#else\n[[vk::binding(2,3)]] RWStructuredBuffer<uint> camera_medium[] : register(u30);\n#endif").unwrap();
-    source=source.replace("// SAMPLE_STORAGE",&medium);
     let mut code=String::new();
     writeln!(code,"#ifdef VORK_METAL\nstruct CameraEvaluationPages {{RWStructuredBuffer<float4> buffers[];}};\n[[vk::binding(1,3)]] ParameterBlock<CameraEvaluationPages> evaluation_pages : register(b19);\n#else\n[[vk::binding(1,3)]] RWStructuredBuffer<float4> evaluation_pages[] : register(u12);\n#endif").unwrap();
     code.push_str(r#"
@@ -165,7 +161,6 @@ pub fn entry_source(stage:&str)->String {
         "classify"=>"classify_evaluations(gid,lane,false);",
         "prefix"=>"if(all(gid==uint3(0u))) {prefix_evaluations();}",
         "scatter"=>"classify_evaluations(gid,lane,true);",
-        "receivers"=>"volume_receivers<CameraPolicy,NoPrograms>(gid);",
         "combine"=>"if(camera_config.screen!=0u && camera_config.lit!=0u) {composite_pixel<CameraPolicy,NoPrograms,CameraTransmittance,3>(gid);} else {shade_pixel<CameraPolicy,NoPrograms,CameraTransmittance,CameraDiffusion,3>(gid);}",
         _=>panic!("unknown camera stage"),
     };

@@ -17,7 +17,6 @@ impl Resources {
         s: &InstalledScene,
         r: &Renderer,
         uniform: &wgpu::Buffer,
-        sample_buffers: &[wgpu::Buffer],
         ao_guides: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
         lights: &wgpu::Buffer,
         path_light_tree: Option<&wgpu::Buffer>,
@@ -31,7 +30,6 @@ impl Resources {
         output: &wgpu::Texture,
         planes: u32,
         exposure_samples: u32,
-        visibility_samples: u32,
         rays: Option<&crate::rt::FrameRays>,
         material: &wgpu::BindGroup,
         shader_errors: Option<&wgpu::Buffer>,
@@ -47,7 +45,7 @@ impl Resources {
         let denoiser=denoiser.filter(|_|needs_source);
         let reconstruct=reconstruct && needs_source;
         // Delivery of a composed image has no scene/medium bindings of its own.
-        let (pipelines,effects)=if needs_source || graph.runs(crate::graph::Pass::Volume) {(s.pipelines.clone(),s.plan.effects)} else {
+        let (pipelines,effects)=if needs_source {(s.pipelines.clone(),s.plan.effects)} else {
             let effects=crate::plan::EffectPlan {compositor:!s.plan.effects.fuse_controls(),
                 outputs:Some(crate::compositor::Dependencies {color:dependencies.color,..Default::default()}),..Default::default()};
             let pipelines=r.cached_pipelines(s.pipelines.raster_samples);
@@ -116,7 +114,7 @@ impl Resources {
         // active view's detector/throughput can invalidate surface RGB guides;
         // an unrelated camera program must not disable them for this view.
         let camera_program=s.camera_programs.iter().find(|p|p.node==camera);
-        let use_guides = camera_program
+        let use_guides = !s.has_media && camera_program
             .is_none_or(|p|p.unit_weight && !p.spectral && p.program.sensor_entry.is_none());
         let spectral=s.spectral || camera_program.is_some_and(|p|p.spectral);
         let guides = (denoiser.is_some() || reconstruct).then(|| targets.denoising_guides.as_ref()
@@ -168,22 +166,7 @@ impl Resources {
                 dependencies.beauty,
             )?;
         }
-        let froxels=pipelines.resolve_native.as_ref().map(|n|medium::paged_buffers(s,d,"volume froxel transport",n.froxel_bytes([w,h]),n.froxel_pages.max(1),n.froxel_page_elements));
-        let stride=d.limits().min_uniform_buffer_offset_alignment.max(32);
-        let sample_parameters=pipelines.resolve_native.as_ref().map(|_| {
-            let mut bytes=vec![0u8;visibility_samples.max(1) as usize*stride as usize];
-            for sample in 0..visibility_samples.max(1) {
-                let [x,y]=crate::sampling::clip_offset([w,h],sample as usize,visibility_samples.max(1) as usize);
-                bytes[sample as usize*stride as usize..sample as usize*stride as usize+16].copy_from_slice(bytemuck::cast_slice(&[sample,x.to_bits(),y.to_bits(),0]));
-                let disk=crate::sampling::lens_disk(sample as usize,visibility_samples.max(1) as usize);
-                bytes[sample as usize*stride as usize+16..sample as usize*stride as usize+32].copy_from_slice(bytemuck::cast_slice(&[disk.x,disk.y,0.,0.]));
-            }
-            gpu_memory::buffer_init(d,"volume sample indices",&bytes,wgpu::BufferUsages::UNIFORM)
-        });
-        let parameter=|sample:u32|wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:sample_parameters.as_ref().unwrap(),offset:u64::from(sample)*u64::from(stride),size:std::num::NonZeroU64::new(32)});
-        let sample_pages:Vec<_>=sample_buffers.iter().map(|b|wgpu::BufferBinding {buffer:b,offset:0,size:None}).collect();
-        let froxel_pages:Vec<_>=froxels.iter().flatten().map(|b|wgpu::BufferBinding {buffer:b,offset:0,size:None}).collect();
-        let mut resolve_entries = vec![
+        let resolve_entries = vec![
                 entry(47, targets.nonfinite.as_entire_binding()),
                 entry(70, shader_errors.context("radiance diagnostics")?.as_entire_binding()),
                 entry(51, wgpu::BindingResource::TextureView(&targets.depth)),
@@ -219,22 +202,6 @@ impl Resources {
                     wgpu::BindingResource::TextureView(&s.environment.specular),
                 ),
             ];
-        if pipelines.resolve_native.as_ref().is_some_and(|n|n.program_coverage) {
-            resolve_entries.extend([
-                entry(13,wgpu::BindingResource::TextureView(&s.environment.brdf)),
-                entry(18,wgpu::BindingResource::TextureView(&s.environment.ltc)),
-            ]);
-        }
-        if pipelines.resolve_native.is_some() {
-            resolve_entries.push(entry(64,cluster_config.as_entire_binding()));
-            resolve_entries.push(entry(65,cluster_lights.as_entire_binding()));
-            resolve_entries.push(entry(3,parameter(0)));
-            if pipelines.resolve_native.as_ref().unwrap().ray_shadows {
-                resolve_entries.push(entry(59,rays.context("volume ray shadows require TLAS")?.tlas.as_binding()));
-                resolve_entries.push(entry(60,s.rays.as_ref().context("volume ray shadows require alpha table")?.alpha.as_entire_binding()));
-                resolve_entries.push(entry(71,rays.unwrap().emitter_weights.as_ref().map_or(&s.rays.as_ref().unwrap().alpha,|w|&w.buffer).as_entire_binding()));
-            }
-        }
         let resolve_bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("resolve plan"),
             layout: &resolve_pipeline.get_bind_group_layout(0),
@@ -249,63 +216,6 @@ impl Resources {
             p.get().cloned().context("incomplete installed post plan")
         };
         let full = [w.div_ceil(8), h.div_ceil(8), 1];
-        if let Some(native)=pipelines.resolve_native.as_ref().filter(|_|match &view_desc.kind {crate::views::ViewKind::Image {render,..}=>!render.settings.settings.integrator.is_path(),_=>!s.render.settings.integrator.is_path()}) {
-            // Mesh descriptors are installed after the shared pipeline registry.
-            // Specialize only this scene's lighting traversal to its actual count;
-            // resource layouts and the shared registry remain unchanged.
-            let mut column_native=native.clone();
-            column_native.boundaries=s.medium_boundaries;
-            column_native.world_only=s.medium_boundaries==0;
-            let froxel_groups=vec![resolve_pipeline.get_bind_group_layout(0),pipelines.mat_layout.clone()];
-            let hit_layout = native.program_coverage.then(||crate::rt::hits_layout(d));
-            let shadow_layout = crate::shadows::volume_layout(d);
-            let page_layout = medium::page_layout(d,native);
-            let mut froxel_group_refs:Vec<_>=froxel_groups.iter().map(Some).collect();
-            froxel_group_refs.push(Some(&shadow_layout));
-            froxel_group_refs.push(hit_layout.as_ref());
-            debug_assert_eq!(froxel_group_refs.len() as u32,crate::resolve_native::PAGE_GROUP);
-            froxel_group_refs.push(Some(&page_layout));
-            let pages=d.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("volume pages"),layout:&page_layout,entries:&[
-                entry(crate::resolve_native::FROXEL_PAGES,wgpu::BindingResource::BufferArray(&froxel_pages)),
-                entry(crate::resolve_native::SAMPLE_PAGES,wgpu::BindingResource::BufferArray(&sample_pages)),
-            ]});
-            let froxel_layout=d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label:Some("volume froxel layout"),bind_group_layouts:&froxel_group_refs,immediate_size:0,
-            });
-            let support_pipeline=self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_receiver_support",Some(&froxel_layout));
-            let lighting_pipeline=self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_lighting",Some(&froxel_layout));
-            let visibility_world=(native.visibility_lights>0).then(|| self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_visibility_world",Some(&froxel_layout)));
-            let world_side=vork_slang::registry::MEDIUM_VISIBILITY_SIDE;
-            let tile=native.tile.max(1);
-            let [cols,rows]=[w.div_ceil(tile),h.div_ceil(tile)];
-            let cells=[cols.div_ceil(8),rows.div_ceil(8),if s.medium_boundaries>0 {(native.slices+1).div_ceil(vork_slang::registry::MEDIUM_LIGHTING_DEPTH_BATCH)} else {native.slices+1}];
-            let shadow_bindings=|dispatch:crate::graph::Dispatch| {
-                let dispatch=dispatch.with_read_table(Some(s.shadows().volume_bind.clone()));
-                let dispatch=dispatch.with_material(material).with_pages(pages.clone());
-                if native.program_coverage {dispatch.with_hits(rays.unwrap().hits_bind(d))}else{dispatch}
-            };
-            let apply_pipeline=self::pipeline(r,&pipelines.resolve_module,Some(&column_native),"volume_apply",Some(&froxel_layout));
-            let mut dispatches=Vec::new();
-            // Complete the shared world visibility average before any reader.
-            // Camera cells still stream through their single froxel allocation.
-            let mut sample_binds=Vec::new();
-            for sample in 0..visibility_samples.max(1) {
-                let bind=if sample==0 {resolve_bind.clone()} else {
-                    resolve_entries.iter_mut().find(|e|e.binding==3).unwrap().resource=parameter(sample);
-                    d.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("volume sample"),layout:&resolve_pipeline.get_bind_group_layout(0),entries:&resolve_entries})
-                };
-                if let Some(pipeline)=&visibility_world {
-                    dispatches.push(shadow_bindings(crate::graph::Dispatch::new(pipeline,bind.clone(),[world_side.div_ceil(8),world_side.div_ceil(8),world_side])));
-                }
-                sample_binds.push(bind);
-            }
-            for bind in sample_binds {
-                dispatches.push(shadow_bindings(crate::graph::Dispatch::new(&support_pipeline,bind.clone(),[cols.div_ceil(8),rows.div_ceil(8),1])));
-                dispatches.push(shadow_bindings(crate::graph::Dispatch::new(&lighting_pipeline,bind.clone(),cells)));
-                dispatches.push(shadow_bindings(crate::graph::Dispatch::new(&apply_pipeline,bind,full)));
-            }
-            recorder.compute(crate::graph::Pass::Volume,"stream volume samples","volume",false,dispatches);
-        }
         let mut dispatches = Vec::new();
         if needs_source && (!compositor.is_empty() || s.has_catchers || denoiser.is_some() || reconstruct) {
             dispatches.push(crate::graph::Dispatch::new(
@@ -359,15 +269,6 @@ pub(crate) fn layout_entries(entry: &str) -> Vec<wgpu::BindGroupLayoutEntry> {
             min_binding_size: None,
         },
         Kind::Sampler => T::Sampler(wgpu::SamplerBindingType::Filtering),
-        Kind::Storage => T::StorageTexture {
-            access: wgpu::StorageTextureAccess::WriteOnly,
-            format: match binding {
-                27 => wgpu::TextureFormat::R32Float,
-                32 | 37 => wgpu::TextureFormat::Rg16Float,
-                _ => wgpu::TextureFormat::Rgba16Float,
-            },
-            view_dimension: wgpu::TextureViewDimension::D2,
-        },
         Kind::Texture => T::Texture {
             sample_type: if binding == 51 {wgpu::TextureSampleType::Depth} else if matches!(binding, 2 | 52) {
                 wgpu::TextureSampleType::Uint
@@ -381,7 +282,6 @@ pub(crate) fn layout_entries(entry: &str) -> Vec<wgpu::BindGroupLayoutEntry> {
             },
             multisampled: (51..=55).contains(&binding) && entry != "resolve_fused_single",
         },
-        Kind::ArgumentTable | Kind::Acceleration => unreachable!("resolve base binding {binding}"),
     };
     crate::resolve_native::bindings(entry)
         .iter()
@@ -394,15 +294,6 @@ pub(crate) fn layout_entries(entry: &str) -> Vec<wgpu::BindGroupLayoutEntry> {
         .collect()
 }
 /// Lookup tables used by the shared straight-segment closure evaluator.
-pub(crate) fn shadow_closure_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
-    crate::resolve_native::SHADOW_CLOSURE_BINDINGS.into_iter().map(|binding| wgpu::BindGroupLayoutEntry {
-        binding, visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float {filterable:true},
-            view_dimension: wgpu::TextureViewDimension::D2, multisampled:false,
-        }, count:None,
-    }).collect()
-}
 pub(crate) fn shaders() -> [&'static crate::native::Compiled; 4] {
     use crate::native::*;
     [
@@ -414,8 +305,7 @@ pub(crate) fn shaders() -> [&'static crate::native::Compiled; 4] {
 }
 pub(crate) fn pipeline(
     r: &Renderer,
-    source: &str,
-    native: Option<&medium::Native>,
+    _source: &str,
     entry: &str,
     installed_layout: Option<&wgpu::PipelineLayout>,
 ) -> wgpu::ComputePipeline {
@@ -436,24 +326,8 @@ pub(crate) fn pipeline(
             immediate_size: 0,
         })
     });
-    let module = if source == RESOLVE || installed_layout.is_none() {
-        let shader = shaders()
-            .into_iter()
-            .find(|s| s.entry == entry)
-            .expect("registered resolve entry");
-        crate::native::shader_module(d, shader)
-    } else {
-        let metal = r.adapter_info.backend == wgpu::Backend::Metal;
-        let native = native.expect("installed medium modules");
-        let code = cached_native(r, source, native, entry, metal).expect("compile native medium resolve");
-        crate::native::module(
-            d,
-            entry,
-            (!metal).then_some(code.as_slice()),
-            metal.then(|| std::str::from_utf8(&code).expect("resolve MSL")),
-            native_threads(entry),
-        )
-    };
+    let shader = shaders().into_iter().find(|s| s.entry == entry).expect("registered resolve entry");
+    let module = crate::native::shader_module(d, shader);
     r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(entry),
         layout: installed_layout.or(local_layout.as_ref()),
@@ -462,158 +336,4 @@ pub(crate) fn pipeline(
         compilation_options: Default::default(),
         cache: r.cache.as_ref(),
     })
-}
-
-/// The runtime artifact path also drives cross-target setup validation; repeated
-/// setup jobs share the same content-addressed native shader cache.
-pub(crate) fn cached_native(r: &Renderer, source: &str, native: &medium::Native, entry: &str, metal: bool) -> Result<Vec<u8>> {
-    let mut hash = blake3::Hasher::new();
-    let volume=matches!(entry,"volume_receiver_support"|"volume_lighting"|"volume_apply"|"volume_visibility_world");
-    let selected=source_for_entry(source,native,entry)?;
-    hash.update(selected.as_bytes());
-    hash.update(include_bytes!("../resolve_native.rs"));
-    hash.update(entry.as_bytes());hash.update(&[u8::from(metal),u8::from(native.ray_shadows),u8::from(native.program_coverage)]);
-    hash.update(&[u8::from(native.implicit)]);
-    if native.implicit {hash.update(b"field-medium-inline-v2");}
-    hash.update(crate::forward_variant::NATIVE_OPTIMIZATION.as_bytes());
-    hash.update(b"medium-driver-inline-v1");
-    hash.update(&native.froxel_pages.to_le_bytes());hash.update(&native.sample_pages.to_le_bytes());
-    for (name,text) in crate::native::SOURCES {hash.update(name.as_bytes());hash.update(text.as_bytes());}
-    if volume {
-        hash.update(&native.froxel_page_elements.to_le_bytes());
-        for define in volume_defines(native,metal) {hash.update(define.as_bytes());}
-        if metal {hash.update(METAL_VOLUME_MATH.as_bytes());}
-    }
-    if matches!(entry,"volume_receiver_support"|"volume_lighting"|"volume_apply"|"volume_visibility_world") {
-        hash.update(&native.identity);
-        for (name,text) in &native.modules {hash.update(name.as_bytes());hash.update(text.as_bytes());}
-        for path in &native.includes {hash.update(path.to_string_lossy().as_bytes());}
-    }
-    let path = r.disk_cache.path("slang-resolve", 2, hash.finalize());
-    if let Some(code) = crate::disk_cache::read(&path) { return Ok(code); }
-    let code = compile_native(source, native, entry, metal)?;
-    let _ = crate::disk_cache::write(&path, &code);
-    Ok(code)
-}
-
-// Metal passthrough modules need explicit launch dimensions; SPIR-V retains
-// the shader's execution mode and ignores this metadata.
-pub(crate) fn native_threads(entry: &str) -> (u32,u32,u32) {
-    let _=entry;
-    (8,8,1)
-}
-
-fn source_for_entry(source:&str,native:&medium::Native,entry:&str) -> Result<String> {
-    // Only volume entries link transport. Resolve/post keep installed resource
-    // numbering without importing point programs or volume accessors.
-    Ok(match entry {
-        "volume_receiver_support"=>medium::receiver_support_source(native),
-        "volume_lighting"|"volume_apply"|"volume_visibility_world"=>native.paged_source(source),
-        _=>RESOLVE.to_owned(),
-    })
-}
-
-// Volume transport carries divergent tails and opaque horizons as IEEE
-// infinities (vork_medium: emission*inf, infinite optical depth) and refuses
-// non-finite background transport. Metal's default fast math assumes neither
-// infinities nor NaNs and loses them (a diverging emissive tail rendered a
-// finite colour); relaxed math keeps them and still allows reassociation.
-pub(crate) const METAL_VOLUME_MATH: &str = "#pragma METAL fp math_mode(relaxed)\n";
-
-// Raster SPIR-V retains its existing rounding contract. Metal's precise mode
-// additionally installs whole-kernel safe-math/contraction pragmas; only sampled
-// path consumers need that policy to preserve certified tracking bounds.
-fn volume_defines(native: &medium::Native, metal: bool) -> Vec<String> {
-    let mut flags=native.defines();
-    if !metal {flags.extend(vork_slang::MEDIUM_FP_FLAGS.map(str::to_owned));}
-    flags
-}
-
-pub(crate) fn compile_native(
-    source: &str,
-    native: &medium::Native,
-    entry: &str,
-    metal: bool,
-) -> Result<Vec<u8>> {
-    let selected=source_for_entry(source,native,entry)?;
-    let source=selected.as_str();
-    let lighting=matches!(entry,"volume_lighting"|"volume_apply"|"volume_visibility_world");
-    let volume=lighting || entry=="volume_receiver_support";
-    let layout = crate::resolve_native::Layout {volume: true, rays: native.ray_shadows, shadow_closures: native.program_coverage};
-    let mut modules: Vec<(String, String)> = crate::native::SOURCES
-        .iter()
-        .filter(|(name, _)| !name.starts_with("resolve"))
-        .map(|(name, text)| {
-            (
-                (*name).to_owned(),
-                if *name == "vork_medium" || *name == "vork_shadow_visibility" || *name == "frame" {
-                    crate::resolve_native::source(text, entry, layout)
-                } else {
-                    (*text).to_owned()
-                },
-            )
-        })
-        .collect();
-    modules.push((
-        "resolve".into(),
-        crate::resolve_native::source(source, entry, layout),
-    ));
-    if lighting {
-        // Table-only transmitting casters install NoPrograms but still need
-        // the ABI and std modules used by the medium program itself.
-        if !native.modules.iter().any(|(name,_)|name=="vork") {
-            modules.push(("vork".into(), programs::abi().module()));
-            modules.extend(vork_slang::library_modules().map(|module| (module.name.to_owned(), module.source.to_owned())));
-        }
-        modules.extend(native.modules.clone());
-    }
-    let (_, target, flags) = if metal {
-        crate::forward_variant::METAL_TARGET
-    } else {
-        crate::forward_variant::SPIRV_TARGET
-    };
-    let mut args: Vec<String> = ["-target", target]
-        .into_iter()
-        .chain(crate::forward_variant::SLANG_FLAGS.iter().copied())
-        .chain([crate::forward_variant::NATIVE_OPTIMIZATION])
-        .chain(flags.iter().copied())
-        .map(str::to_owned)
-        .collect();
-    if metal && volume {
-        let base=crate::resolve_native::material_base(entry,layout);
-        args.extend(crate::forward_variant::material_registers(base));
-        if native.program_coverage {
-            args.push(format!("-DVORK_HIT_REGISTER=b{}", crate::resolve_native::hit_base(entry, layout)));
-        }
-        let pages=crate::resolve_native::page_base(entry, layout);
-        args.push(format!("-DVORK_FROXEL_PAGES_REGISTER=b{pages}"));
-        args.push(format!("-DVORK_SAMPLE_PAGES_REGISTER=b{}", pages+1));
-    }
-    if volume {args.extend(volume_defines(native,metal));args.push("-DVORK_FROXEL".into());}
-    if entry=="volume_lighting" {args.push("-DVORK_VOLUME_LIGHTING".into());}
-    if lighting {
-        // A finite froxel already has one coefficient cell, but its unbounded
-        // tail can contain a complete march. Share one RGB light evaluation
-        // and select one tail lighting cell while retaining all coefficients.
-        args.extend(["-DVORK_MEDIUM_ENVIRONMENT","-DVORK_MEDIUM_SAMPLED_LIGHTING","-DVORK_MEDIUM_JITTERED_LIGHTING"].map(str::to_owned));
-        if !native.implicit {args.push("-DVORK_NO_IMPLICIT".into());}
-        args.extend(["-DVORK_NATIVE_MEDIUM","-DVORK_MEDIUM_STEPS=1","-DVORK_VOLUME_BINDINGS"].map(str::to_owned));
-        if native.program_coverage {args.push("-DVORK_PROGRAM_COVERAGE".into());}
-        if native.mesh_sources {args.push("-DVORK_MEDIUM_MESH_SOURCES".into());}
-        if native.ray_shadows {args.push("-DVORK_VOLUME_RAY".into());}
-        for path in &native.includes {args.push("-I".into());args.push(path.to_string_lossy().into_owned());}
-    }
-    let refs: Vec<_> = modules
-        .iter()
-        .map(|(name, text)| (name.as_str(), text.as_str()))
-        .collect();
-    let mut code = vork_slang::Compiler::discover().compile_modules(
-        &refs,
-        "resolve",
-        &[(entry, "compute")],
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    )?;
-    if !metal {crate::slang_forward::allow_driver_inlining(&mut code)?;}
-    if metal && volume {code.splice(0..0, METAL_VOLUME_MATH.bytes());}
-    Ok(code)
 }

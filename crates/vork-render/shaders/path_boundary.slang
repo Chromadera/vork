@@ -3,6 +3,7 @@
 // limit or an authored nesting guess.
 import vork_constants;
 import closure;
+import vork_material_table;
 __exported import dielectric_interface;
 struct PathBoundary {
     uint object;
@@ -13,7 +14,7 @@ struct PathBoundary {
     float3 color;
     float depth;
 };
-PathBoundary path_air() {PathBoundary air={};air.ior=1.;air.color=float3(1.);return air;}
+PathBoundary path_air() {PathBoundary air={};air.object=0xffffffffu;air.medium=0xffffffffu;air.ior=1.;air.color=float3(1.);return air;}
 PathBoundary path_boundary(uint object, Closure c, uint medium=0xffffffffu) {
     PathBoundary b;b.object=object;b.medium=medium;b.ior=c.specular_ior;b.dispersion_scale=c.transmission_dispersion_scale;b.dispersion_abbe=c.transmission_dispersion_abbe_number;
     b.color=c.transmission_color;b.depth=c.transmission_depth;return b;
@@ -23,8 +24,20 @@ DielectricInterface path_interface(PathBoundary incident,PathBoundary transmitte
     DielectricInterface media;media.incident=path_segment(incident);media.transmitted=path_segment(transmitted);return media;
 }
 float3 boundary_attenuation(PathBoundary b,float distance) {return segment_attenuation(path_segment(b),distance);}
-// The most recently entered active solid owns the
-// refractive medium. Removing any boundary preserves all other active solids.
+// Priority is a material fact, addressed by the handle already in each medium;
+// do not grow every live descriptor for a value used only at crossings.
+interface IBoundaryPriority {static int priority(uint medium);}
+struct MaterialBoundaryPriority : IBoundaryPriority {
+    static int priority(uint medium) {
+        if(medium==0xffffffffu) return 0;
+        return asint(material_records[medium].extra.x);
+    }
+}
+struct EqualBoundaryPriority : IBoundaryPriority {static int priority(uint medium) {return 0;}}
+int boundary_priority(PathBoundary b) {return MaterialBoundaryPriority.priority(b.medium);}
+// The highest priority active solid owns the refractive medium. Equal
+// priorities retain last-entered replacement (including ordinary nesting).
+// Removing any boundary preserves all other active solids.
 // For properly nested solids this is precisely the usual dielectric stack.
 struct PathOccupancy<let capacity:uint> {
     PathBoundary active[capacity>0u ? capacity : 1u];
@@ -53,29 +66,33 @@ struct PathOccupancy<let capacity:uint> {
         for (var i=0u;i<count;i++) {if (active[i].object==object) {return i;}}
         return count;
     }
-    PathBoundary current() {
-        if (count>0u) {return at(count-1u);}
-        return path_air();
-    }
-    float ior() {return current().ior;}
-    float3 attenuation(float distance) {return boundary_attenuation(current(),distance);}
-    // The transmitted owner can be selected without copying or mutating the
-    // whole active set. Removing a non-owner cannot change the optical medium.
-    PathBoundary transmitted(PathBoundary b,bool entering) {
-        if (entering && find(b.object)==count) {return b;}
-        if (!entering && count>0u && at(count-1u).object==b.object) {
-            if (count>1u) {return at(count-2u);}
+    PathBoundary current() {if(count>0u) return at(count-1u);return path_air();}
+    PathBoundary plain_transmitted(PathBoundary b,bool entering,out bool neutral) {
+        neutral=true;
+        if(entering && find(b.object)==count) {neutral=false;return b;}
+        if(!entering && count>0u && at(count-1u).object==b.object) {
+            neutral=false;
+            if(count>1u) return at(count-2u);
             return path_air();
         }
         return current();
     }
+    float ior() {return current().ior;}
+    float3 attenuation(float distance) {return boundary_attenuation(current(),distance);}
     // Returns false only for a violated install bound; callers must report it.
-    [mutating] bool cross(PathBoundary b, bool entering) {
+    [mutating] bool cross(PathBoundary b,bool entering) {return cross<MaterialBoundaryPriority>(b,entering);}
+    [mutating] bool cross<P:IBoundaryPriority>(PathBoundary b, bool entering) {
         let slot=find(b.object);
         if (entering) {
             if (slot<count) {return true;}
             if (count>=capacity) {return false;}
-            set(count,b);count++;
+            var insert=count++;
+            while(insert>0u) {
+                let previous=at(insert-1u);
+                if(P.priority(previous.medium)<=P.priority(b.medium)) break;
+                set(insert,previous);insert--;
+            }
+            set(insert,b);
         } else if (slot<count) {remove(slot);}
         return true;
     }
@@ -87,8 +104,5 @@ struct PathOccupancy<let capacity:uint> {
             for (var i=slot+1u;i<count;i++) {active[i-1u]=active[i];}
         }
         count--;
-    }
-    float relative_ior(PathBoundary b, bool entering) {
-        return transmitted(b,entering).ior/ior();
     }
 };

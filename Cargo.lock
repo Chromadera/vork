@@ -1829,7 +1829,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vork-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "vork-encode"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "vork-mesh"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "glam",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "vork-render"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "vork-scene"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "glam",
@@ -1917,11 +1917,12 @@ dependencies = [
 
 [[package]]
 name = "vork-slang"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",
  "libc",
+ "libloading",
  "naga",
  "serde",
  "serde_json",
@@ -1930,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "vork-std"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1950,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "vork-time"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "num-bigint",

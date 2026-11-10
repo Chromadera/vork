@@ -11,6 +11,7 @@ import surface;
 import stream;
 import closure;
 import path_boundary;
+#include "path_work_arguments.slang"
 struct DielectricHit { float t; uint instance; uint primitive; uint object; float2 barycentrics; float3x4 world_to_object; bool field; FieldHit field_hit; };
 // Merge field zero sets with an existing hardware triangle hit. Both camera
 // path transport and raster dielectric continuation use the same acceptance,
@@ -18,10 +19,10 @@ struct DielectricHit { float t; uint instance; uint primitive; uint object; floa
 #ifdef VORK_FIELD_OUTLINE
 [noinline]
 #endif
-DielectricHit merge_field_hits<P:IProgram,G:IHitGeometry>(DielectricHit h,uint2 fields,float3 origin,float3 direction,float distance,uint mask) {
+DielectricHit merge_field_hits<P:IProgram,G:IHitGeometry>(DielectricHit h,uint2 fields,float3 origin,float3 direction,float distance,uint mask,uint only_object=0xffffffffu) {
     for(uint i=0u;i<fields.y;i++) {
         let at=fields.x+i*3u;let instance=G.word(at);let object=G.word(at+1u);
-        if(!catcher_keeps(object) || (objects[object].metadata.y&mask)==0u || collapsed_endpoint(objects[object].model)) continue;
+        if((only_object!=0xffffffffu && object!=only_object) || !catcher_keeps(object) || (objects[object].metadata.y&mask)==0u || collapsed_endpoint(objects[object].model)) continue;
         var minimum=0.;let maximum=h.t>=0. ? h.t : distance;
         for(;;) {
             let root=field_intersection<G>(G.word(at+2u),object,origin,direction,minimum,maximum);
@@ -55,6 +56,9 @@ void path_boundary_error(uint code, uint object) {
 }
 void path_cross<let N:uint>(inout PathOccupancy<N> state, PathBoundary boundary, bool entering) {
     if (!state.cross(boundary,entering)) {path_boundary_error(REG_PATH_BOUNDARY_OVERFLOW,boundary.object);}
+}
+void plain_path_cross<let N:uint>(inout PathOccupancy<N> state,PathBoundary boundary,bool entering) {
+    if(!state.cross<EqualBoundaryPriority>(boundary,entering)) path_boundary_error(REG_PATH_BOUNDARY_OVERFLOW,boundary.object);
 }
 // The solid a ray instance bounds, or 0xffffffff.
 uint instance_solid<G:IHitGeometry>(uint instance,uint2 tables) {return G.word(tables.x+instance);}
@@ -107,7 +111,118 @@ PathBoundary boundary_descriptor<V:IVariant,P:IProgram,G:IHitGeometry>(Dielectri
     validate_boundary<V,P>(h.v,h.entering,h.k,h.s);
     return path_boundary(instance_solid<G>(hit.instance,tables),h.s.closure,G.word(hit.instance*REG_RAY_SLOT_WORDS+1u));
 }
-PathOccupancy<N> camera_occupancy<V:IVariant,P:IProgram,G:IHitGeometry,let N:uint>(RaytracingAccelerationStructure scene,float3 origin, float3 direction,uint2 tables,float2 pixel,uint field_offset=0u,uint field_count=0u) {
+// A transaction in the existing set: retain exited descriptors until the BSDF
+// decides, and provisionally insert entries. Their union fits the installed N
+// because every old and acquired solid's bounds hold this same point.
+struct BoundaryEvent<let N:uint> {
+    // A solid addresses seven words in a u32-indexed table, leaving two tag bits.
+    uint tagged[N>0u ? N : 1u];uint count;
+    uint object_at(uint i) {return tagged[i]&0x3fffffffu;}
+    uint kind_at(uint i) {return tagged[i]>>30u;}
+    uint change(uint object) {
+        for(uint i=0u;i<count;i++) {if(object_at(i)==object) return kind_at(i);}
+        return 0u;
+    }
+    bool contains(uint object) {
+        for(uint i=0u;i<count;i++) {if(object_at(i)==object) return true;}
+        return false;
+    }
+    [mutating] void add(inout PathOccupancy<N> state,PathBoundary b,bool entering) {
+        let slot=state.find(b.object);
+        let kind=entering ? (slot==state.count ? 2u : 0u) : (slot<state.count ? 1u : 0u);
+        tagged[count++]=b.object|(kind<<30u);
+        if(entering && slot==state.count && !state.cross(b,true)) {
+            tagged[count-1u]&=0x3fffffffu;path_boundary_error(REG_PATH_BOUNDARY_OVERFLOW,b.object);
+        }
+    }
+    void order_entries(inout PathOccupancy<N> state) {
+        if(count<=1u) return;
+        for(uint i=1u;i<state.count;i++) {
+            let b=state.at(i);if(change(b.object)!=2u) continue;
+            var slot=i;
+            while(slot>0u) {
+                let previous=state.at(slot-1u);
+                if(boundary_priority(previous)!=boundary_priority(b) || previous.object<b.object || change(previous.object)!=2u) break;
+                state.set(slot,previous);slot--;
+            }
+            state.set(slot,b);
+        }
+    }
+    PathBoundary owner(PathOccupancy<N> state) {
+        for(var slot=state.count;slot>0u;slot--) {
+            let b=state.at(slot-1u);if(change(b.object)!=1u) return b;
+        }
+        return path_air();
+    }
+    void finish(inout PathOccupancy<N> state,bool transmitted) {
+        for(var slot=state.count;slot>0u;slot--) {
+            if(change(state.at(slot-1u).object)==(transmitted ? 1u : 2u)) state.remove(slot-1u);
+        }
+    }
+};
+// Resume within the existing hit-position uncertainty, excluding processed
+// primitives. Native intersections of a shared face can differ by many t ULPs
+// (large triangles, oblique rays); never offset through that interval.
+// Every gathered solid must hold the same hit point under the existing bounds
+// test, preserving the installed occupancy bound and rejecting separated boxes.
+// Deduplicate solids and order simultaneous entries
+// by solid identity so last-entered ties do not depend on hardware traversal.
+float boundary_distance_error(float3 error,float3 face,float3 direction) {
+    return dot(abs(face),error)/max(abs(dot(face,direction)),REG_FP32_GAMMA7);
+}
+// Only reject traversal outside conservative static surface bounds. Closure
+// uncertainty can make a medium unbounded without making its surface infinite.
+// Moving/unknown geometry and larger sets always retain the normal AS query.
+bool boundary_contact_possible<G:IHitGeometry>(uint solid,float3 world,float3 interval,uint2 tables) {
+    let count=G.word(tables.y-1u);
+    if(count>8u) return true;
+    for(uint i=0u;i<count;i++) {
+        if(i==solid) continue;
+        let at=tables.y+count*REG_PATH_SOLID_WORDS+i*6u;
+        if(!any(world+interval<solid_lo<G>(at)) && !any(world-interval>solid_hi<G>(at))) return true;
+    }
+    return false;
+}
+BoundaryEvent<N> boundary_event<V:IVariant,P:IProgram,G:IHitGeometry,let N:uint>(
+    RaytracingAccelerationStructure scene,float3 origin,float3 direction,DielectricHit first,float3 world,float3 error,float3 face,
+    PathBoundary boundary,bool entering,inout PathOccupancy<N> state,uint2 tables,float2 pixel,uint mask VORK_WORK_PARAMETER) {
+    BoundaryEvent<N> event={};
+    if(N==0u) {path_cross(state,boundary,entering);return event;}
+    event.add(state,boundary,entering);
+    if(N<=1u || first.t<0.) return event;
+    let distance_error=boundary_distance_error(error,face,direction);
+    if(!boundary_contact_possible<G>(boundary.object,world,error+abs(direction)*distance_error,tables)) return event;
+    let minimum=max(0.,first.t-distance_error);
+    let maximum=min(REG_FP32_MAX,first.t+distance_error);
+    RayDesc ray;ray.Origin=origin;ray.Direction=direction;ray.TMin=minimum;
+    ray.TMax=asfloat(min(asuint(REG_FP32_MAX),asuint(maximum)+1u));
+    RayQuery<RAY_FLAG_NONE> query;
+    query.TraceRayInline(scene,RAY_FLAG_FORCE_NON_OPAQUE,mask,ray);
+    while(query.Proceed()) {
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_work_reserve(medium_work,1u,7u,0u)) {break;}
+#endif
+        if(query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE || query.CandidateTriangleRayT()<minimum || query.CandidateTriangleRayT()>maximum) continue;
+        let instance=query.CandidateInstanceIndex();let primitive=query.CandidatePrimitiveIndex();
+        if(instance==first.instance && primitive==first.primitive) continue;
+        let identity=instance_solid<G>(instance,tables);
+        if(identity==0xffffffffu || !catcher_keeps(query.CandidateInstanceID())) continue;
+        if(event.contains(identity) || !solid_bounds_hold<G>(identity,query.CandidateWorldToObject3x4(),world,tables)) continue;
+        DielectricHit hit={};hit.t=first.t;hit.instance=instance;hit.primitive=primitive;hit.object=query.CandidateInstanceID();
+        hit.barycentrics=query.CandidateTriangleBarycentrics();hit.world_to_object=query.CandidateWorldToObject3x4();
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_alpha_reserve(medium_work,2u,hit.object)) {break;}
+#endif
+        let h=dielectric_surface<V,P,G>(hit,direction,pixel,Lobe(0u,0.));
+        if(h.s.discarded || h.s.closure.geometry_opacity<=0. || h.s.closure.geometry_thin_walled || h.s.closure.transmission_weight<=0.) continue;
+        if(event.count>=N) {path_boundary_error(REG_PATH_BOUNDARY_OVERFLOW,hit.object);break;}
+        let b=boundary_descriptor<V,P,G>(hit,direction,h,tables,pixel);
+        event.add(state,b,h.entering);
+    }
+    event.order_entries(state);
+    return event;
+}
+PathOccupancy<N> camera_occupancy<V:IVariant,P:IProgram,G:IHitGeometry,let N:uint>(RaytracingAccelerationStructure scene,float3 origin, float3 direction,uint2 tables,float2 pixel,uint field_offset,uint field_count VORK_WORK_PARAMETER) {
     PathOccupancy<N> state={};
     if (N==0u) {return state;}
     // Collect the nearest boundary per solid object in one shared-AS query.
@@ -121,6 +236,9 @@ PathOccupancy<N> camera_occupancy<V:IVariant,P:IProgram,G:IHitGeometry,let N:uin
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(scene,RAY_FLAG_FORCE_NON_OPAQUE,255u,ray);
     while (query.Proceed()) {
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_work_reserve(medium_work,1u,7u,0u)) {break;}
+#endif
         if (query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE) {continue;}
         if (!catcher_keeps(query.CandidateInstanceID())) {continue;}
         let instance=query.CandidateInstanceIndex();
@@ -131,6 +249,9 @@ PathOccupancy<N> camera_occupancy<V:IVariant,P:IProgram,G:IHitGeometry,let N:uin
         let object=query.CandidateInstanceID();let distance=query.CandidateTriangleRayT();
         var slot=0u;while (slot<seen_count && seen[slot]!=identity) {slot++;}
         if (slot<seen_count && distance>=nearest[slot]) {continue;}
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_alpha_reserve(medium_work,2u,object)) {break;}
+#endif
         let h=hit_surface<V,P,G>(instance,query.CandidatePrimitiveIndex(),object,query.CandidateWorldToObject3x4(),query.CandidateTriangleBarycentrics(),direction,pixel,Lobe(0u,0.));
         let c=h.s.closure;
         if (slot==seen_count) {
@@ -155,13 +276,13 @@ PathOccupancy<N> camera_occupancy<V:IVariant,P:IProgram,G:IHitGeometry,let N:uin
         DielectricHit boundary_hit={};boundary_hit.instance=instance;boundary_hit.object=object;
         records[slot]=boundary_descriptor<V,P,G>(boundary_hit,direction,h,tables,pixel);
     }
-    // Nearest containing exit is innermost. Sort outer to inner. The tie key
+    // Sort by priority, then outer to inner (nearest containing exit last). The tie key
     // is object identity, independent of acceleration-structure query order.
     float exits[N>0u ? N : 1u]={};
     for (var i=0u;i<seen_count;i++) {
         if (!inside[i]) {continue;}
         var slot=state.count;
-        while (slot>0u && (exits[slot-1u]<nearest[i] || (exits[slot-1u]==nearest[i] && state.active[slot-1u].object>records[i].object))) {
+        while (slot>0u && (boundary_priority(state.active[slot-1u])>boundary_priority(records[i]) || (boundary_priority(state.active[slot-1u])==boundary_priority(records[i]) && (exits[slot-1u]<nearest[i] || (exits[slot-1u]==nearest[i] && state.active[slot-1u].object>records[i].object))))) {
             state.active[slot]=state.active[slot-1u];exits[slot]=exits[slot-1u];slot--;
         }
         state.active[slot]=records[i];exits[slot]=nearest[i];state.count++;

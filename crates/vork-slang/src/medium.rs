@@ -10,6 +10,7 @@ pub struct MediumProgram {
     pub native_point: String,
     /// Compiler bridge identity; native instances may be renamed independently.
     coefficient_entry: String,
+    work_source_stable: bool,
     pub native_includes: Vec<PathBuf>,
     pub wgsl: String,
     /// local position, time, word base, world position, and an output array of MEDIUM_VEC4S vectors.
@@ -43,13 +44,15 @@ impl Compiler {
             ensure!(inputs.fields.iter().all(|field|field.ty!=Type::Image),"medium image inputs require a volume sampling interface");
             let decode=inputs.slang_decode();
             let entry="[shader(\"compute\")][numthreads(1,1,1)] void vork_entry() {}\n";
-            // The kernel keeps coefficients physical: nonnegative extinction and a phase
-            // anisotropy inside (-1, 1). Emission keeps its sign (Blender blackbody RGB).
-            let point=format!("public MediumCoefficients vork_medium_{tag}_point(float3 p,float time,uint base,float3 world_position,float wavelength=0.) {{\n{decode}\nMediumCoefficients m=medium(MediumContext(p,time,world_position,wavelength),inputs);\nm.absorption=max(m.absorption,0.0);m.scattering=max(m.scattering,0.0);m.anisotropy=clamp(m.anisotropy,-0.999,0.999);return m;}}\npublic MediumCoefficients vork_medium_{tag}_coefficients(float3 p,float time,uint base,float3 world_position,float wavelength=0.) {{return vork_medium_{tag}_point(p,time,base,world_position,wavelength);}}\nexport void vork_medium_{tag}(float3 p,float time,uint base,float3 world_position,out float4 r[{MEDIUM_VEC4S}]) {{\nMediumCoefficients m=vork_medium_{tag}_coefficients(p,time,base,world_position);\nr[0]=float4(m.absorption,m.anisotropy);r[1]=float4(m.scattering,0);r[2]=float4(m.emission,0);\n}}\n");
+            // Preserve authored physical coefficients; transport validates them and
+            // refuses the frame instead of silently clamping invalid outputs.
+            let point=format!("public MediumCoefficients vork_medium_{tag}_point(float3 p,float time,uint base,float3 world_position,float wavelength=0.) {{\n{decode}\nMediumCoefficients m=medium(MediumContext(p,time,world_position,wavelength),inputs);\nreturn m;}}\npublic MediumCoefficients vork_medium_{tag}_coefficients(float3 p,float time,uint base,float3 world_position,float wavelength=0.) {{return vork_medium_{tag}_point(p,time,base,world_position,wavelength);}}\nexport void vork_medium_{tag}(float3 p,float time,uint base,float3 world_position,out float4 r[{MEDIUM_VEC4S}]) {{\nMediumCoefficients m=vork_medium_{tag}_coefficients(p,time,base,world_position);\nr[0]=float4(m.absorption,m.anisotropy);r[1]=float4(m.scattering,0);r[2]=float4(m.emission,0);\n}}\n");
             Ok(format!("{entry}{point}"))
         })?;
         let point = format!("vork_medium_{tag}_0_{tag}");
         let output = compiled.output;
+        let stable=|text:&str| !["#","%:","??=","__target_switch","VORK_","SLANG"].iter().any(|needle|text.contains(needle));
+        let work_source_stable=stable(source) && output.dependencies.iter().all(|path| std::fs::read_to_string(path).is_ok_and(|text|stable(&text)));
         ensure!(output.wgsl.contains(&format!("fn {point}(")), "Slang did not emit {point}");
         let module = validated_module(&output.wgsl, abi)?;
         let homogeneous = effects::medium_homogeneous(&module, &format!("vork_medium_{tag}_point_0_{tag}"),None)?;
@@ -60,6 +63,7 @@ impl Compiler {
             native,
             native_point,
             coefficient_entry: format!("vork_medium_{tag}_point_0_{tag}"),
+            work_source_stable,
             native_includes: include_paths(origin)
                 .into_iter()
                 .map(|p| if p.is_absolute() { p } else { current.join(p) })
@@ -104,6 +108,8 @@ impl MediumProgram {
         let entry=&self.coefficient_entry;
         effects::medium_emission_free(&module,entry,&words[..self.inputs.words])
     }
+    /// Identity-space exponential profile for a world binding. Finite carriers
+    /// must certify their actual coordinate domain separately.
     pub fn exponential_for_inputs(&self,abi:&Abi,words:&[Option<u32>])->Result<Option<([f32;3],[f32;3],[f32;3])>> {
         let module=validated_module(&self.wgsl,abi)?;
         let entry=&self.coefficient_entry;
@@ -172,13 +178,17 @@ mod tail_tests {
     }
     #[test]
     #[ignore = "requires pinned Slang"]
-    fn std_height_fog_proves_exponential_profile() -> Result<()> {
+    fn height_program_proves_exponential_profile() -> Result<()> {
         let abi=Abi { aov_count: 0,context:Abi::spec_context(),closure:openpbr_fields()};
-        let program=Compiler::discover().compile_medium(&abi,include_str!("../../../libraries/std/fog.slang"),Path::new("height-fog.slang"),"heightfog")?;
-        let inputs=serde_json::from_value(serde_json::json!({"height_falloff":0.5,"density":2.,"absorption":[0.,1.,2.],"scattering":[0.5,0.,1.]}))?;
+        let source=include_str!("../tests/fixtures/fog-height.slang");
+        let compiler=Compiler::discover();
+        let program=compiler.compile_medium(&abi,source,Path::new("height-fog.slang"),"heightfog")?;
+        let inputs=serde_json::from_value(serde_json::json!({"falloff":0.5,"absorption":[0.,2.,4.],"scattering":[1.,0.,2.]}))?;
         let words=program.inputs.pack(&inputs,|_,_|unreachable!())?;
         let proof_words=words.iter().copied().map(Some).collect::<Vec<_>>();
-        let bound=program.extinction_majorant(&abi,&proof_words,[[-1.,1.];3],[0.,1.])?;
+        // The finite-domain bound service takes local coordinate bounds.
+        let local=compiler.compile_medium(&abi,&source.replace("ctx.world_position.y","ctx.position.y"),Path::new("local-height.slang"),"localheight")?;
+        let bound=local.extinction_majorant(&abi,&proof_words,[[-1.,1.];3],[0.,1.])?;
         let expected=6.*0.5f32.exp();
         assert!(bound>=expected && bound<expected*1.0001,"{bound} vs {expected}");
         assert_eq!(program.exponential_for_inputs(&abi,&words.iter().copied().map(Some).collect::<Vec<_>>())?,Some(([0.,2.,4.],[1.,0.,2.],[0.,-0.5,0.])));
@@ -426,5 +436,15 @@ mod connection_profile_tests {
             assert_eq!(a,[0.2_f32*0.7;3]);assert_eq!(b,[0.3_f32*0.7;3]);assert_eq!(g,[0.,-height,0.]);
         }
         Ok(())
+    }
+}
+
+impl MediumProgram {
+    /// Conservative callback instruction count, separate from coefficient bounds.
+    pub fn bounded_work_for_inputs(&self,abi:&Abi,words:&[Option<u32>])->Result<u32> {
+        ensure!(self.work_source_stable,"medium work proof refuses target-dependent preprocessing or unreadable imports");
+        ensure!(self.inputs.fields.iter().all(|field|!matches!(field.ty,Type::Geometry|Type::Image|Type::FloatGrid|Type::VectorGrid)),"medium work proof does not yet admit resource inputs");
+        let module=validated_module(&self.wgsl,abi)?;
+        effects::medium_work(&module,&self.coefficient_entry,words)
     }
 }

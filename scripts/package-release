@@ -162,9 +162,19 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
         check_runtime_platform((f for f in stage.rglob('*') if f.is_file()), a.platform)
     except ValueError as error:
         p.error(str(error))
-    for f in ['LICENSE', 'NOTICE', 'README.md']:
-        shutil.copy2(ROOT / f, stage / f)
-    shutil.copytree(ROOT / 'dist/licenses', stage / 'licenses')
+    sdk = ROOT / 'packages/ts'
+    if not (sdk / 'dist/index.js').exists():
+        p.error('Build the vendored SDK first: cd packages/ts && npm ci && npm run build')
+    # This manifest also owns release carry-over's shipped source inventory.
+    for entry in json.loads((ROOT / 'dist/archive-inputs.json').read_text()):
+        source = ROOT / entry['source']
+        target = stage / entry['destination']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target,
+                            ignore=shutil.ignore_patterns(*entry.get('ignore', [])))
+        else:
+            shutil.copy2(source, target)
     # Match the public source payload, never sweep the private checkout or downloads.
     for relative in (ROOT / 'dist/example-payload.txt').read_text().splitlines():
         if not relative or relative.startswith('#'):
@@ -178,13 +188,6 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
         target = stage / path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    copy_selected(ROOT, stage, ['libraries/blender/filmic.exr'])
-    sdk = ROOT / 'packages/ts'
-    if not (sdk / 'dist/index.js').exists():
-        p.error('Build the vendored SDK first: cd packages/ts && npm ci && npm run build')
-    shutil.copytree(sdk / 'dist', stage / 'sdk')
-    shutil.copy2(sdk / 'scene.schema.json', stage / 'sdk/scene.schema.json')
-    shutil.copy2(ROOT / 'LICENSE', stage / 'sdk/LICENSE')
     metadata = json.loads((sdk / 'package.json').read_text(encoding='utf-8'))
     # Archives flatten dist/ into sdk/; keep the canonical public entry points.
     def archive_exports(value):
@@ -196,10 +199,6 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
     archive_metadata = {key: metadata[key] for key in ('name', 'version', 'type', 'license', 'engines')}
     archive_metadata['exports'] = archive_exports(metadata['exports'])
     (stage / 'sdk/package.json').write_text(json.dumps(archive_metadata, indent=2) + '\n', encoding='utf-8')
-    # Python SDK: a pip-installable source tree (pip install PREFIX/lib/vork/python).
-    shutil.copytree(ROOT / 'packages/python', stage / 'python',
-                    ignore=shutil.ignore_patterns('generate.py', 'test_*.py', '__pycache__', '*.egg-info', 'build'))
-    shutil.copy2(ROOT / 'LICENSE', stage / 'python/LICENSE')
     # integrations/ (the GPL Blender bridge) is a separate component and never ships in an archive.
     if any('integrations' in f.relative_to(stage).parts for f in stage.rglob('*')):
         p.error('release archive must not include integrations/')

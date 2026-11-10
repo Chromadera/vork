@@ -12,10 +12,12 @@ public uint2 visibility_coverage(uint sample, uint samples, float2 temporal) {
 
 public struct SlotLayout {
     public uint pixels;
+    public uint first_pixel;
     public uint masks;
     public uint stride;
-    public __init(uint pixels, uint samples) {
-        this.pixels=pixels;
+    public __init(uint pixels, uint samples, uint packet_pixels=0u, uint first_pixel=0u) {
+        this.first_pixel=first_pixel;
+        this.pixels=packet_pixels==0u ? pixels : packet_pixels;
         masks=(samples+31u)/32u;
         stride=REG_VISIBILITY_KEY_WORDS+masks;
     }
@@ -46,9 +48,10 @@ public struct SlotLayout {
         return select(e==0u,0xffffffffu,entry(e-1u)+1u);
     }
     // Dense slot `slot` of `pixel`: its key, then its masks.
-    public uint dense(uint pixel, uint slot) {return (pixel*REG_VISIBILITY_SLOTS+slot)*stride;}
+    public uint local(uint pixel) {return pixel-first_pixel;}
+    public uint dense(uint pixel, uint slot) {return ((local(pixel))*REG_VISIBILITY_SLOTS+slot)*stride;}
     // The word holding `pixel`'s first overflow entry + 1 (0: none).
-    public uint head(uint pixel) {return pixels*REG_VISIBILITY_SLOTS*stride+pixel;}
+    public uint head(uint pixel) {return pixels*REG_VISIBILITY_SLOTS*stride+local(pixel);}
     // Pool entry `index`: the next entry + 1, then a key and its masks.
     public uint entry(uint index) {return pixels*(REG_VISIBILITY_SLOTS*stride+1u)+index*(1u+stride);}
 }

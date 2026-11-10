@@ -128,6 +128,7 @@ impl ImageRender {
             background: self.background.clone(),
             compositor: self.compositor.clone(),
             settings: Settings {
+                promotion_denoise: parent.settings.promotion_denoise,
                 previs: parent.settings.previs,
                 reconstruct: parent.settings.reconstruct,
                 seed: parent.settings.seed,
@@ -261,11 +262,16 @@ pub struct Material {
     #[schemars(with = "NameOr<Program>")]
     pub program: String,
     #[serde(default)]
-    #[schemars(extend("x-source" = "OpenPBR Surface 1.1.1 defaults (spec table)", "x-help-path" = "material.inputs", "x-help" = "{name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}}", "x-help-extra" = "material.inputs (transmission): transmission_depth 0 = sqrt(tint) per solid interface; thin sheets = full tint; positive-depth solids = Beer absorption\nmaterial.inputs (animation): numeric scalar/vector/colour inputs on surface/environment/compute/compositor/display programs use ordinary tracks; geometry_thin_walled is structural; an omitted animated program input has a zero blend baseline (author inputs for another baseline)\nmaterial.inputs.subsurface: thick: radius × radius_scale; thin: diffuse reflection/transmission split by scatter_anisotropy"))]
+    #[schemars(extend("x-source" = "OpenPBR Surface 1.1.1 defaults (spec table)", "x-help-path" = "material.inputs", "x-help" = "{name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}|{geometry}}", "x-help-extra" = "material.inputs (transmission): transmission_depth 0 = sqrt(tint) per solid interface; thin sheets = full tint; positive-depth solids = Beer absorption\nmaterial.inputs (animation): numeric scalar/vector/colour inputs on surface/environment/compute/compositor/display programs use ordinary tracks; geometry_thin_walled is structural; an omitted animated program input has a zero blend baseline (author inputs for another baseline)\nmaterial.inputs.subsurface: thick: radius × radius_scale; thin: diffuse reflection/transmission split by scatter_anisotropy"))]
     pub inputs: Table<Input>,
     #[serde(default = "material_double_sided")]
     #[schemars(extend("x-source" = "Blender renders both sides; imported glTF retains doubleSided", "x-help-path" = "material.double_sided", "x-help" = "bool; false culls back faces"))]
     pub double_sided: bool,
+    /// Highest priority owns an overlapping dielectric region. Equal priorities
+    /// use the most recently entered solid; simultaneous entries use solid order.
+    #[serde(default)]
+    #[schemars(extend("x-source" = "vork (dielectric medium ownership)", "x-help-path" = "material.priority", "x-help" = "integer; highest owns overlapping solid media; equal priorities: last entered wins, simultaneous entries: later solid order wins; lower-priority boundaries change membership only"))]
+    pub priority: i32,
     /// Meaning of geometry_opacity; the renderer owns its integration method.
     #[serde(default)]
     #[schemars(extend("x-source" = "vork surface presence semantics", "x-help-path" = "material.opacity", "x-help" = "coverage|transmittance|null; null = coverage, transmittance for transmitting surfaces; coverage = occupied area fraction; transmittance = continuous attenuation by 1 - geometry_opacity; renderer chooses integration"))]
@@ -282,6 +288,7 @@ pub enum Input {
     Number(#[serde(deserialize_with="super::numeric")] f32),
     Vector(#[serde(deserialize_with="super::numeric")] Vec<f32>),
     Bool(bool),
+    Geometry(GeometryBinding),
     Texture(TextureBinding),
     Attribute(AttributeBinding),
     Grid(GridBinding),
@@ -290,6 +297,13 @@ pub enum Input {
     Node(NodeBinding),
     /// An enum token of the program's reflected input type.
     Token(String),
+}
+/// Read-only evaluated geometry of a named mesh object, sampled by the compute clock.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GeometryBinding {
+    #[schemars(extend("x-source" = "vork geometry chain", "x-help-path" = "material.geometry.geometry", "x-help" = "mesh-node name; read-only geometry at the program's canonical sample time"))]
+    pub geometry: String,
 }
 /// An earlier named compositor entry, local to this graph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

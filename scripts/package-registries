@@ -141,7 +141,7 @@ def main():
         meta = json.loads((ROOT / 'packages/ts/package.json').read_text())
         for key in ('scripts', 'devDependencies'):
             meta.pop(key, None)
-        (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npm exec --no --package=@voyager-so/vork -- vork init my-shot`. Follow init\'s printed next steps in my-shot. The default `std/final` first render is warmed by setup; use `--profile std/draft` for quicker previews. Run `npm exec --no --package=@voyager-so/vork -- vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+, a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
+        (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npx vork init my-shot`. Follow init\'s printed next steps in my-shot. The default `std/final` first render is warmed by setup; use `--profile std/draft` for quicker previews. Run `npx vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+ (older Node emits EBADENGINE warnings; upgrade, or run TypeScript source with node --experimental-strip-types scene.ts where supported), a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
         meta.update(description='Native vork renderer, TypeScript SDK and scene schema', version=version, bin={'vork': 'cli.cjs'}, files=['dist', 'cli.cjs', 'LICENSE', 'README.md', 'scene.schema.json'], optionalDependencies={f'@voyager-so/vork-{t}': version for t in TARGETS})
         meta['exports']['./package.json'] = './package.json'
         (main / 'package.json').write_text(json.dumps(meta, indent=2) + '\n')
@@ -149,6 +149,7 @@ def main():
         creator = stage / 'creator'
         creator.mkdir()
         shutil.copy2(ROOT / 'packages/create-vork/cli.cjs', creator / 'cli.cjs')
+        shutil.copy2(ROOT / 'packages/create-vork/README.md', creator / 'README.md')
         shutil.copy2(ROOT / 'LICENSE', creator / 'LICENSE')
         (creator / 'package.json').write_text(json.dumps(dict(name='create-vork', version=version, description='Create an offline vork rendering project', bin={'create-vork': 'cli.cjs'}, engines={'node': '>=22.18'}, license='SEE LICENSE IN LICENSE', dependencies={'@voyager-so/vork': version}), indent=2) + '\n')
         subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=creator, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

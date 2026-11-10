@@ -63,6 +63,11 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
     // Common builders stay on root; specialist signatures remain in std --all.
     assert!(root.contains("sphere: {name?:string") && root.contains("Std builders return {buffers,geometry}"));
     assert!(std_all.contains("rounded_box:"));
+    for page in [&root, &std_all] {
+        assert!(page.contains("omit name: the table key or inline position owns identity"));
+    }
+    assert!(std_all.contains("vork std expand - < scene.json > expanded.json"));
+    assert!(std_all.contains("Expansion does not validate the whole scene"));
     assert!(!root.contains("rounded_box:"));
     let command_help = Command::new(env!("CARGO_BIN_EXE_vork")).args(["std", "--help"]).output().unwrap();
     assert!(command_help.status.success());
@@ -77,7 +82,14 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
 fn field_and_program_routes_and_topic_suggestions() {
     assert!(help_args(&["field", "node.target"]).contains("aims -Z"));
     assert!(help_args(&["field", "settings.seed"]).contains("u32"));
+    for path in ["program.bindings", "mesh.instances.attributes"] {
+        assert!(help_args(&["field", path]).contains("JSON shape: {name: string|Buffer object}"));
+    }
+    assert!(help_args(&["nodes", "--all"]).lines().any(|line|
+        line.starts_with("node.instances.attributes (mesh):") && line.contains("JSON shape: {name: string|Buffer object}")));
+    assert!(!help_args(&[]).contains("JSON shape:"));
     let abi = help_args(&["programs", "--all"]);
+    assert!(abi.lines().any(|line| line.starts_with("program.bindings:") && line.contains("JSON shape: {name: string|Buffer object}")));
     for name in ["struct ShadingContext", "struct DisplayContext", "struct Closure"] {
         assert!(abi.contains(name), "missing {name}");
     }
@@ -140,7 +152,8 @@ fn every_field_remains_addressable_without_duplicate_topic_listings() {
         } else {
             let declarations = fields.get(path).unwrap_or_else(|| panic!("root lost {line}"));
             assert_eq!(declarations.len(), 1, "duplicate root field {path}");
-            // The root page omits advanced tuning guidance.
+            // The root page omits advanced tuning guidance and schema-shape detail.
+            let fact = fact.split_once("; JSON shape:").map_or(fact, |(f, _)| f);
             let fact = fact.split_once("; when to change:").map_or(fact, |(f, _)| f);
             let (fact, default) = fact.rsplit_once("; default ").map_or((fact, None), |(f,d)| (f, Some(d)));
             let ty = fact.split("; ").next().unwrap();
@@ -234,9 +247,11 @@ fn procedural_help_exposes_callable_signatures_and_enum_spelling() {
     for signature in ["noise(p, scale=5", "noise_color: same inputs", "voronoi(p, scale=5",
         "white_noise(p, dimensions=3", "gabor(p, scale=5",
         "Smooth_F1", "Chebychev",
-        "NoiseType.FBM", "Closure surface(", "noise(ctx.rest_position)"] {
+        "NoiseType.FBM"] {
         assert!(all.contains(signature), "missing {signature}");
     }
+    assert!(!all.contains("noise(ctx.rest_position)"));
+    assert!(help_args(&["programs", "--all"]).contains("Closure|Blend|Hair surface(ShadingContext, Inputs)"));
 }
 
 
@@ -302,4 +317,22 @@ fn bundled_program_contracts_are_exactly_addressable() {
         assert_eq!(output.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("material.inputs.{leaf}")));
     }
+}
+
+#[test]
+fn first_render_guidance_explains_profiles_and_display_white() {
+    let root = help_args(&[]);
+    let profiles = help_args(&["profiles"]);
+    assert!(root.contains("vork help profiles"));
+    assert!(root.contains("vork init"));
+    assert!(root.contains("vork render"));
+    assert!(!root.contains("Main omissions"));
+    for term in ["std/previs", "std/draft", "std/final", "std/path", "fastest", "slowest", "omissions"] {
+        assert!(profiles.contains(term), "missing {term}");
+    }
+    let render = help_args(&["render"]);
+    assert!(render.contains("white RGB background looks grey"));
+    assert!(render.contains("std/standard"));
+    assert!(render.contains("sample passes recorded"));
+    assert!(help_args(&["fluid"]).contains("vork.fluid"));
 }

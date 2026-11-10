@@ -20,6 +20,7 @@ use std::{
 /// compile at install too), and the shared mesh-medium transport.
 #[derive(Clone, Default)]
 pub(crate) struct SlangScene {
+    pub(crate) program_trace: bool,
     pub(crate) propagation: Option<crate::propagation::Native>,
     pub(crate) camera: Option<Arc<crate::camera_program::Native>>,
     pub(crate) environment: Option<crate::environment_program::Primary>,
@@ -35,12 +36,12 @@ pub(crate) struct SlangScene {
     pub(crate) attribute_coverage: bool,
     pub(crate) shadow_capacity: u32,
     pub(crate) no_shadow_containment: bool,
+    pub(crate) no_boundary_transactions: bool,
     /// The irradiance volume (probes.slang) replaces world diffuse light.
     pub(crate) probes: bool,
     /// Raster physical-fibre resources participate in pipeline layout identity.
     pub(crate) fibre: bool,
     pub(crate) denoise: bool,
-    pub(crate) volume_visibility: bool,
     pub(crate) field_controls: bool,
     pub(crate) medium: Option<Arc<crate::medium::Native>>,
 }
@@ -127,23 +128,11 @@ impl SlangForward {
             let masked_depth=[stream("depth","depth_fs"),stream("depth","hashed_depth_fs")];
             let masked_vs=stream("decoupled_visibility","masked_vs");
             let transparent_fs=stream("decoupled_visibility",if this.scene.field_controls {"transparent_fragments_fs"} else {"transparent_triangles_fs"});
-            let masked_fs=(!this.scene.volume_visibility).then(||stream("decoupled_visibility","masked_fs"));
+            let masked_fs=stream("decoupled_visibility","masked_fs");
             this.camera=camera;this.fibre_vertex=fibre_vertex;this.masked_depth=masked_depth;
             this.visibility[3]=masked_vs;this.visibility[5]=transparent_fs;
-            if let Some(shader)=masked_fs {this.visibility[4]=shader;}
+            this.visibility[4]=masked_fs;
 
-        }
-        if this.scene.volume_visibility {
-            let pages = this.scene.medium.as_ref().expect("volume visibility storage").sample_pages;
-            let shader = |attributes, entry| {
-                if let Some(&(_,_,_,shader))=native::VOLUME_VISIBILITY.iter().find(|&&(p,a,e,_)|p==pages && a==attributes && e==entry) {
-                    native::shader_module(&this.device,shader)
-                } else {
-                    this.compile_entry("decoupled_visibility",None,(entry,"fragment"),(0,0,0),entry,None).expect("compile scene medium visibility")
-                }
-            };
-            let stages=[shader(0,"fs"),shader(0,"single_fs"),shader(attributes,"masked_fs")];
-            [this.visibility[1],this.visibility[2],this.visibility[4]]=stages;
         }
         this
     }
@@ -170,6 +159,7 @@ impl SlangForward {
         };
         let target=if matches!(ret,"void"|"VisibilityOutput") {""} else {" : SV_Target0"};
         let text=format!("import vork_constants;import frame;import stream;import material;import surface;import variant;import vork_shadow_coverage;{visibility}\n{}\n[shader(\"fragment\")] {ret} {entry}(Varying v,bool front:SV_IsFrontFace,uint primitive:SV_PrimitiveID){target} {{{body}}}",programs.code);
+        let text=if self.scene.program_trace {format!("import vork_rays;\n{text}")} else {text};
         self.compile_entry_for("program_depth",Some(&text),(entry,"fragment"),(0,0,0),entry,None,Some(program))
             .with_context(|| format!("compile material program {} coverage stage {entry}",programs.name))
     }
@@ -215,12 +205,21 @@ impl SlangForward {
         let all_programs = self.table_programs(kernel);
         let program=program.or_else(||if let Some(ProgramKernel::Decoupled {stage:ShadeStage::EvaluateProgram(id),..})=kernel {Some(id)} else {None});
         let primary=program.and_then(|id|all_programs.map(|p|&p.camera[id as usize-1]));
-        let receivers=matches!(kernel,Some(ProgramKernel::Decoupled {stage:ShadeStage::Receivers,..}));
-        let programs=primary.or(all_programs).map(|p|if receivers {p.for_coverage()} else {p});
+        let programs=primary.or(all_programs);
         let path_medium=self.scene.medium.as_ref().filter(|_|matches!(kernel,Some(ProgramKernel::Path {media:Some(_),..})));
         let mut kernel_defines=vec![format!("-DVORK_AOV_COUNT={}",self.scene.aov_count),format!("-DVORK_SHADOW_CAPACITY={}",self.scene.shadow_capacity)];
+        if self.scene.program_trace {kernel_defines.push("-DVORK_PROGRAM_TRACE".into());}
+        if self.scene.program_trace && main=="program_depth" && entry.0=="masked_fs" {
+            kernel_defines.push("-DVORK_RAY_BINDING_GROUP=4".into());
+            if self.metal {
+                // Global/material buffers, fragment storage, and four fragment
+                // geometry buffers precede visibility's retained shadow group.
+                kernel_defines.extend(["-DVORK_RAY_SEQUENCE_REGISTER=t15","-DVORK_RAY_SCENE_REGISTER=t16","-DVORK_RAY_ALPHA_REGISTER=t17","-DVORK_RAY_HITS_REGISTER=b18"].map(str::to_owned));
+            }
+        }
         if !self.scene.field_controls && !matches!(kernel,Some(ProgramKernel::Path {..})) {kernel_defines.push("-DVORK_NO_IMPLICIT".into());}
         if self.scene.no_shadow_containment {kernel_defines.push("-DVORK_NO_SHADOW_CONTAINMENT".into());}
+        if self.scene.no_boundary_transactions && matches!(kernel,Some(ProgramKernel::Path {..})) {kernel_defines.push("-DVORK_NO_BOUNDARY_TRANSACTIONS".into());}
         if !self.scene.connection_transmission {kernel_defines.push("-DVORK_NO_CONNECTION_TRANSMISSION".into());}
         // Medium kernels already have their own outlining policy. Combining it
         // with field outlining makes the NVIDIA driver expand nested closures.
@@ -228,13 +227,18 @@ impl SlangForward {
         if self.scene.field_controls && matches!(entry.0,"controls_fs"|"transparent_controls_fs") {kernel_defines.push("-DVORK_IMPLICIT_CONTROLS".into());}
         if let Some(ProgramKernel::Path {media:Some(count),..})=kernel {
             let native=path_medium.expect("installed path medium");
+            if native.convex {
+                kernel_defines.push("-DVORK_MEDIUM_CONVEX".to_owned());
+                if let Some(limit)=native.work_limit {kernel_defines.push(format!("-DVORK_MEDIUM_WORK_LIMIT={limit}"));kernel_defines.push(format!("-DVORK_MEDIUM_POINT_WORK={}",native.point_work));}
+            }
+            if !native.homogeneous && native.scattering_free && native.emission_free {kernel_defines.push("-DVORK_MEDIUM_ABSORPTION_ONLY".to_owned());}
             kernel_defines.extend(["-DVORK_PATH_MEDIA".to_owned(),format!("-DVORK_PATH_MEDIUM_BOUNDS={count}"),format!("-DVORK_PATH_HETEROGENEOUS={}",u8::from(!native.homogeneous))]);
         }
         if let Some(ProgramKernel::Decoupled {stage,features,boundaries,..})=kernel {
             kernel_defines.extend(crate::camera_native::COMPILER_FLAGS.iter().map(|flag|(*flag).to_owned()));
             kernel_defines.push(format!("-DVORK_REFRACTION_BOUNDARIES={boundaries}"));
             kernel_defines.push("-DVORK_CAMERA_SPLIT".into());
-            if matches!(stage,ShadeStage::Receivers|ShadeStage::Fused|ShadeStage::Compose) {kernel_defines.push("-DVORK_COMPOSE_STORED".into());}
+            if matches!(stage,ShadeStage::Fused|ShadeStage::Compose) {kernel_defines.push("-DVORK_COMPOSE_STORED".into());}
             if features & crate::forward_variant::FEATURE_RECEIVER_DIFFUSION!=0 {kernel_defines.push("-DVORK_RECEIVER_DIFFUSION".into());}
             if stage==ShadeStage::Fused {kernel_defines.push("-DVORK_CAMERA_FUSED".into());}
             if matches!(stage,ShadeStage::Index|ShadeStage::Classify|ShadeStage::Prefix|ShadeStage::Scatter) {kernel_defines.push("-DVORK_CAMERA_CLASSIFY".into());}
@@ -256,56 +260,6 @@ impl SlangForward {
             kernel_defines.extend(vork_slang::MEDIUM_FP_FLAGS.map(str::to_owned));
         }
         let adaptive=matches!(kernel,Some(ProgramKernel::Path {adaptive:true,..}));
-        let refraction_medium=self.scene.medium.as_ref().filter(|_|matches!(kernel,
-            Some(ProgramKernel::Decoupled {stage:ShadeStage::Evaluate|ShadeStage::EvaluateProgram(_),boundaries,..}) if boundaries>0));
-        if let Some(native)=refraction_medium {
-            kernel_defines.push("-DVORK_MEDIUM_SAMPLED_ANALYTIC_LIGHT".into());
-            if native.ray_shadows {kernel_defines.push("-DVORK_MEDIUM_DIRECT_RAY".into());}
-            if native.mesh_sources {kernel_defines.push("-DVORK_MEDIUM_MESH_SOURCES".into());}
-            kernel_defines.extend(["-DVORK_MEDIUM_SAMPLED_LIGHTING".into(),"-DVORK_MEDIUM_JITTERED_LIGHTING".into()]);
-            kernel_defines.extend(native.defines());
-            kernel_defines.extend(["-DVORK_BOUNDED_MEDIUM".into(),format!("-DVORK_MEDIUM_STEPS={}",native.steps)]);
-        }
-        let reflection_medium=self.scene.medium.as_ref().filter(|_|matches!(kernel,Some(ProgramKernel::Reflections {..})));
-        if let Some(native)=reflection_medium {
-            if native.mesh_sources {kernel_defines.push("-DVORK_MEDIUM_MESH_SOURCES".into());}
-            kernel_defines.extend(native.defines());
-            if native.visibility_lights>0 {
-                kernel_defines.extend(["-DVORK_REFLECTION_MEDIUM_GRID".into(),format!("-DVORK_REFLECTION_MEDIUM_CAPACITY={}",native.froxel_page_elements)]);
-            }
-            kernel_defines.extend(["-DVORK_REFLECTION_MEDIUM".into(),"-DVORK_MEDIUM_SAMPLED_LIGHTING".into(),"-DVORK_MEDIUM_JITTERED_LIGHTING".into(),format!("-DVORK_MEDIUM_STEPS={}",native.steps)]);
-        }
-        // Diffuse rays integrate source radiance and extinction through the same
-        // finite/world medium domains used by camera transport.
-        let diffuse_medium=self.scene.medium.as_ref().filter(|_|matches!(kernel,
-            Some(ProgramKernel::Probes {..}|ProgramKernel::Gi {..}|
-                ProgramKernel::Decoupled {stage:ShadeStage::Indirect,..})));
-        if let Some(native)=diffuse_medium {
-            kernel_defines.push("-DVORK_MEDIUM_SAMPLED_ANALYTIC_LIGHT".into());
-            if native.mesh_sources {kernel_defines.push("-DVORK_MEDIUM_MESH_SOURCES".into());}
-            kernel_defines.extend(native.defines());
-            kernel_defines.extend(["-DVORK_DIFFUSE_MEDIUM".into(),"-DVORK_MEDIUM_SAMPLED_LIGHTING".into(),"-DVORK_MEDIUM_JITTERED_LIGHTING".into(),format!("-DVORK_MEDIUM_STEPS={}",native.steps)]);
-        }
-        let surface_medium=self.scene.medium.as_ref().filter(|_|matches!(kernel,
-            Some(ProgramKernel::Decoupled {stage:ShadeStage::EvaluateOpaque|ShadeStage::Evaluate|ShadeStage::EvaluateProgram(_)|ShadeStage::Fused|ShadeStage::Indirect,..}
-                |ProgramKernel::Reflections {..}|ProgramKernel::Gi {..}|ProgramKernel::Probes {..})));
-        let surface_medium_only=surface_medium.filter(|_|refraction_medium.is_none() && reflection_medium.is_none() && diffuse_medium.is_none());
-        if let Some(native)=surface_medium {
-            kernel_defines.push("-DVORK_SURFACE_MEDIUM".into());
-            if surface_medium_only.is_some() {
-                kernel_defines.push("-DVORK_SURFACE_MEDIUM_ONLY".into());
-                kernel_defines.extend(native.defines());
-                kernel_defines.push(format!("-DVORK_MEDIUM_STEPS={}",native.steps));
-            }
-        }
-        if refraction_medium.is_some() || reflection_medium.is_some() || diffuse_medium.is_some() || surface_medium.is_some() {
-            kernel_defines.push("-DVORK_MEDIUM_ENVIRONMENT".into());
-            // Match the shipped surface profile: keep repeated hit/lighting
-            // graphs shared through Slang before handing them to the driver.
-            kernel_defines.extend([NATIVE_OPTIMIZATION.to_owned(), "-DVORK_SURFACE_SLANG_OUTLINE".into()]);
-        }
-        let visibility_medium=self.scene.medium.as_ref().filter(|_|self.scene.volume_visibility && ((main=="program_depth" && entry.0=="masked_fs") || main=="decoupled_visibility") && entry.1=="fragment");
-
         let mut program_modules = programs.map_or_else(Vec::new, |p| p.modules.clone());
         if matches!(kernel,Some(ProgramKernel::Path {..})) {
             if let Some(p)=&self.scene.propagation {
@@ -336,16 +290,12 @@ impl SlangForward {
                 if let Some(existing)=program_modules.iter_mut().find(|(name,_)|name==&module.0) {*existing=module.clone();} else {program_modules.push(module.clone());}
             }
         }
-        if let Some(n)=visibility_medium {
-            let source=native::SOURCES.iter().find(|(name,_)|*name=="decoupled_fragments").unwrap().1;
-            program_modules.push(("decoupled_fragments".into(),source.replace("// SAMPLE_STORAGE", &crate::visibility_native::storage(n.sample_pages))));
-        }
         // Secondary camera transport already receives CameraPrograms as P.
         // Shadow/probe candidate callbacks still import their shared dispatcher.
         let medium_sources=self.scene.medium.as_ref().is_some_and(|m|m.mesh_sources);
         let program_coverage=secondary && self.ray_shadows && (medium_sources || self.scene.connection_transmission || self.scene.attribute_coverage || all_programs.is_some_and(|p|p.coverage || self.scene.fibre));
         if let Some(p)=all_programs.filter(|_|program_coverage) {
-            let p=if receivers && !self.scene.connection_transmission && !medium_sources {p.for_coverage()} else {p};
+            let p=if !self.scene.connection_transmission && !medium_sources {p.for_coverage()} else {p};
             program_modules.push(("scene_programs".into(),p.code.replace("struct Programs :","struct ScenePrograms :")));
         }
         if program_coverage && all_programs.is_none() {
@@ -355,18 +305,6 @@ impl SlangForward {
             if programs.is_none() {program_modules.extend(programs::abi().native_modules());}
             program_modules.extend(native.modules.clone());
             program_modules.push(("path_medium_scene".into(),format!("import frame;\n{}",native.point)));
-        }
-        for (name, native) in [
-            ("refraction_medium_scene", refraction_medium),
-            ("reflection_medium_scene", reflection_medium),
-            ("diffuse_medium_scene", diffuse_medium),
-            ("surface_medium_scene", surface_medium_only),
-        ] {
-            if let Some(native)=native {
-                if programs.is_none() {program_modules.extend(programs::abi().native_modules());}
-                program_modules.extend(native.modules.clone());
-                program_modules.push((name.into(),format!("import frame;\nimport vork_medium;\ninternal extern Frame medium_frame();\n{}",native.transport)));
-            }
         }
         let attributes=if main=="decoupled_visibility" && matches!(entry.0,"fs"|"single_fs") {0} else {self.scene.attributes};
         let define = format!("-DVORK_ATTRIBUTES={attributes}");
@@ -397,7 +335,7 @@ impl SlangForward {
         if let Some(environment)=&self.scene.environment {include.extend(environment.include.iter().map(|p|p.display().to_string()));}
         if let Some(p)=&self.scene.propagation {include.extend(p.include.iter().map(|p|p.display().to_string()));}
         if let Some(camera)=&self.scene.camera {include.extend(camera.include.iter().map(|p|p.display().to_string()));}
-        if let Some(native)=path_medium.or(refraction_medium).or(reflection_medium).or(diffuse_medium).or(surface_medium) {include.extend(native.includes.iter().map(|p|p.display().to_string()));}
+        if let Some(native)=path_medium {include.extend(native.includes.iter().map(|p|p.display().to_string()));}
         let query_defines:Vec<_> = if self.metal && entry.1=="vertex" {
             vec!["-DVORK_MATERIAL_WORDS_REGISTER=t2","-DVORK_FRAME_LIGHTS_REGISTER=t30"]
         }else{Vec::new()};
@@ -424,7 +362,6 @@ impl SlangForward {
             .chain(kernel_defines.iter().map(String::as_str))
             .chain(query_defines.iter().copied())
 
-            .chain(visibility_medium.is_some().then_some("-DVORK_VOLUME_VISIBILITY"))
             .chain((self.ray_shadows || (main=="decoupled_programs" && self.scene.ray_refraction)).then_some("-DVORK_RAY_BINDINGS"))
             .chain((main=="decoupled_programs" && self.scene.ray_refraction).then_some("-DVORK_RAY_REFRACTION"))
             .chain(denoise.then_some("-DVORK_DENOISE"))
@@ -437,16 +374,16 @@ impl SlangForward {
             .collect();
         let compiler=vork_slang::Compiler::discover();
         let identities=(if secondary {all_programs} else {programs}).map(|p|p.identities.clone()).unwrap_or_default();
+        let inputs = (if secondary {all_programs} else {programs}).map(|p| p.inputs.as_slice()).unwrap_or(&[]);
         let (identity,prepared)=if probe {
-            let Some(identity)=programs::cached_native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities)? else {return Ok(Lookup::Absent);};
+            let Some(identity)=programs::cached_native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities,inputs)? else {return Ok(Lookup::Absent);};
             (identity,None)
         } else {
-            programs::native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities)?
+            programs::native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities,inputs)?
         };
-        if let Some(programs)=if secondary {all_programs} else {programs} {for input in &programs.inputs {identity.verify(input)?;}}
         let mut hash = blake3::Hasher::new();
+        if path_outlining && !self.metal {hash.update(b"path-local-blend-state-v1");}
         if self.scene.field_controls {hash.update(b"field-driver-inline-v1");}
-        if refraction_medium.is_some() || reflection_medium.is_some() || diffuse_medium.is_some() || surface_medium.is_some() {hash.update(b"medium-driver-inline-v1");}
         hash.update(&[u8::from(self.ray_shadows),u8::from(self.msaa),u8::from(denoise),u8::from(main=="decoupled_programs" && self.scene.ray_refraction),u8::from(self.scene.connection_transmission)]);
         for part in [target, main, entry.0, &define, text.unwrap_or("")] {
             hash.update(part.as_bytes());
@@ -461,25 +398,26 @@ impl SlangForward {
         if fibre {hash.update(fibre_binding.as_bytes());}
         // Embedded renderer modules and compiler inputs have a shader-only
         // content identity in the store, independent of host builds/devices.
+        let prefix = hash.clone();
         hash.update(&identity.identity);
         let path = (self.cache)(hash.finalize());
         if probe {return Ok(if disk_cache::read(&path).is_some() {Lookup::Stored} else {Lookup::Absent});}
-        let code = match disk_cache::read(&path) {
-            Some(code) => code,
-            None => {
-                let start=std::time::Instant::now();
-                let prepared=match prepared {Some(input)=>input,None=>compiler.prepare_identified_modules(&modules,main,&[entry],&args,&identities)?};
-                anyhow::ensure!(prepared.identity()==identity.identity,"Slang inputs changed during cache lookup; retry the command");
-                let mut code = prepared.compile()?;
-                if self.metal && matches!(kernel,Some(ProgramKernel::Decoupled {stage:ShadeStage::Evaluate,..})) {
-                    code=crate::camera_native::inline_metal_functions(&code);
-                }
-                if (self.scene.field_controls || surface_outlining || path_outlining || refraction_medium.is_some() || reflection_medium.is_some() || diffuse_medium.is_some() || surface_medium.is_some()) && !self.metal { allow_driver_inlining(&mut code)?; }
-                crate::timing::creation(&self.device,label,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
-                let _ = disk_cache::write(&path, &code);
-                code
+        let receipt_path = programs::native_input_receipt_path(self.cache.as_ref(), &compiler, &modules, main, &[entry], &args, &identities)?;
+        let code = programs::native_code(&identity, prepared, inputs, &receipt_path, |identity| {
+            let mut hash = prefix.clone();
+            hash.update(identity);
+            (self.cache)(hash.finalize())
+        }, || compiler.prepare_identified_modules(&modules, main, &[entry], &args, &identities), |prepared| {
+            let start = std::time::Instant::now();
+            let mut code = prepared.compile()?;
+            if path_outlining && !self.metal {code=compiler.localize_native_blends(&code)?;}
+            if self.metal && matches!(kernel,Some(ProgramKernel::Decoupled {stage:ShadeStage::Evaluate,..})) {
+                code=crate::camera_native::inline_metal_functions(&code);
             }
-        };
+            if (self.scene.field_controls || surface_outlining || path_outlining) && !self.metal { allow_driver_inlining(&mut code)?; }
+            crate::timing::creation(&self.device,label,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
+            Ok(code)
+        })?;
         Ok(Lookup::Built(if self.metal {
             native::module(&self.device, label, None, Some(&String::from_utf8(code)?), threads)
         } else {
@@ -496,16 +434,15 @@ impl SlangForward {
         if self.scene.environment.is_some() && stage.composes() {return None;}
         // Shipped evaluators read proven World profiles through the retained words.
         // Other domains and coefficient programs still link their transport.
-        if self.scene.medium.as_ref().is_some_and(|n|n.surface_connection.is_none()) && matches!(stage,ShadeStage::EvaluateOpaque|ShadeStage::Evaluate|ShadeStage::Fused) {return None;}
         // Coverage needs the runtime camera payload contract for every producer
         // and consumer, including native specialized evaluators and composition.
         // Shipped camera records carry no AOVs. Classification has no surface
         // payload; every evaluator and consumer of that payload must agree on N.
-        if (self.scene.aov_count!=0 || self.scene.surface_coverage) && matches!(stage,ShadeStage::EvaluateOpaque|ShadeStage::Evaluate|ShadeStage::Compose|ShadeStage::Receivers) {return None;}
+        if (self.scene.aov_count!=0 || self.scene.surface_coverage) && matches!(stage,ShadeStage::EvaluateOpaque|ShadeStage::Evaluate|ShadeStage::Compose) {return None;}
         let name=match stage {
             ShadeStage::Index=>"index",ShadeStage::Classify=>"classify",ShadeStage::Prefix=>"prefix",ShadeStage::Scatter=>"scatter",
             ShadeStage::EvaluateOpaque=>"evaluate_opaque",ShadeStage::Evaluate=>"evaluate",ShadeStage::EvaluateProgram(_)|ShadeStage::Fused|ShadeStage::Occupancy|ShadeStage::Indirect=>return None,
-            ShadeStage::Compose=>if receiver_diffusion {"combine_diffusion"} else {"combine"},ShadeStage::Receivers=>"receivers",
+            ShadeStage::Compose=>if receiver_diffusion {"combine_diffusion"} else {"combine"},
         };
         Some(native::CAMERAS.iter().find(|(m,r,n,_)|*m==u8::from(self.msaa && stage.composes()) && *r==u8::from(self.ray_shadows) && *n==name).unwrap().3)
     }
@@ -514,7 +451,7 @@ impl SlangForward {
         use crate::pipelines::{ProgramKernel,ShadeStage};
         let ProgramKernel::Decoupled {stage,features,..}=kernel else {return None;};
         if stage.table() || matches!(stage,ShadeStage::EvaluateProgram(_)|ShadeStage::Indirect)
-            || stage==ShadeStage::Receivers && self.scene.programs.as_ref().is_some_and(|p|p.coverage) {return None;}
+            {return None;}
         self.camera_shipped(stage,features & crate::forward_variant::FEATURE_RECEIVER_DIFFUSION!=0)
     }
 
@@ -522,7 +459,7 @@ impl SlangForward {
         use crate::pipelines::{ProgramKernel,ShadeStage};
         use crate::surface_native::SurfaceKernel;
         if self.scene.surface_coverage && matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {..}) {return None;}
-        if self.metal || self.scene.field_controls || self.scene.medium.as_ref().is_some_and(|n|n.surface_connection.is_none()) || self.scene.attributes!=0 || self.scene.aov_count!=0
+        if self.metal || self.scene.field_controls || self.scene.attributes!=0 || self.scene.aov_count!=0
             || self.scene.environment.is_some() || self.scene.fibre
             || !self.scene.no_shadow_containment || self.scene.connection_transmission && (self.scene.programs.is_some() || !self.ray_shadows)
             || self.table_programs(Some(kernel)).is_some() {return None;}
@@ -590,13 +527,11 @@ impl SlangForward {
             }
         }
         let source=self.table_programs(Some(kernel));
-        let source=source.map(|source|if matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::Receivers,..}) {source.for_coverage()} else {source});
         let primary=if let crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::EvaluateProgram(id),..}=kernel {source.map(|source|&source.camera[id as usize-1])} else {None};
         let code=primary.or(source).map_or_else(String::new,|source|source.code.replace("struct Programs :","struct CameraPrograms :"));
         let secondary=source.filter(|_|primary.is_some() && self.scene.ray_refraction).map_or_else(String::new,|source|source.code.clone());
         let program=if source.is_some() {"CameraPrograms"} else {"NoPrograms"};
         let transport=if secondary.is_empty() {program} else {"Programs"};
-        let receivers=matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::Receivers,..});
         let decode_table=!matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::EvaluateProgram(_),..});
         let fused=matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::Fused,..});
         let compose=matches!(kernel,crate::pipelines::ProgramKernel::Decoupled {stage:crate::pipelines::ShadeStage::Compose,..});
@@ -610,22 +545,14 @@ impl SlangForward {
             ((8,8,1),"if(camera_config.screen!=0u && camera_config.lit!=0u) {composite_pixel<Key,NoPrograms,CameraTransmittance,3>(gid);} else {shade_pixel<Key,NoPrograms,CameraTransmittance,CameraDiffusion,3>(gid);}".to_owned())
         } else if fused {
             ((8,8,1),"shade_pixel<Key,NoPrograms,CameraTransmittance,CameraDiffusion,3>(gid);".to_owned())
-        } else if receivers {
-            ((8,8,1),format!("volume_receivers<CameraPolicy,{program}>(gid);"))
         } else {
             ((64,1,1),format!("evaluate_material<Key,{program},{decode_table},{transport}>(gid);"))
         };
         let text=format!("import camera_config;import decoupled;import surface;import frame;\n{secondary}\n{code}\n[shader(\"compute\")][numthreads({},{},{})] void decoupled_programs(uint3 gid:SV_DispatchThreadID) {{{call}}}",threads.0,threads.1,threads.2);
-        let text=if indirect && self.scene.medium.is_some() {
-            let mesh=if self.scene.medium.as_ref().is_some_and(|m|m.mesh_sources) {
-                format!("export float3 medium_mesh_illumination(float3 position,float3 ray,float g) {{return camera_medium_mesh<{program}>(position,ray,g);}}\n")
-            } else {String::new()};
-            format!("{text}\nexport float3 medium_visibility(float3 position,uint index) {{return camera_medium_visibility<{program}>(position,index);}}\n{mesh}")
-        } else {text};
-        let text=if !receivers {
+        let text={
             let crate::pipelines::ProgramKernel::Decoupled {features,subsurface,emitter_profiles,..}=kernel else {unreachable!("camera program key")};
             crate::forward_variant::variant_module(features,self.ray_shadows,subsurface,emitter_profiles,None,&text)
-        } else {text};
+        };
         let module=self.entry_module("decoupled_programs",Some(&text),("decoupled_programs","compute"),threads,"camera program",Some(kernel),None,probe)
             .with_context(|| format!("compile camera stage {} with material program {}",kernel.camera_label().unwrap_or_else(||"decoupled_programs".into()),
                 primary.map_or("table",|p|p.name.as_str())))?;
@@ -797,19 +724,6 @@ impl SlangForward {
              void {entry}({parameters}) {{{kernel_call}{type_arguments}>({arguments});}}\n",
             threads.0, threads.1, threads.2
         );
-        let text=if matches!(kernel,ProgramKernel::Reflections {..}) && self.scene.medium.is_some() {
-            let mesh=if self.scene.medium.as_ref().is_some_and(|m|m.mesh_sources) {
-                format!("export float3 medium_mesh_illumination(float3 position,float3 ray,float g) {{return reflection_medium_mesh<{program}>(position,ray,g);}}\n")
-            } else {String::new()};
-            format!("{text}\nexport float3 medium_visibility(float3 position,uint index) {{return reflection_medium_visibility<{program}>(position,index);}}\n{mesh}")
-        } else {text};
-        let text=if self.scene.medium.is_some() && matches!(kernel,ProgramKernel::Gi {..}|ProgramKernel::Probes {..}) {
-            let consumer=if matches!(kernel,ProgramKernel::Gi {..}) {"gi"} else {"probe"};
-            let mesh=if self.scene.medium.as_ref().is_some_and(|m|m.mesh_sources) {
-                format!("export float3 medium_mesh_illumination(float3 position,float3 ray,float g) {{return {consumer}_medium_mesh<{program}>(position,ray,g);}}\n")
-            } else {String::new()};
-            format!("{text}\nexport float3 medium_visibility(float3 position,uint index) {{return {consumer}_medium_visibility<{program}>(position,index);}}\n{mesh}")
-        } else {text};
         let specialization = match kernel {
             ProgramKernel::Path { features, emitter_profiles, .. } => Some((features, emitter_profiles, false)),
             ProgramKernel::Reflections { features } | ProgramKernel::Gi { features } | ProgramKernel::Probes {features,..} => Some((features, false, false)),
@@ -897,10 +811,7 @@ mod tests {
         let mut unprobed=base.clone();unprobed.ray_refraction=true;unprobed.connection_transmission=true;unprobed.probes=false;
         let unprobed=SlangForward::new(&r,true,false,unprobed);
         assert!(unprobed.shared_kernel_key(transport).is_none(),"non-probe refraction retains its validated runtime executable");
-        let mut medium=base.clone();medium.ray_refraction=true;medium.connection_transmission=true;
-        medium.medium=Some(Arc::new(crate::medium::Native {surface_connection:Some(0),..Default::default()}));
-        let medium=SlangForward::new(&r,true,false,medium);
-        assert!(medium.shared_kernel_key(transport).is_none(),"refraction through a medium retains its linked continuation");
+
         let scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,"nodes":[]}))?;
         let instance=programs::Instance {name:"thin-shadow-test".into(),file:None,
             source:Some("import vork; struct Inputs {}; Closure surface(ShadingContext ctx,Inputs p) {Closure c={};c.transmission_weight=1.;c.geometry_thin_walled=true;return c;}".into()),inputs:Default::default(),images:Vec::new()};

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Emit Blender display curves as a scene-linear compositor program."""
+"""Emit Blender display curves inside display conversion, outside linear outputs."""
 import math
 import struct
 
@@ -65,8 +65,8 @@ def _sample_curves(mapping):
     return black, multiplier, curves
 
 
-def compositor_source(mapping):
-    """Emit ordinary scene-linear compositor code; the caller reports output scope."""
+def curve_source(mapping):
+    """Emit evaluated RGB transfer functions for a display wrapper."""
     black_level, white_multiplier, curves = _sample_curves(mapping)
     def literal(value):
         return repr(f32(value))
@@ -86,10 +86,30 @@ float curve_{channel}(float x) {{
 """)
     black = ','.join(literal(v) for v in black_level)
     white = ','.join(literal(v) for v in white_multiplier)
-    return ('import vork;\npublic struct Inputs {};\n' + ''.join(functions) + f"""
-public float4 composite(CompositeContext ctx, Inputs inputs) {{
-    float4 rgba = compositor_sample(ctx.uv);
-    float3 c = (rgba.rgb - float3({black})) * float3({white});
-    return float4(float3(curve_0(c.r), curve_1(c.g), curve_2(c.b)), rgba.a);
+    return ''.join(functions) + f"""
+float3 blender_curves(float3 color) {{
+    float3 c = (color - float3({black})) * float3({white});
+    return float3(curve_0(c.r), curve_1(c.g), curve_2(c.b));
 }}
-""")
+"""
+
+
+def display_source(program, *, curves=None, white_balance=None):
+    """Wrap the bundled view code and retain its reflected input types."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2] / 'libraries'
+    source = (root / (program + '.slang')).read_text()
+    helpers = ''
+    operations = ''
+    if curves is not None:
+        helpers += curve_source(curves)
+        operations += '    ctx.color = blender_curves(ctx.color);\n'
+    if white_balance is not None:
+        wb = (root / 'post/white_balance.slang').read_text().split('public float4 composite(')[0]
+        helpers += wb.replace('Inputs', 'BlenderWhiteBalanceInputs')
+        temperature, tint = white_balance
+        operations += f'    BlenderWhiteBalanceInputs wb; wb.temperature = {float(temperature)!r}; wb.tint = {float(tint)!r};\n    ctx.color = white_balance(ctx.color, wb);\n'
+    entry = 'public float3 display(DisplayContext ctx, Inputs inputs) {'
+    if source.count(entry) != 1:
+        raise ValueError(f'{program}: bundled display entry changed')
+    return helpers + source.replace(entry, entry + '\n' + operations)

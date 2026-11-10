@@ -12,6 +12,10 @@ fn line(start: Instant) -> String {
     if s.total > 0 {
         line.push_str(&format!(" {done}/{} ({:.0}%)", s.total, 100. * done as f64 / s.total as f64));
     }
+    if s.samples_total > 0 {
+        line.push_str(&format!("; sample passes recorded {}/{}, GPU completed {}{}", s.samples_recorded, s.samples_total, s.samples_done.load(std::sync::atomic::Ordering::Relaxed).min(s.samples_total),
+            if s.samples_recorded == s.samples_total { "; waiting for GPU/output" } else { "" }));
+    }
     let compiling = s.shaders_started > s.shaders_done || s.pipelines_started > s.pipelines_done;
     if (s.shaders_started > 0 || s.pipelines_started > 0) && (compiling || s.total == 0) {
         line.push_str(&format!("; shader jobs {}/{}; driver pipelines {}/{} complete (discovered so far)",
