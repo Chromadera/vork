@@ -1,0 +1,129 @@
+# Publishes the tested registry files of a published GitHub release to npm and
+# PyPI through OIDC trusted publishing. No tokens, passwords or logins.
+#
+# Two refusals only: the downloaded files are not the tested files (sha256 against
+# the release's tested-manifest.json, checked by scripts/registry_plan.py), and the release owner
+# has not approved the `npm` / `pypi` environment deployments. dry_run (the default)
+# verifies and prints the plan, then stops before any upload.
+#
+# Runs only in the public repository, dispatched at a published release tag:
+# Actions > Publish approved registry assets > Run workflow > tag vX.Y.Z.
+name: Publish approved registry assets
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: Registry to publish (select one to finish after a partial failure)
+        type: choice
+        options: [both, npm, pypi]
+        default: both
+      dry_run:
+        description: Verify and print the plan only; publish nothing
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: registry-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.repository == 'voyager-so/vork' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the published release files
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release view "$TAG" --repo "$REPO" --json isDraft,isPrerelease | jq -e '.isDraft == false'
+          mkdir registry-dist
+          gh release download "$TAG" --repo "$REPO" --dir registry-dist \
+            --pattern '*.tgz' --pattern '*.whl' --pattern tested-manifest.json
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Refuse unless the files are the tested files; print the plan
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: python3 scripts/registry_plan.py --dist registry-dist --manifest registry-dist/tested-manifest.json --version "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-registry-files
+          path: registry-dist/
+          if-no-files-found: error
+          retention-days: 7
+      - if: inputs.dry_run
+        run: echo "Dry run. Nothing was published."
+  npm:
+    needs: plan
+    if: ${{ !inputs.dry_run && (inputs.registry == 'both' || inputs.registry == 'npm') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-registry-files
+          path: registry-dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require an npm with trusted publishing
+        run: |
+          set -euo pipefail
+          npm install --global npm@11
+          node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); if (a<22||(a===22&&b<14)) throw new Error("Node 22.14+ required")'
+          npm --version | awk -F. '{ if ($1 < 11 || ($1 == 11 && ($2 < 5 || ($2 == 5 && $3 < 1)))) { print "npm 11.5.1+ required"; exit 1 } }'
+      - name: Publish the tested files, dependencies first
+        working-directory: registry-dist
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 ../scripts/registry_plan.py --dist . --manifest tested-manifest.json --version "$VERSION" --format json > plan.json
+          for file in $(jq -r '.[] | select(.registry == "https://registry.npmjs.org") | .file' plan.json); do
+            npm publish "./$file" --ignore-scripts --access public --tag latest --provenance --registry https://registry.npmjs.org
+          done
+  pypi:
+    needs: plan
+    if: ${{ !inputs.dry_run && (inputs.registry == 'both' || inputs.registry == 'pypi') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-registry-files
+          path: registry-dist
+      - name: Verify again and separate native wheels from the common wheel
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/registry_plan.py --dist registry-dist --manifest registry-dist/tested-manifest.json --version "$VERSION"
+          mkdir native common
+          mv registry-dist/vork_native_*.whl native/
+          mv registry-dist/vork-*.whl common/
+      - name: Publish native wheels
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: native/
+      - name: Publish the common wheel
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: common/
