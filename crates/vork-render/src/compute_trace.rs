@@ -33,12 +33,9 @@ const PROVIDER:&str=r#"
 import compute_trace_tables;
 import geometric_trace;
 import hit_geometry;
-struct ComputeGeometry : IHitGeometry {
-    static uint word(uint i) {return compute_words[i];}
-    static uint load(uint buffer,uint i) {return compute_hit_buffers[NonUniformResourceIndex(buffer)][i];}
-}
+typedef RayGeometry ComputeGeometry;
 export TraceHit native_geometric_trace(float3 o,float3 d,float lo,float hi,uint mask,uint object) {
-    return geometric_trace<ComputeGeometry>(compute_scene,o,d,lo,hi,mask,object);
+    return geometric_trace<ComputeGeometry>(ComputeGeometry(compute_words,compute_hit_buffers),compute_scene,o,d,lo,hi,mask,object);
 }
 "#;
 impl Queries {
@@ -102,7 +99,7 @@ impl Queries {
         let identities=std::collections::BTreeMap::new();
         let inputs=std::slice::from_ref(&prepared.identity);
         let (identity,prepared_native)=programs::native_input_identity(&cache,&compiler,&modules,"compute_query_main",&[("vork_entry","compute")],&args,&identities,inputs)?;
-        let receipt_path=programs::native_input_receipt_path(&cache,&compiler,&modules,"compute_query_main",&[("vork_entry","compute")],&args,&identities)?;
+        let receipt_path=programs::native_input_receipt_path(&cache,&compiler,&modules,"compute_query_main",&[("vork_entry","compute")],&args,&identities,inputs)?;
         let code=programs::native_code(&identity,prepared_native,inputs,&receipt_path,
             |identity|cache(blake3::hash(identity)),
             ||compiler.prepare_identified_modules(&modules,"compute_query_main",&[("vork_entry","compute")],&args,&identities),

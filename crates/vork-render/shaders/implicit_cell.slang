@@ -75,38 +75,65 @@ uint implicit_stationary(float4 c,out float2 roots) {
     return count;
 }
 
-// Return the first root on a closed segment wholly inside the cell. A constant
-// zero cell has no isolated surface. No distance-field/Lipschitz assumption is
-// made. Bisection evaluates the interpolant, avoiding power-basis cancellation.
-ImplicitCellHit implicit_cell_hit(ImplicitCell cell,float3 start,float3 end) {
-    ImplicitCellHit hit={false,0.,float3(0.)};
+// Visit ordered zero events lazily. Rounded stationary/end nodes can expose
+// four events, but a caller accepting the first must not solve all later roots.
+struct ImplicitCellRoots {
+    float2 stationary;
+    float low;
+    float vlow;
+    uint count;
+    uint interval;
+    bool first;
+};
+ImplicitCellRoots implicit_cell_roots(ImplicitCell cell,float3 start,float3 end) {
+    ImplicitCellRoots roots={};roots.first=true;
     float3 direction=end-start;
     float4 c=implicit_polynomial(cell,start,direction);
-    if(all(c==float4(0.))) return hit;
-    float2 stationary;
-    uint count=implicit_stationary(c,stationary);
-    float low=0.;
-    float vlow=implicit_value(cell,start);
-    for(uint interval=0u;interval<=count;interval++) {
-        float high=interval<count ? stationary[interval] : 1.;
-        float vhigh=implicit_value(cell,start+high*direction);
-        if(vlow==0. || vhigh==0. || (vlow<0.)!=(vhigh<0.)) {
-            if(vlow==0.) high=low;
-            else if(vhigh!=0.) {
-                for(uint iteration=0u;iteration<REG_IMPLICIT_ROOT_BISECTIONS;iteration++) {
-                    float mid=low+(high-low)*.5;
-                    if(mid==low || mid==high) break;
-                    float value=implicit_value(cell,start+mid*direction);
-                    if(value==0.) {low=mid;high=mid;break;}
-                    if((value<0.)==(vlow<0.)) {low=mid;vlow=value;} else high=mid;
-                }
+    if(all(c==float4(0.))) {roots.interval=1u;return roots;}
+    roots.count=implicit_stationary(c,roots.stationary);
+    roots.vlow=implicit_value(cell,start);
+    return roots;
+}
+bool implicit_cell_next(ImplicitCell cell,float3 start,float3 end,inout ImplicitCellRoots roots,out float fraction) {
+    fraction=0.;
+    if(roots.interval>roots.count) return false;
+    if(roots.first) {
+        roots.first=false;
+        if(roots.vlow==0.) return true;
+    }
+    float3 direction=end-start;
+    while(roots.interval<=roots.count) {
+        float low=roots.low,vlow=roots.vlow;
+        float high=roots.interval<roots.count ? roots.stationary[roots.interval] : 1.;
+        float vhigh=implicit_value(cell,high==1. ? end : start+high*direction);
+        // A strict bracket and zero high node are mutually exclusive. Advance
+        // before yielding so a rejected root resumes the remaining SAME cell.
+        roots.low=high;roots.vlow=vhigh;roots.interval++;
+        if(vlow!=0. && vhigh!=0. && (vlow<0.)!=(vhigh<0.)) {
+            float a=low,b=high,va=vlow;
+            for(uint iteration=0u;iteration<REG_IMPLICIT_ROOT_BISECTIONS;iteration++) {
+                float mid=a+(b-a)*.5;
+                if(mid==a || mid==b) break;
+                float value=implicit_value(cell,start+mid*direction);
+                if(value==0.) {a=mid;b=mid;break;}
+                if((value<0.)==(va<0.)) {a=mid;va=value;} else b=mid;
             }
-            hit.found=true;
-            hit.fraction=high;
-            hit.gradient=implicit_gradient(cell,start+high*direction);
-            return hit;
+            fraction=b;return true;
         }
-        low=high;vlow=vhigh;
+        if(vhigh==0.) {fraction=high;return true;}
+    }
+    return false;
+}
+
+// Algebraic primitive: grid surface admission separately requires a boundary
+// of the negative region. Keep this first-root helper for numerical consumers.
+ImplicitCellHit implicit_cell_hit(ImplicitCell cell,float3 start,float3 end) {
+    var roots=implicit_cell_roots(cell,start,end);
+    ImplicitCellHit hit={false,0.,float3(0.)};
+    hit.found=implicit_cell_next(cell,start,end,roots,hit.fraction);
+    if(hit.found) {
+        let p=hit.fraction==0. ? start : (hit.fraction==1. ? end : start+hit.fraction*(end-start));
+        hit.gradient=implicit_gradient(cell,p);
     }
     return hit;
 }

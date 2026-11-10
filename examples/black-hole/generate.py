@@ -123,6 +123,21 @@ def debris(seed, count, near, far):
     return mesh
 
 
+def _moon_mesh():
+ radius,sectors,rings=3.5,64,32
+ positions=[];normals=[];uv=[];indices=[]
+ for y in range(rings+1):
+  for x in range(sectors+1):
+   a=y*math.pi/rings;b=(0 if x==sectors else x)*math.tau/sectors
+   n=[0.,1.,0.] if y==0 else [0.,-1.,0.] if y==rings else [math.sin(a)*math.cos(b),math.cos(a),math.sin(a)*math.sin(b)]
+   positions.append([v*radius for v in n]);normals.append(n);uv.append([1-x/sectors,y/rings])
+ for y in range(rings):
+  for x in range(sectors):
+   a=y*(sectors+1)+x;b=a+sectors+1
+   if y<rings-1:indices.extend([a,b+1,b])
+   if y>0:indices.extend([a,a+1,b+1])
+ return dict(attributes={k:dict(type=t,data=v) for k,t,v in [('POSITION','vec3',positions),('NORMAL','vec3',normals),('TEXCOORD_0','vec2',uv)]},indices=dict(type='u32',data=indices))
+
 def generate():
     scene = {'version': 2,
              'render': {'resolution': [1920,1080], 'duration': DURATION, 'fps': FPS,
@@ -133,7 +148,7 @@ def generate():
              'materials': {'disk': {'program': 'disk'},
                            'world': {'program': 'environment'}, 'moon': {'program': 'moon'},
                            'rock': {'program': 'std/openpbr', 'inputs': {'base_color': [.5,.32,.15], 'specular_roughness': .32, 'emission_color': [1,.35,.08], 'emission_luminance': .18}}},
-             'buffers': {}, 'geometry': {'moon': {'std': 'sphere', 'radius': 3.5, 'segments': 64, 'rings': 32}},
+             'buffers': {}, 'geometry': {'moon': _moon_mesh()},
              'nodes': [], 'animation': [{'tracks': []}]}
     for name, mesh in [('annulus',annulus()), ('near_dust',debris(418,200,25,53)), ('far_dust',debris(631,350,-20,25))]:
         buffers, geometry = mesh.write(name)

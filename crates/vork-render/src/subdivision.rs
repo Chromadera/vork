@@ -352,15 +352,15 @@ mod tests {
             scene["render"]["resolution"]=serde_json::json!([width,height]);
             v2::replace_integrator(&mut scene,serde_json::json!({"integrator":"raster","samples":4,"fast_gi":null,"reflections":"environment"}));
             let installed=r.install(v2::from_test_value(scene)?,std::path::Path::new("."))?;
-            let mut slot=installed.create_frame_slot(&r,Default::default())?;
-            let mut images=std::collections::BTreeMap::new();
+            let mut slot=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            let mut images:std::collections::BTreeMap<u32,Vec<[f32;4]>>=std::collections::BTreeMap::new();
             for (index,time) in [0f32,0.25,0.,0.25].into_iter().enumerate() {
                 slot.submit(&installed,&r,time)?;
                 let output=slot.collect(&r)?;
                 ensure!(output.rgba.chunks_exact(4).any(|pixel|pixel[..3].iter().any(|&value|value>100)),"{name}: fixture has no visible lit geometry");
                 if let Some(expected)=images.get(&time.to_bits()) {
-                    ensure!(&output.rgba==expected,"{name}: repeated request at {time} changed the image");
-                } else {images.insert(time.to_bits(),output.rgba.clone());}
+                    crate::test_linear::assert_linear_eq(output.linear_rgba.as_ref().unwrap(),expected);
+                } else {images.insert(time.to_bits(),output.linear_rgba.clone().unwrap());}
                 if let Some(directory)=std::env::var_os("GEOCHAIN_OUT") {
                     image::save_buffer(std::path::PathBuf::from(directory).join(format!("subdivision-{name}-{index}.png")),&output.rgba,width,height,image::ColorType::Rgba8)?;
                 }

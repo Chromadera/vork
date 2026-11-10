@@ -6,13 +6,13 @@ import frame;
 import vork_ray_sampling;
 import vork_constants;
 public struct FieldEmitter {public uint instance;public uint object;public uint descriptor;};
-public FieldEmitter field_emitter<G:IHitGeometry>(uint4 table,uint source) {
-    let at=table.x+3u*G.word(table.z+source);
-    return FieldEmitter(G.word(at),G.word(at+1u),G.word(at+2u));
+public FieldEmitter field_emitter<G:IHitGeometry>(G g,uint4 table,uint source) {
+    let at=table.x+3u*g.word(table.z+source);
+    return FieldEmitter(g.word(at),g.word(at+1u),g.word(at+2u));
 }
-public float field_emitter_cone<G:IHitGeometry>(FieldEmitter source,float3 from,out float3 axis) {
+public float field_emitter_cone<G:IHitGeometry>(G g,FieldEmitter source,float3 from,out float3 axis) {
     let model=object_model(source.object);let center=mul(float4(0.,0.,0.,1.),model).xyz;
-    let extent=1.-1./float3(G.word(source.descriptor),G.word(source.descriptor+1u),G.word(source.descriptor+2u));
+    let extent=1.-1./float3(g.word(source.descriptor),g.word(source.descriptor+1u),g.word(source.descriptor+2u));
     // Eight domain corners also cover shear from composed nonuniform transforms.
     var squared_radius=0.;
     for(uint corner=0u;corner<8u;corner++) {
@@ -27,18 +27,18 @@ public float field_emitter_cone<G:IHitGeometry>(FieldEmitter source,float3 from,
     // Avoid subtracting nearly equal floats for a distant, small source.
     return sine_squared/(1.+sqrt(1.-sine_squared));
 }
-public float3 field_emitter_direction<G:IHitGeometry>(FieldEmitter source,float3 from,float2 u,out float pdf) {
-    float3 axis;let width=field_emitter_cone<G>(source,from,axis);
+public float3 field_emitter_direction<G:IHitGeometry>(G g,FieldEmitter source,float3 from,float2 u,out float pdf) {
+    float3 axis;let width=field_emitter_cone<G>(g,source,from,axis);
     pdf=width>0. ? 1./(2.*REG_PI*width) : 0.;
     let height=u.x*width;let cosine=1.-height;
     let sine=sqrt(max(height*(2.-height),0.));let phi=2.*REG_PI*u.y;
     return mul(float3(sine*cos(phi),sine*sin(phi),cosine),ray_basis(axis));
 }
-public float field_emitter_pdf<G:IHitGeometry>(uint4 table,uint instance,float3 from) {
+public float field_emitter_pdf<G:IHitGeometry>(G g,uint4 table,uint instance,float3 from) {
     for(uint i=0u;i<table.w;i++) {
-        let source=field_emitter<G>(table,i);
+        let source=field_emitter<G>(g,table,i);
         if(source.instance!=instance) {continue;}
-        float3 axis;let width=field_emitter_cone<G>(source,from,axis);
+        float3 axis;let width=field_emitter_cone<G>(g,source,from,axis);
         return width>0. ? 1./(float(table.w)*2.*REG_PI*width) : 0.;
     }
     return 0.;

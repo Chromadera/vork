@@ -131,13 +131,8 @@ impl ForwardKey {
         let program = if programs.is_some() { "Programs" } else { "NoPrograms" };
         let (entry, _) = self.entry();
         let function = match self.stage {Stage::Controls => "transparent_controls", Stage::OpaqueControls => "controls"};
-        // Hashed coverage needs the primitive, and so may a program's
-        // ctx.primitive_id. Opaque and cutout table keys never read it.
-        let (primitive, assign) = if self.hashed() || programs.is_some() {
-            (", uint primitive : SV_PrimitiveID", "v.primitive=primitive;")
-        } else {
-            ("", "")
-        };
+        // Primitive identity preserves averaging on one surface; pixel depth slopes join continuous creases.
+        let (primitive, assign) = (", uint primitive : SV_PrimitiveID", "v.primitive=primitive;");
         let body = format!(
             "import forward;\n[shader(\"fragment\")]\n\
              Output {entry}(Varying v, bool front : SV_IsFrontFace{primitive}) {{{assign}return {function}<Key,{program}>(v,front);}}\n"
@@ -338,10 +333,9 @@ mod capability_tests {
             assert!(module.contains(&format!("{name} = vork_cap_{name};")));
         }
     }
-    /// Only the hashed generic declares SV_PrimitiveID among table keys; program
-    /// keys keep it for ctx.primitive_id. native.rs checks the compiled generics.
+    /// Every control stage retains primitive identity for depth resolve.
     #[test]
-    fn only_hashed_coverage_declares_the_primitive() {
+    fn control_stages_declare_the_primitive() {
         let declares=|key:ForwardKey,programs:Option<&str>| {
             let module=key.module_with(programs);
             let entry=module.lines().find(|l|l.contains(key.entry().0)).expect("entry line").to_owned();
@@ -351,7 +345,7 @@ mod capability_tests {
         for stage in Stage::ALL {
             for hashed in [false,true] {
                 let key=ForwardKey::generic(stage,hashed);
-                assert_eq!(declares(key,None),hashed,"{stage:?}");
+                assert!(declares(key,None),"{stage:?}");
             }
             assert!(declares(ForwardKey::new(stage,FEATURE_SPECIALIZED|FEATURE_MASK),Some("")),"programs may read ctx.primitive_id");
             assert!(ForwardKey::generic(stage,false).is_generic() && ForwardKey::generic(stage,true).is_generic());

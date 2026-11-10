@@ -495,9 +495,9 @@ mod tests {
         fixture["render"]["resolution"] = serde_json::json!([32,32]);
         let scene = r.install(vork_scene::v2::from_test_value(fixture)?, Path::new("."))?;
         let fibre = scene.fibre.as_ref().context("physical fibre capture")?;
-        let mut frame = scene.create_frame_slot(&r, Default::default())?;
+        let mut frame = scene.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         frame.submit(&scene, &r, 0.)?;
-        let before = frame.collect(&r)?.rgba;
+        let before = frame.collect(&r)?.linear_rgba.unwrap();
         let shadows = scene.shadows();
         r.residency.evict(u64::MAX);
         assert!(fibre.cache.is_resident(), "live frame bindings pin fibre storage");
@@ -507,9 +507,9 @@ mod tests {
         drop(shadows);
         r.residency.evict(u64::MAX);
         assert!(!fibre.cache.is_resident());
-        let mut frame = scene.create_frame_slot(&r, Default::default())?;
+        let mut frame = scene.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         frame.submit(&scene, &r, 0.)?;
-        assert_eq!(before, frame.collect(&r)?.rgba);
+        crate::test_linear::assert_linear_eq(&before,&frame.collect(&r)?.linear_rgba.unwrap());
         r.errors.check()
     }
 

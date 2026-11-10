@@ -15,6 +15,9 @@ pub(crate) fn program_source(
     name: &str,
     program: &v2::Program,
 ) -> Result<(String, PathBuf)> {
+    // Authored origins must mean the same thing after the compiler enters its
+    // workspace, and under relative/absolute spellings of the scene path.
+    let base: PathBuf = std::env::current_dir()?.join(base).components().collect();
     match (&program.file, &program.source) {
         (Some(file), None) => {
             let path = base.join(file);
@@ -302,8 +305,19 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
     let computed=computed_placements(scene,&scene.nodes);
     let compiler=Compiler::discover();
     let mut abi=abi(); abi.aov_count=scene.render.aovs.len();
+    // Keep complete proofs, including failures, until their original traversal
+    // position. Compilation is parallel; policy, warnings and error precedence
+    // remain serial. Four workers cap concurrent frontend memory on large hosts.
+    let names = launch_analysis_programs(scene, stages, computed);
+    let analyzed = parallel_map_with_limit(&names, 4, |name| {
+        Ok(material_source(scene, base, name).and_then(|(source, origin)| {
+            compile_quiet(r, &compiler, &abi, &source, &origin).map(|program| (program, origin))
+        }))
+    })?;
+    let mut analyses = names.into_iter().zip(analyzed).collect::<std::collections::BTreeMap<_, _>>();
     let mut proof=std::collections::BTreeMap::new();
-    fn visit(r:&Renderer,scene:&v2::Scene,nodes:&mut [v2::Node],base:&Path,compiler:&Compiler,abi:&Abi,
+    fn visit(scene:&v2::Scene,nodes:&mut [v2::Node],
+        analyses:&mut std::collections::BTreeMap<String,Result<(Program,PathBuf)>>,
         stages:&std::collections::BTreeMap<String,Stages>,proof:&mut std::collections::BTreeMap<String,vork_slang::ProgramCapabilities>,replacements:&mut std::collections::BTreeMap<String,(v2::Material,String)>,computed:bool)->Result<()> {
         for node in nodes {
             if let v2::NodeKind::Light {shape:v2::LightShape::Environment,material:Some(name),..}=&node.kind {
@@ -331,12 +345,15 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
                     }
                 } else if !curves || implicit || computed {
                     let capability=if let Some(c)=proof.get(binding.as_str()) {*c} else {
-                        let (source,origin)=material_source(scene,base,&material.program)?;
-                        let program=compile(r,compiler,abi,&source,&origin)?;
+                        let (program, origin) = analyses.remove(&material.program)
+                            .expect("launch analysis collected every requested surface")?;
+                        emit_dropped_stages(&program, &origin);
                         let dynamic=scene.animation.iter().flat_map(|l|l.tracks.iter().flatten()).filter_map(|t|match t.path.as_slice(){[root,name,inputs,field] if root=="materials" && name.as_str()==binding.as_str() && inputs=="inputs"=>Some(field.clone()),_=>None}).collect();
                         let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?))).collect::<Result<std::collections::BTreeMap<_,_>>>()?;
                         let words=program.inputs.effect_words(&values,&dynamic)?;
-                        let c=program.effect_probe()?.capabilities(&words);proof.insert(binding.clone(),c);c
+                        let c=program.effect_probe()?.capabilities(&words);
+                        analyses.insert(material.program.clone(), Ok((program, origin)));
+                        proof.insert(binding.clone(),c);c
                     };
                     if (capability.hair && !curves) || (implicit && capability.subsurface) {
                         crate::warnings::dropped("surface_geometry", serde_json::json!({"node":node.name,"material":binding,"inputs":material.inputs,"program":material.program,"tracks":scene.animation.iter().flat_map(|layer|layer.tracks.iter().flatten()).filter(|track|matches!(track.path.as_slice(),[root,target,..] if root=="materials" && target.as_str()==binding.as_str())).collect::<Vec<_>>()}), format!("warning: node {:?}, material {}: ignored unsupported {} surface on this geometry; using default OpenPBR surface",node.name,binding,if capability.hair {"Hair"} else {"custom subsurface"}));
@@ -347,11 +364,11 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
                     let name=format!("__vork_launch_{}",replacements.len());replacements.insert(name.clone(),(m,binding.clone()));*binding=name;
                 }
             }
-            visit(r,scene,&mut node.children,base,compiler,abi,stages,proof,replacements,computed)?;
+            visit(scene,&mut node.children,analyses,stages,proof,replacements,computed)?;
         }
         Ok(())
     }
-    visit(r,scene,&mut nodes,base,&compiler,&abi,stages,&mut proof,&mut replacements,computed)?;
+    visit(scene,&mut nodes,&mut analyses,stages,&mut proof,&mut replacements,computed)?;
     scene.nodes=nodes;
     for layer in &mut scene.animation {
         if let Some(tracks)=&mut layer.tracks {
@@ -368,6 +385,32 @@ pub(crate) fn normalize_launch_bindings(r:&Renderer, scene:&mut v2::Scene, base:
     }
     scene.materials.extend(replacements.into_iter().map(|(name,(material,_))|(name,material)));
     Ok(())
+}
+
+/// Only request proofs that launch normalization will consume. In particular,
+/// unused programs, media and supported static curve surfaces stay untouched.
+fn launch_analysis_programs(scene: &v2::Scene, stages: &std::collections::BTreeMap<String, Stages>, computed: bool) -> Vec<String> {
+    fn visit(scene: &v2::Scene, nodes: &[v2::Node], stages: &std::collections::BTreeMap<String, Stages>, computed: bool,
+        names: &mut std::collections::BTreeSet<String>) {
+        for node in nodes {
+            let bindings: Vec<&String> = match &node.kind {
+                v2::NodeKind::Mesh { materials, geometry, .. }
+                    if !matches!(scene.geometry[geometry].topology, v2::Topology::Curves) || computed => materials.iter().collect(),
+                v2::NodeKind::Asset { materials, .. } => materials.values().collect(),
+                _ => Vec::new(),
+            };
+            for binding in bindings {
+                let material = &scene.materials[binding];
+                if material.program != "std/openpbr" && !stages.get(binding).is_some_and(|s| s.medium) {
+                    names.insert(material.program.clone());
+                }
+            }
+            visit(scene, &node.children, stages, computed, names);
+        }
+    }
+    let mut names = std::collections::BTreeSet::new();
+    visit(scene, &scene.nodes, stages, computed, &mut names);
+    names.into_iter().collect()
 }
 
 /// Independently routed stages of materials actually bound to meshes/assets.
@@ -590,7 +633,13 @@ pub(crate) fn compile(
     source: &str,
     origin: &Path,
 ) -> Result<Program> {
-    let authored_origin=origin;
+    let program = compile_quiet(r, compiler, abi, source, origin)?;
+    emit_dropped_stages(&program, origin);
+    Ok(program)
+}
+
+// Launch preanalysis defers visible-loss diagnostics to the consuming traversal.
+fn compile_quiet(r: &Renderer, compiler: &Compiler, abi: &Abi, source: &str, origin: &Path) -> Result<Program> {
     let identity=program_identity(&r.disk_cache,compiler,abi,source,&origin)?;
     let key = input_key(b"program-v8", abi, &identity.identity)?.finalize();
     let mut program = cached(
@@ -608,11 +657,14 @@ pub(crate) fn compile(
     )?;
     program.set_native_source(source, origin)?;
     program.install_identity=Some(identity);
+    Ok(program)
+}
+
+fn emit_dropped_stages(program: &Program, origin: &Path) {
     for stage in &program.dropped_stages {
-        crate::warnings::dropped("hair_stage", serde_json::json!({"program":authored_origin,"stage":stage}),
+        crate::warnings::dropped("hair_stage", serde_json::json!({"program":origin,"stage":stage}),
             format!("{stage} stage on Hair; retaining the physical hair surface"));
     }
-    Ok(program)
 }
 
 fn validate_bound_geometry(
@@ -687,10 +739,14 @@ fn validate_bound_geometry(
 
 /// Map `f` over `items` on up to one thread per core, keeping their order.
 fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
+    parallel_map_with_limit(items, usize::MAX, f)
+}
+
+fn parallel_map_with_limit<T: Sync, R: Send>(items: &[T], limit: usize, f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
     let warning_collector = crate::warnings::Collector::current();
     let cursor = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let workers = items.len().min(std::thread::available_parallelism().map_or(1, usize::from));
+        let workers = items.len().min(limit).min(std::thread::available_parallelism().map_or(1, usize::from));
         let jobs: Vec<_> = (0..workers).map(|_| scope.spawn(|| {
             let _warning_scope = warning_collector.as_ref().map(|c| c.enter());
             let mut results = Vec::new();
@@ -756,7 +812,7 @@ pub(crate) fn native_input_identity(
     identities: &std::collections::BTreeMap<String,Vec<u8>>,
     inputs: &[vork_slang::InputIdentity],
 ) -> Result<(vork_slang::InputIdentity,Option<vork_slang::PreparedModules>)> {
-    let path=native_input_receipt_path(cache,compiler,modules,main,entries,args,identities)?;
+    let path=native_input_receipt_path(cache,compiler,modules,main,entries,args,identities,inputs)?;
     if let Some(identity)=read_native_input_receipt(&path)
         && inputs.iter().all(|input| identity.verify(input).is_ok()) {return Ok((identity,None));}
     let prepared=compiler.prepare_identified_modules(modules,main,entries,args,identities)?;
@@ -797,7 +853,7 @@ pub(crate) fn cached_native_input_identity(
     identities: &std::collections::BTreeMap<String,Vec<u8>>,
     inputs: &[vork_slang::InputIdentity],
 ) -> Result<Option<vork_slang::InputIdentity>> {
-    Ok(read_native_input_receipt(&native_input_receipt_path(cache,compiler,modules,main,entries,args,identities)?)
+    Ok(read_native_input_receipt(&native_input_receipt_path(cache,compiler,modules,main,entries,args,identities,inputs)?)
         .filter(|identity| inputs.iter().all(|input| identity.verify(input).is_ok())))
 }
 
@@ -816,14 +872,32 @@ pub(crate) fn native_input_receipt_path(
     cache: &dyn Fn(blake3::Hash)->PathBuf, compiler: &Compiler,
     modules: &[(&str,&str)], main: &str, entries: &[(&str,&str)], args: &[&str],
     identities: &std::collections::BTreeMap<String,Vec<u8>>,
+    inputs: &[vork_slang::InputIdentity],
 ) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let mut include = false;
+    let absolute_args: Vec<String> = args.iter().map(|arg| {
+        let value = if include {
+            let path = cwd.join(arg);
+            path.canonicalize().unwrap_or(path).to_string_lossy().into_owned()
+        } else { (*arg).to_owned() };
+        include = *arg == "-I";
+        value
+    }).collect();
+    let args: Vec<&str> = absolute_args.iter().map(String::as_str).collect();
     let mut raw=blake3::Hasher::new();
-    for part in std::iter::once("native-input-receipt-v1").chain(std::iter::once(main))
+    for part in std::iter::once("native-input-receipt-v2").chain(std::iter::once(main))
         .chain(entries.iter().flat_map(|(entry,stage)|[*entry,*stage])).chain(args.iter().copied())
         .chain(modules.iter().flat_map(|(name,source)|[*name,*source])) {
         raw.update(&(part.len() as u64).to_le_bytes());raw.update(part.as_bytes());
     }
     raw.update(compiler.input_policy().as_bytes());
+    // Every installed program is a dependency of this native composition, even
+    // if its import paths are disjoint from a previously cached composition.
+    for input in inputs {
+        raw.update(&(input.identity.len() as u64).to_le_bytes());
+        raw.update(&input.identity);
+    }
     for (name,identity) in identities {raw.update(&(name.len() as u64).to_le_bytes());raw.update(name.as_bytes());raw.update(&(identity.len() as u64).to_le_bytes());raw.update(identity);}
     // Exact resolver receipts contain host paths. Keep them in the same store
     // but outside the four portable shader entry kinds shipped with releases.
@@ -865,6 +939,14 @@ fn cached_proof<T: serde::Serialize + serde::de::DeserializeOwned>(
         Some(identity)=>identity.clone(),
         None=>program_identity(store,compiler,abi,source,origin)?,
     };
+    for name in &identity.compatibility_modules {
+        crate::warnings::compatibility(name, serde_json::json!({"program":origin,"module":name}));
+    }
+    if let Some(name) = origin.to_str().and_then(|s| s.strip_suffix(".slang")) {
+        if vork_scene::libraries::COMPATIBILITY_MODULES.contains(&name) {
+            crate::warnings::compatibility(name, serde_json::json!({"program":origin,"module":name}));
+        }
+    }
     let key=input_key(key.as_bytes(),abi,&identity.identity)?.finalize();
     let path=store.path("slang-program",2,key);
     if identity.valid()
@@ -1004,6 +1086,11 @@ fn native(abi: &Abi, programs: &[Program], physical_hair: bool, coverage_only: b
     }
     let lit_reflects = programs.iter().any(|p| retained(p) && p.capabilities.lit && p.capabilities.lit_reflects);
     modules.push(("hair_dispatch".into(), format!("{imports}\n{PATH_NOINLINE}public bool hair_dispatch(uint program,float4 a[{c}],uint base,out float4 r[{hair_k}]) {{for(uint i=0u;i<{hair_k}u;i++) r[i]=float4(0.);switch(program) {{{hair_cases}default:return false;}}}}")));
+    for (name, source) in &mut modules {
+        if matches!(name.as_str(), "program_dispatch" | "lobe_dispatch" | "hair_dispatch" | "lit_dispatch") {
+            *source = vork_slang::outline_native_material_functions(source);
+        }
+    }
     include.sort();
     include.dedup();
     let pack = abi.pack_context_slang(|name, element| {
@@ -1438,6 +1525,106 @@ impl InputAnimation {
 mod bundled_origin_tests {
     use super::*;
     #[test]
+    fn launch_analysis_keeps_failures_in_traversal_order() -> Result<()> {
+        let renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+        let mut scene = crate::test_scene(serde_json::json!({
+            "version":2,
+            "programs":{"a":{"file":"missing-second.slang"},"z":{"file":"missing-first.slang"}},
+            "materials":{"first":{"program":"z"},"second":{"program":"a"}},
+            "nodes":[{"type":"mesh","geometry":{"std":"rounded_box"},"materials":["first"]},
+                {"type":"node","children":[{"type":"mesh","geometry":{"std":"rounded_box"},"materials":["second"]}]},{"type":"camera"}]
+        }), Path::new("."))?;
+        let stages = std::collections::BTreeMap::new();
+        assert_eq!(launch_analysis_programs(&scene, &stages, false), ["a", "z"]);
+        let error = normalize_launch_bindings(&renderer, &mut scene, Path::new("."), &stages).unwrap_err();
+        assert!(format!("{error:#}").contains("missing-first.slang"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn launch_analysis_shares_programs_and_preserves_warning_order() -> Result<()> {
+        let renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+        let mut scene = crate::test_scene(serde_json::json!({
+            "version":2,
+            "programs":{
+                "hair":{"source":"struct Inputs {}; Hair surface(ShadingContext c, Inputs i) {Hair h={};return h;}"},
+                "unused":{"file":"must-not-read.slang"}},
+            "materials":{"one":{"program":"hair"},"two":{"program":"hair"},"unused":{"program":"unused"}},
+            "nodes":[{"type":"mesh","name":"one","geometry":{"std":"rounded_box"},"materials":["one"]},
+                {"type":"mesh","name":"two","geometry":{"std":"rounded_box"},"materials":["two"]},{"type":"camera"}]
+        }), Path::new("."))?;
+        let stages = std::collections::BTreeMap::new();
+        assert_eq!(launch_analysis_programs(&scene, &stages, false), ["hair"]);
+        let mut curves = scene.clone();
+        for geometry in curves.geometry.values_mut() { geometry.topology = v2::Topology::Curves; }
+        assert!(launch_analysis_programs(&curves, &stages, false).is_empty());
+        assert_eq!(launch_analysis_programs(&curves, &stages, true), ["hair"]);
+        let media = ["one", "two"].into_iter().map(|name| (name.to_owned(), Stages {medium:true, ..Default::default()})).collect();
+        assert!(launch_analysis_programs(&scene, &media, false).is_empty());
+        let collector = crate::warnings::Collector::default();
+        let _scope = collector.enter();
+        normalize_launch_bindings(&renderer, &mut scene, Path::new("."), &stages)?;
+        let warnings = collector.snapshot();
+        let dropped = warnings.iter().filter(|w| w.code == "surface_geometry").collect::<Vec<_>>();
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(dropped[0].requested["node"], "one");
+        assert_eq!(dropped[1].requested["node"], "two");
+        for node in &scene.nodes {
+            let v2::NodeKind::Mesh { materials, .. } = &node.kind else { continue };
+            assert_eq!(scene.materials[&materials[0]].program, "std/openpbr");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn launch_analysis_preserves_static_and_animated_implicit_inputs() -> Result<()> {
+        let renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+        let mut scene = crate::test_scene(serde_json::json!({
+            "version":2,
+            "buffers":{"field":{"type":"f32","dims":[2,2,2]}},
+            "geometry":{"field":{"topology":"implicit","attributes":{"phi":"field"}}},
+            "programs":{"skin":{"source":"struct Inputs {float weight=0.;}; Closure surface(ShadingContext c, Inputs i) {Closure o={};o.subsurface_weight=i.weight;return o;}"}},
+            "materials":{"zero":{"program":"skin","inputs":{"weight":0}},
+                "scattering":{"program":"skin","inputs":{"weight":1}},
+                "animated":{"program":"skin","inputs":{"weight":0}}},
+            "nodes":[{"type":"mesh","geometry":"field","materials":["zero"]},
+                {"type":"mesh","geometry":"field","materials":["scattering"]},
+                {"type":"mesh","geometry":"field","materials":["animated"]},{"type":"camera"}],
+            "animation":[{"tracks":[{"path":["materials","animated","inputs","weight"],"keys":[[0,0],[1,1]],"interpolation":"LINEAR"}]}]
+        }), Path::new("."))?;
+        let stages = std::collections::BTreeMap::new();
+        assert_eq!(launch_analysis_programs(&scene, &stages, false), ["skin"]);
+        normalize_launch_bindings(&renderer, &mut scene, Path::new("."), &stages)?;
+        for (index, node) in scene.nodes.iter().enumerate() {
+            let v2::NodeKind::Mesh { materials, .. } = &node.kind else { continue };
+            assert_eq!(scene.materials[&materials[0]].program, if index == 0 { "skin" } else { "std/openpbr" });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn launch_analysis_worker_limit_and_result_order() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let workers = 4.min(std::thread::available_parallelism().map_or(1, usize::from));
+        let barrier = std::sync::Barrier::new(workers);
+        let items = (0..12).collect::<Vec<_>>();
+        let results = parallel_map_with_limit(&items, 4, |i| {
+            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(count, Ordering::SeqCst);
+            barrier.wait();
+            active.fetch_sub(1, Ordering::SeqCst);
+            barrier.wait();
+            Ok(if *i == 3 { Err("third") } else { Ok(*i) })
+        })?;
+        assert_eq!(peak.load(Ordering::SeqCst), workers);
+        assert_eq!(results[3], Err("third"));
+        assert_eq!(results[11], Ok(11));
+        Ok(())
+    }
+
+    #[test]
     fn program_diagnostics_keep_authored_filename_and_line() {
         let error = program_key(b"diagnostic", &abi(),
             "struct Inputs {};\nClosure surface(ShadingContext c, Inputs i) {return missing_author_symbol;}\n",
@@ -1501,6 +1688,30 @@ mod bundled_origin_tests {
         let fresh=cached_proof(&store,race_key,&compiler,&abi,source,&origin,|compiler| {rebuilt=true;build(compiler)})?;
         assert!(rebuilt,"a raced compilation must not publish a cache entry");
         assert!(fresh.wgsl.contains("0.875"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compatibility_warnings_survive_proof_cache_hits() -> Result<()> {
+        let root=std::env::temp_dir().join(format!("vork-compatibility-proof-{}",std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let store=disk_cache::Store::for_test(root.join("cache"));
+        let compiler=Compiler::discover(); let abi=abi(); let origin=root.join("main.slang");
+        let source="import std.vector; struct Inputs {}; float3 display(DisplayContext ctx, Inputs i){return float3(0.25);}";
+        let key=blake3::hash(b"compatibility-warning");
+        for warm in [false, true] {
+            let collector=crate::warnings::Collector::default();
+            let _scope=collector.enter();
+            let _:vork_slang::DisplayProgram=cached_proof(&store,key,&compiler,&abi,source,&origin,|compiler| {
+                assert!(!warm, "second call must use the stored proof");
+                compiler.compile_display(&abi,source,&origin,"compat")
+            })?;
+            let warnings=collector.snapshot();
+            assert_eq!(warnings.len(),1);
+            assert_eq!(warnings[0].code,"compatibility_04");
+            assert_eq!(warnings[0].requested["module"],"std/vector");
+        }
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1609,6 +1820,14 @@ mod bundled_origin_tests {
         let modules=[("main",main)];
         assert!(cached_native_input_identity(&cache,&compiler,&modules,"main",&entries,&args,&Default::default(),&[])?.is_none(),"cold scheduling probe must only report a miss");
         let (original,prepared)=native_input_identity(&cache,&compiler,&modules,"main",&entries,&args,&Default::default(),&[])?;
+        // Even disjoint resolver closures must distinguish a native receipt.
+        let mut other = original.clone();
+        other.identity = b"different installed program".to_vec();
+        let receipt_key = |args: &[&str], input: &vork_slang::InputIdentity|
+            native_input_receipt_path(&cache,&compiler,&modules,"main",&entries,args,&Default::default(),std::slice::from_ref(input));
+        assert_ne!(receipt_key(&args,&original)?,receipt_key(&args,&other)?);
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        assert_eq!(receipt_key(&["-target",target,"-I","."],&original)?,receipt_key(&["-target",target,"-I",&cwd],&original)?);
         let binary=prepared.context("first input must be captured")?.compile()?;
         let artifact=cache(blake3::hash(&original.identity));
         disk_cache::write(&artifact,&binary)?;
@@ -1616,7 +1835,7 @@ mod bundled_origin_tests {
         ensure!(prepared.is_none(),"exact unchanged input should reuse its receipt");
         assert_eq!(cached_native_input_identity(&cache,&compiler,&modules,"main",&entries,&args,&Default::default(),&[])?.unwrap().identity,original.identity);
         // A complete but stale receipt used to abort on an artifact miss.
-        let receipt_path = native_input_receipt_path(&cache, &compiler, &modules, "main", &entries, &args, &Default::default())?;
+        let receipt_path = native_input_receipt_path(&cache, &compiler, &modules, "main", &entries, &args, &Default::default(), &[])?;
         let mut stale = original.clone();
         stale.identity = b"stale normalized identity".to_vec();
         write_input_receipt(&receipt_path, &stale)?;

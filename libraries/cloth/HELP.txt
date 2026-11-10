@@ -1,5 +1,5 @@
 cloth: GPU XPBD cloth on the ordinary geometry compute chain.
-Python: from vork.cloth import attach; attach(scene, "fabric", collider="body").
+Python entry point: vork.cloth.attach(scene, node, *, pins, collider, ...).
 Call before write_scene, on native triangle buffers in world metres. Pins are
 vertex indices; collider names a native mesh, including animated skin or morphs.
 Scenes without cloth install no cloth resources or dispatches.
@@ -29,8 +29,7 @@ Omitted dt inherits scene.simulation.dt, otherwise 1/240 seconds. All patches
 share that exact clock. iterations is positive and even. Pins follow canonical
 predecessor positions, so native morphs/skin can animate attachments.
 acceleration is a Slang body with i, p, v and time, returning float3 in m/s²
-INCLUDING gravity. Default: return float3(0,-9.81,0);. A wind-like loading:
-return float3(20,-9.81,4*sin(time*3+p.x*4))-1.5*v;
+INCLUDING gravity. Default: float3(0,-9.81,0).
 This prescribes acceleration, not calibrated aerodynamic pressure.
 
 Use consistently oriented fixed native triangles, 3..1024 vertices per patch,
@@ -40,21 +39,33 @@ through skin/morphs instead of root TRS. Instances, imported geometry,
 subdivision and computed colliders need a baked native proxy. A collider may
 have 1..4096 triangles and authored NORMAL (split triangle vertices for face
 normals); the general Geometry input samples it at canonical tick
-left endpoints. Keep motion per tick small relative to the collision margin.
+left endpoints. No continuous collision detection: motion per tick must be small
+relative to contact distances; reduce dt to resolve fast motion.
 
-Surface contact uses point/face and edge/edge constraints, Coulomb friction .6
-and self separation 6*collision_margin (three margins on each surface).
-Contact generation runs in parallel;
-contact planes refresh up to eight times per tick; colored structural constraints
-and ordered contact projection share one
-workgroup. There are 512 contact slots per vertex. Overflow invalidates output
-rather than silently dropping contacts. On invalid computed positions, check
-contact density, initial intersections, dt and numerical scale; separate crowded
-patches or simplify the collision proxy. No continuous collision detection:
-fast motion or extreme folding needs smaller dt and convergence checks.
+collision_margin is a positive finite distance in world metres, default .004.
+Body contact uses that margin; self-contact separation is 6*collision_margin
+(three margins per surface). Vertex/triangle and edge/edge pairs whose closest
+rest-pose distance is below that separation are excluded from self-contact.
+Mesh edges and triangle altitudes may therefore be smaller than the separation;
+rest-close fabric is held by its structural constraints. Those excluded pairs
+remain excluded during deformation, including initially overlapping layers.
+The margin is contact thickness, not mesh resolution or a motion budget.
+Increasing it also increases self separation and the neighbourhood excluded at
+rest; resolving fast motion requires a smaller dt, not a larger margin.
+
+Surface contact uses point/face and edge/edge constraints and Coulomb friction .6.
+Contact generation runs in parallel; contact planes refresh up to eight times
+per tick. Colored structural constraints and ordered contact projection share
+one workgroup. There are 512 combined body/self-contact slots per vertex.
+Overflow rejects output with the cloth node name, capacity and a lower bound on
+required slots. A reported overflow invalidates the installed scene and requires
+reinstalling it before rendering again; resetting simulation state alone does not
+clear the publication failure. Dense folds,
+initial intersections and large margins can exhaust capacity; reduce the margin
+or initial intersections, or reduce dt for fast motion and extreme folding.
 
 Publication reconstructs area-weighted normals and UV0 tangents/handedness;
 without UV0 it supplies a finite geometric frame. Duplicated seam vertices are
 independent unless connected by triangles. State stays on GPU; no runtime
-position readback. Cost grows with contacts and iterations; the contact-heavy
-625-vertex drape is a quality example, not an interactive performance promise.
+position readback. Cost grows with contacts and iterations; contact-heavy cloth has no interactive
+performance guarantee.

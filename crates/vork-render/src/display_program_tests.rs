@@ -84,7 +84,11 @@ fn display_program_runs_only_after_final_sample() -> Result<()> {
         "struct Inputs {}; float3 display(DisplayContext ctx, Inputs i) {return .09/ctx.color;}";
     let single = render_samples(&r, source, 0.18, 1)?;
     let accumulated = render_samples(&r, source, 0.18, 4)?;
-    assert_eq!(single.rgba, accumulated.rgba);
+    crate::test_display::assert_display_eq(&single.rgba, &accumulated.rgba);
+    let wrong = render_samples(&r, "struct Inputs {}; float3 display(DisplayContext ctx, Inputs i) {return ctx.color;}", 0.18, 4)?;
+    // Bypassing the transform preserves linear readback but must fail here.
+    crate::test_linear::assert_linear_eq(wrong.linear_rgba.as_ref().unwrap(), accumulated.linear_rgba.as_ref().unwrap());
+    crate::test_display::assert_display_ne(&wrong.rgba, &accumulated.rgba);
     assert!((i32::from(accumulated.rgba[0]) - 128).abs() <= 1);
     Ok(())
 }

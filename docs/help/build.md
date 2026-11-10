@@ -8,7 +8,7 @@ pinned Intel Mac or Linux ARM archive.
 
 ## Prerequisites
 
-The pinned Slang 2026.20 macOS binaries target macOS 26. Older macOS versions
+The pinned Slang 2026.21 macOS binaries target macOS 26. Older macOS versions
 have not been qualified with this toolchain.
 
 On macOS, install Apple's command line tools, then install Homebrew from
@@ -61,8 +61,8 @@ an existing directory. Keep the entire toolchain, including its libraries,
 modules and notices, together.
 
 ```sh
-"$PYTHON" scripts/install-slang "$HOME/.local/share/vork/slang-2026.20"
-export VORK_SLANGC="$HOME/.local/share/vork/slang-2026.20/bin/slangc"
+"$PYTHON" scripts/install-slang "$HOME/.local/share/vork/slang-2026.21"
+export VORK_SLANGC="$HOME/.local/share/vork/slang-2026.21/bin/slangc"
 "$VORK_SLANGC" -version
 cargo +1.96 build --release --workspace --locked
 ./target/release/vork --help
@@ -89,8 +89,8 @@ with C++, LLVM (libclang for bindgen), and Python 3.12+. In a Developer PowerShe
 from the checkout root:
 
 ```powershell
-python scripts/install-slang "$env:LOCALAPPDATA/vork/slang-2026.20"
-$env:VORK_SLANGC = "$env:LOCALAPPDATA/vork/slang-2026.20/bin/slangc.exe"
+python scripts/install-slang "$env:LOCALAPPDATA/vork/slang-2026.21"
+$env:VORK_SLANGC = "$env:LOCALAPPDATA/vork/slang-2026.21/bin/slangc.exe"
 cargo +1.96 build --release --workspace --locked
 .\target\release\vork.exe help
 ```

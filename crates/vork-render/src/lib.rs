@@ -33,6 +33,7 @@ mod implicit_acceleration;
 mod computed_geometry;
 mod curves;
 mod points;
+mod point_publication;
 pub mod constants;
 pub mod failure;
 #[doc(hidden)]
@@ -41,6 +42,7 @@ mod display_stats;
 pub use display_stats::Exposure;
 mod exr_codec;
 pub use exr_codec::ExrCodec;
+pub use png_output::PngDepth;
 #[doc(hidden)]
 pub mod fuzz;
 mod gpu_memory;
@@ -91,6 +93,7 @@ mod shadow_envelope;
 mod shadow_containment;
 mod shadows;
 pub mod shot;
+pub mod session;
 mod texture_source;
 #[doc(hidden)]
 pub mod footage;
@@ -306,6 +309,8 @@ struct Uniform {
     field_geometry: [u32; 4],
 }
 pub struct Renderer {
+    pub(crate) instance: wgpu::Instance,
+    pub(crate) adapter: wgpu::Adapter,
     denoiser: Mutex<Option<denoise::Engine>>,
     command_finish: OnceLock<command_finish::CommandFinish>,
     timestamp_marker: OnceLock<timing::Marker>,
@@ -314,8 +319,9 @@ pub struct Renderer {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub reference_transport_bounces: Option<u32>,
-    #[cfg(test)]
-    pub(crate) reference_transparent_bounces: Option<u32>,
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub reference_transparent_bounces: Option<u32>,
     /// Synchronous qualification-only timestamps, never a renderer setting.
     #[cfg(test)]
     pub(crate) test_gpu_segment_times: Option<Mutex<Vec<(usize,usize,f64,&'static str)>>>,
@@ -332,12 +338,16 @@ pub struct Renderer {
     /// Initial native headroom, bounded by device memory. Camera scheduling uses
     /// a stable quota; querying driver residency per view adds frame latency.
     pub(crate) camera_memory: u64,
+    /// Whether qualification lowered the native startup headroom.
+    pub(crate) camera_memory_override_lowered: bool,
     pub(crate) errors: gpu_memory::Errors,
     pub(crate) residency: std::sync::Arc<residency::Ledger>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
     release_preparation: bool,
+    /// Only the private no-op check renderer may omit native code generation.
+    check_only: bool,
     pub startup: Duration,
     pub startup_stages_ms: [(&'static str, f64); 5],
     pub pipeline_cache_status: &'static str,
@@ -596,6 +606,22 @@ impl Renderer {
         }
         renderer.finish_shader_warmup()
     }
+    /// Run scene installation against the CPU-only no-op backend. No driver is
+    /// opened and no frame is submitted; all install diagnostics are shared.
+    pub fn check(path: &Path, profile: &vork_scene::Profile, shaders: bool) -> Result<()> {
+        let warnings = warnings::Collector::default();
+        let _scope = warnings.enter();
+        let settings = profile.resolve(&Default::default()).map_err(|error| error.context(failure::FailureKind::Usage))?;
+        let scene = load_with_settings(path, settings, &profile.name, None)?;
+        let mut renderer = pollster::block_on(Self::create(|_| Ok(true), true))?;
+        renderer.check_only = !shaders;
+        let installed = renderer.install_with_options(scene, path.parent().unwrap_or(Path::new(".")),
+            InstallOptions { variants: pipelines::VariantCompile::Setup, ..Default::default() })
+            .with_context(|| format!("install scene {}", path.display()))?;
+        shot::check_timeline(&installed)?;
+        Ok(())
+    }
+
     async fn create(ray_queries: impl FnOnce(&wgpu::Adapter) -> Result<bool>, prepare_release: bool) -> Result<Self> {
         let start = Instant::now();
         // One process-wide instance: wgpu-core numbers devices per instance, so
@@ -737,7 +763,7 @@ impl Renderer {
         ensure!(
             features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
                 && adapter
-                    .get_texture_format_features(wgpu::TextureFormat::R32Uint)
+                    .get_texture_format_features(wgpu::TextureFormat::Rgba32Uint)
                     .flags
                     .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4),
             "4x integer object ID target unsupported"
@@ -765,8 +791,10 @@ impl Renderer {
         );
         let mut limits = adapter.limits();
         if prepare_release {
-            // Finite, conservative page sizes keep synthetic setup scenes small.
-            limits.max_storage_buffer_binding_size = 128 << 20;
+            // The no-op adapter checks shaders, not hardware admission. Keep a
+            // finite ceiling, but admit production geometry (water needs 296 MiB
+            // in one binding). Real rendering uses the selected adapter limits.
+            limits.max_storage_buffer_binding_size = 1 << 30;
             limits.max_buffer_size = 1 << 30;
             limits.max_texture_dimension_2d = 16384;
             limits.min_uniform_buffer_offset_alignment = 256;
@@ -896,14 +924,23 @@ impl Renderer {
         let compiler = pipelines::Compiler::new(&device, cache.as_ref(), known);
         let pipelines = pipelines::Registry::default();
         errors.check()?;
-        let camera_memory=residency::available(&device).unwrap_or(device_memory).min(device_memory);
+        let native_camera_memory=residency::camera_headroom(&device).unwrap_or(device_memory).min(device_memory);
+        // Qualification can lower the startup headroom on a larger device. It
+        // cannot increase native memory or bypass allocation/binding limits.
+        let camera_memory=match std::env::var("VORK_CAMERA_MEMORY_BYTES") {
+            Ok(value)=>native_camera_memory.min(value.parse::<u64>().context("VORK_CAMERA_MEMORY_BYTES must be an unsigned byte count")?),
+            Err(std::env::VarError::NotPresent)=>native_camera_memory,
+            Err(error)=>return Err(error.into()),
+        };
         Ok(Self {
+            instance: instance.clone(),
+            adapter,
             denoiser: Mutex::new(None),
             command_finish: OnceLock::new(),
             timestamp_marker: OnceLock::new(),
             #[cfg(any(test, feature = "test-support"))]
             reference_transport_bounces: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             reference_transparent_bounces: None,
             #[cfg(test)]
             test_gpu_segment_times: None,
@@ -916,9 +953,11 @@ impl Renderer {
             queue,
             adapter_info: info,
             release_preparation: prepare_release,
+            check_only: false,
             max_texture_allocation,
             device_memory,
             camera_memory,
+            camera_memory_override_lowered: camera_memory<native_camera_memory,
             residency,
             startup: start.elapsed(),
             startup_stages_ms: [
@@ -1018,6 +1057,8 @@ impl Renderer {
         self.cache.is_some()
     }
     fn save_cache(&self) -> Result<()> {
+        // CPU-only installation cannot warm a driver's cache or its ledger.
+        if self.release_preparation { return Ok(()); }
         // Serialize snapshot and publication together so an older save cannot
         // overwrite a newer ledger or acknowledge its dirty state.
         let mut saved = self.saved.lock().unwrap();
@@ -1120,9 +1161,7 @@ impl Renderer {
             if original.values().any(|stage|stage.medium) || world_medium(&scene.nodes) {
                 let (_,facts)=install::admit_delivery_effects(self,&scene,base,true)?;
                 if facts.media {
-                    ensure!(scene.propagation.is_none(), "stage 1 fog does not support authored propagation; use straight rays or render the fog externally");
-                    ensure!(scene.materials.iter().all(|(name,m)| !original.get(name).is_some_and(|s|s.surface) || m.program=="std/openpbr"), "stage 1 fog does not support custom surface callbacks; use std/openpbr or render the fog externally");
-                    ensure!(!scene.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit)), "stage 1 fog does not support implicit geometry; bake triangle meshes first");
+                    ensure!(scene.materials.iter().all(|(name,m)| !original.get(name).is_some_and(|s|s.surface) || m.program=="std/openpbr"), "fog with custom surface callbacks is not yet supported; use std/openpbr until the cold-compile plug-in design is implemented");
                 }
             }
             programs::normalize_launch_bindings(self,&mut scene,base,&original)?;
@@ -1144,6 +1183,8 @@ impl Renderer {
         }
         let camera_controls=camera_program::promote(self,&mut scene,base,&options.initial_time)?;
         if !scene.render.settings.integrator.is_path() && camera_program::scene_spectral(self,&scene,base)? {rt::promote_to_path(&mut scene);}
+        ensure!(!options.raster_only || !scene.render.settings.integrator.is_path(),
+            "interactive session requires raster transport; use a projective camera and remove path-only effects, or render this scene offline");
         if scene.render.settings.integrator.denoiser().is_some() {
             if let Err(error) = denoise::ensure_runtime(self) {
                 crate::warnings::dropped("denoiser_unavailable", serde_json::json!({"denoise":true}), format!("warning: OIDN unavailable; rendering without denoising: {error:#}. Keep the bundled oidn runtime beside vork, or use --set denoise=false."));
@@ -1163,7 +1204,7 @@ impl Renderer {
         // Program variants own their validated compiler path; do not create an
         // unused built-in registry for those shots (including filtered roots).
         let background = scene.render.compositor.is_empty()
-            && (options.gpu_color || options.readback.color || options.readback.float.color)
+            && (options.gpu_color || options.readback.color || options.readback.color16 || options.readback.float.color)
             && pipelines::prewarm_builtin(&scene, effects)?;
         let samples = raster_samples(&scene.render);
         // Deferred variant workers wait until every foreground pipeline below exists.
@@ -1267,7 +1308,11 @@ pub fn validate(scene: &Scene) -> Result<()> {
 }
 /// Load and validate a scene file; its directory is the install base.
 fn load_scene_document(path: &Path) -> Result<Scene> {
-    let bytes = std::fs::read(path)?;
+    let bytes = if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
+        bytes
+    } else { std::fs::read(path)? };
     let mut document = serde_json::from_slice(vork_scene::v2::diagnostics::without_bom(&bytes))?;
     vork_std::expand_scene(&mut document, path.parent().unwrap_or(Path::new(".")))?;
     Scene::from_json_with_source(&serde_json::to_vec(&document)?, &bytes, Some(path))
@@ -1430,6 +1475,9 @@ mod tests {
     #[test]
     fn shader_cache_retries_failed_key_publication() -> Result<()> {
         let mut renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+        // Use the no-op device to exercise normal publication without a GPU.
+        // CPU-only preparation deliberately skips driver-cache publication.
+        renderer.release_preparation = false;
         let root = std::env::temp_dir().join(format!("vork-cache-retry-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let path = root.join("keys.entry");
@@ -1597,7 +1645,7 @@ mod tests {
             ]
         }))?;
         let mut installed = renderer.install(scene, Path::new("."))?;
-        let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         installed.render_frame(&renderer, &mut frame, 0.)?;
         renderer.errors.check()?;
         Ok(())
@@ -1616,20 +1664,20 @@ mod tests {
             std::sync::Arc::ptr_eq(&a.pipelines, &b.pipelines),
             "pipeline registry must be shared across scenes"
         );
-        let mut warm = a.create_frame_slot(&r, Default::default())?;
+        let mut warm = a.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         a.render_frame(&r, &mut warm, 0.)?;
         let outputs = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..3)
                 .map(|_| {
                     scope.spawn(|| -> Result<FrameOutput> {
-                        let mut slot = a.create_frame_slot(&r, Default::default())?;
+                        let mut slot = a.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
                         slot.profile = true;
                         slot.submit(&a, &r, 0.)?;
                         let first = slot.collect(&r)?;
                         slot.submit(&a, &r, 0.)?;
                         let second = slot.collect(&r)?;
-                        assert_eq!(first.rgba, second.rgba, "repeated frame changed pixels");
-                        assert_eq!(first.depth_u16, second.depth_u16);
+                        crate::test_linear::assert_linear_eq((first).linear_rgba.as_ref().expect("linear readback"), (second).linear_rgba.as_ref().expect("linear readback"));
+                        crate::test_linear::assert_depth_eq(first.depth_f32.as_ref().expect("float depth readback"), second.depth_f32.as_ref().expect("float depth readback"));
                         assert_eq!(first.ids, second.ids);
                         Ok(second)
                     })
@@ -1641,8 +1689,8 @@ mod tests {
                 .collect::<Result<Vec<_>>>()
         })?;
         for output in &outputs[1..] {
-            assert_eq!(outputs[0].rgba, output.rgba);
-            assert_eq!(outputs[0].depth_u16, output.depth_u16);
+            crate::test_linear::assert_linear_eq((outputs[0]).linear_rgba.as_ref().expect("linear readback"), (output).linear_rgba.as_ref().expect("linear readback"));
+            crate::test_linear::assert_depth_eq(outputs[0].depth_f32.as_ref().expect("float depth"), output.depth_f32.as_ref().expect("float depth"));
             assert_eq!(outputs[0].ids, output.ids);
         }
         Ok(())
@@ -1846,3 +1894,44 @@ mod animinputs_tests;
 /// Internal transport tooling links the same BSDF modules as production.
 #[doc(hidden)]
 pub fn transport_modules() -> &'static [(&'static str, &'static str)] { native::SOURCES }
+
+/// Offline asset delivery, isolated from rendering.
+pub mod export;
+#[cfg(test)]
+#[path = "../tests/support/linear.rs"]
+mod test_linear;
+#[cfg(test)]
+#[path = "../tests/support/display.rs"]
+mod test_display;
+
+#[cfg(test)]
+mod linear_equivalence_tests {
+    use super::*;
+    #[test]
+    fn linear_comparison_rejects_small_real_radiance_change() -> Result<()> {
+        let Some(r) = crate::test_renderer()? else { return Ok(()); };
+        let render = |brightness: f32| -> Result<Vec<[f32; 4]>> {
+            let scene = vork_scene::v2::from_test_value(serde_json::json!({
+                "version":2,"render":{"resolution":[16,16],"background":[brightness,brightness,brightness],
+                    "settings":{"integrator":"path","samples":4,"denoiser":null}},
+                "nodes":[{"type":"camera"}]
+            }))?;
+            let mut installed = r.install(scene,Path::new("."))?;
+            let mut slot = installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
+            Ok(installed.render_frame(&r,&mut slot,0.)?.linear_rgba.expect("linear readback"))
+        };
+        let base=render(0.18)?;
+        let repeat=render(0.18)?;
+        crate::test_linear::assert_linear_eq(&base,&repeat);
+        // Inject a real scene radiance regression, not an encoded-byte difference.
+        let changed=render(0.18*1.0001)?;
+        assert!(std::panic::catch_unwind(||crate::test_linear::assert_linear_eq(&base,&changed)).is_err(),
+            "0.01% real radiance change escaped the image comparator");
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod test_geometry;
+
+#[cfg(test)]
+mod metal_generated_tests;

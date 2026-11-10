@@ -49,7 +49,7 @@ import probes;
 [[vk::binding(14,0)]] RaytracingAccelerationStructure ray_scene : register(t5);
 [[vk::binding(15,0)]] StructuredBuffer<uint> ray_alpha : register(t6);
 [[vk::binding(16,0)]] [[vk::image_format("rgba32f")]] RWTexture2D<float4> cell_receivers : register(u8);
-struct GiSources {uint4 topology;uint4 batch;};
+struct GiSources {uint4 topology;uint4 batch;uint4 tile;};
 [[vk::binding(17,0)]] ConstantBuffer<GiSources> gi_source_data : register(b7);
 #define gi_sources gi_source_data.topology
 [[vk::binding(18,0)]] StructuredBuffer<float> gi_emitter_weights : register(t8);
@@ -146,6 +146,9 @@ bool gi_needs_samples<V:IVariant>(uint2 pixel,float3 position,float3 normal) {
         let delta=point.xyz-position;let distance2=dot(delta,delta);
         if(distance2>0.) peak=max(peak,point.w*max(dot(normal,delta*rsqrt(distance2)),0.));
     }
+    // The final signal is at least the pilot mean. Once that alone rules out
+    // concentration, world/light proxies cannot change the budget decision.
+    if(peak<=REG_GI_CONCENTRATION*max(mean/9.,1.e-12)) return false;
     let world_signal=max(dot(world_radiance(normal)*frame.radiance.w,float3(.2126,.7152,.0722)),0.);
     var direct_signal=0.;let count=uint(frame_light_count(frame));
     // Up to the discovery budget, exact cheap proxies avoid lottery-driven
@@ -166,21 +169,12 @@ bool gi_needs_samples<V:IVariant>(uint2 pixel,float3 position,float3 normal) {
 #else
 [[vk::binding(0,3)]] StructuredBuffer<uint> ray_hit_buffers[REG_RAY_HIT_BUFFERS];
 #endif
-uint ray_hit_buffers_load(uint buffer,uint index) {
-#ifdef VORK_METAL
-    return ray_hit_buffers.buffers[buffer][index];
-#else
-    return ray_hit_buffers[NonUniformResourceIndex(buffer)][index];
-#endif
-}
-struct GiGeometry : IHitGeometry {
-    static uint word(uint index) {return ray_alpha[index];}
-    static uint load(uint buffer, uint index) {return ray_hit_buffers_load(buffer,index);}
-};
+
+typedef RayGeometry GiGeometry;
 #ifdef VORK_PROGRAM_TRACE
 import geometric_trace;
 export TraceHit native_geometric_trace(float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
-    return geometric_trace<GiGeometry>(ray_scene,origin,direction,minimum,maximum,mask,object);
+    return geometric_trace<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_scene,origin,direction,minimum,maximum,mask,object);
 }
 #endif
 
@@ -196,10 +190,10 @@ float gi_mis(float sampled,float other) {
 float gi_emitter_pdf<P:IProgram>(RayIntersection hit,float3x4 inverse,float3 from) {
     let base=gi_sources.x;
     if(ray_alpha[base]==0u) {return 0.;}
-    let probability=emitter_mesh_probability<GiGeometry>(base,hit.instance_index,hit.primitive_index,gi_emitter_weights);
+    let probability=emitter_mesh_probability<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),base,hit.instance_index,hit.primitive_index,gi_emitter_weights);
     if(probability<=0.) {return 0.;}
-    let geometry=hit_emitter<GiGeometry>(hit.instance_index,hit.primitive_index,hit.instance_custom_data,inverse,hit.barycentrics);
-    return probability*emitter_mesh_pdf<GiGeometry>(base,hit.instance_index,geometry.area,from,geometry.point,geometry.face);
+    let geometry=hit_emitter<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),hit.instance_index,hit.primitive_index,hit.instance_custom_data,inverse,hit.barycentrics);
+    return probability*emitter_mesh_pdf<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),base,hit.instance_index,geometry.area,from,geometry.point,geometry.face);
 }
 // A physical source connection complements the cosine continuation. Only source
 // emission receives MIS; reflected radiance retains the hemisphere estimator.
@@ -207,24 +201,24 @@ float3 gi_source<V:IVariant,P:IProgram>(float3 from,float3 normal,float3 geometr
     let base=gi_sources.x;if(ray_alpha[base]==0u) {return float3(0.);}
     let uv=sample_2d(pixel,index,count,REG_SAMPLING_STREAM_PROBE_EMITTER);
     let extra=sample_2d(pixel,index,count,REG_SAMPLING_STREAM_PROBE_TRIANGLE);
-    let selected=emitter_mesh_sample<GiGeometry>(base,float3(extra.x,uv),gi_emitter_weights);
+    let selected=emitter_mesh_sample<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),base,float3(extra.x,uv),gi_emitter_weights);
     if((objects[selected.object].metadata.y&REG_RAY_DIFFUSE)==0u) {return float3(0.);}
     let inverse=(float3x4)object_normal(selected.object);
-    let geometry=hit_emitter<GiGeometry>(selected.instance,selected.primitive,selected.object,inverse,selected.barycentrics);
+    let geometry=hit_emitter<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),selected.instance,selected.primitive,selected.object,inverse,selected.barycentrics);
     let delta=geometry.point-from;let distance=length(delta);if(distance<=0.) {return float3(0.);}
     let direction=delta/distance;let cosine=max(dot(normal,direction),0.);
     if(cosine<=0. || dot(geometric,direction)<0.) {return float3(0.);}
     let hit=RayIntersection(selected.instance,selected.object,selected.primitive,selected.barycentrics);
     let pdf=gi_emitter_pdf<P>(hit,inverse,from);if(pdf<=0.) {return float3(0.);}
-    if(!diffuse_candidate_accepts<P,GiGeometry>(ray_alpha,hit,dot(geometry.face,-direction)>0.,inverse,direction,float2(0.))) {return float3(0.);}
-    let source=hit_surface<V,P,GiGeometry>(selected.instance,selected.primitive,selected.object,inverse,selected.barycentrics,direction,float2(0.));
+    if(!diffuse_candidate_accepts<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_alpha,hit,dot(geometry.face,-direction)>0.,inverse,direction,float2(0.))) {return float3(0.);}
+    let source=hit_surface<V,P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),selected.instance,selected.primitive,selected.object,inverse,selected.barycentrics,direction,float2(0.));
     if(source.s.discarded) {return float3(0.);}
     let emitted=emitter_mesh_radiance<V,P>(source);if(!any(emitted!=float3(0.))) {return float3(0.);}
     let start=ray_origin(from,geometric,direction,error);
     let end=surface_ray_origin(geometry.point,surface_position_error(selected.object,geometry.point),source.face,-direction);
     let connection=end-start;let extent=length(connection);if(extent<=0.) {return float3(0.);}
     RayDesc ray;ray.Origin=start;ray.Direction=connection/extent;ray.TMin=0.;ray.TMax=extent;
-    if(diffuse_ray_occluded<P,GiGeometry>(ray_scene,ray_alpha,ray,REG_RAY_GI_OCCLUDER,float2(0.))) {return float3(0.);}
+    if(diffuse_ray_occluded<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_scene,ray_alpha,ray,REG_RAY_GI_OCCLUDER,float2(0.))) {return float3(0.);}
     let continuation=cosine/REG_PI;var continuation_pdf=gi_proposal_pdf(guide,normal,direction);
     var radiance=emitted;
     return radiance*(continuation/pdf)*gi_mis(pdf,continuation_pdf)*frame.radiance.w;
@@ -236,14 +230,14 @@ float3 gi_field_source<V:IVariant,P:IProgram>(float3 from,float3 normal,float3 g
     let table=gi_fields();if(table.w==0u) return float3(0.);
     let uv=sample_2d(pixel,index,count,REG_SAMPLING_STREAM_PROBE_EMITTER);
     let extra=sample_2d(pixel,index,count,REG_SAMPLING_STREAM_PROBE_TRIANGLE);
-    let selected=field_emitter<GiGeometry>(table,min(uint(extra.x*float(table.w)),table.w-1u));
+    let selected=field_emitter<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),table,min(uint(extra.x*float(table.w)),table.w-1u));
     if((objects[selected.object].metadata.y&REG_RAY_DIFFUSE)==0u || collapsed_endpoint(objects[selected.object].model)) return float3(0.);
-    float density;let direction=field_emitter_direction<GiGeometry>(selected,from,uv,density);
+    float density;let direction=field_emitter_direction<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),selected,from,uv,density);
     let cosine=max(dot(normal,direction),0.);let pdf=density/float(table.w);
     if(pdf<=0. || cosine<=0. || dot(geometric,direction)<0.) return float3(0.);
     var minimum=0.;
     for(;;) {
-        let root=field_intersection<GiGeometry>(selected.descriptor,selected.object,from,direction,minimum,REG_FP32_MAX);
+        let root=field_intersection<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),selected.descriptor,selected.object,from,direction,minimum,REG_FP32_MAX);
         if(!root.found) return float3(0.);
         let source=field_surface<V,P>(selected.object,root,direction,float2(0.),Lobe(0u,0.));
         if(source.s.discarded || source.s.closure.geometry_opacity<=0.) {
@@ -256,7 +250,7 @@ float3 gi_field_source<V:IVariant,P:IProgram>(float3 from,float3 normal,float3 g
         let end=surface_ray_origin(source.v.world,surface_position_error(selected.object,source.v.world),source.face,-direction);
         let delta=end-start;let extent=length(delta);if(extent<=0.) return float3(0.);
         RayDesc ray;ray.Origin=start;ray.Direction=delta/extent;ray.TMin=0.;ray.TMax=extent;
-        if(diffuse_ray_occluded<P,GiGeometry>(ray_scene,ray_alpha,ray,REG_RAY_GI_OCCLUDER,float2(0.))) return float3(0.);
+        if(diffuse_ray_occluded<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_scene,ray_alpha,ray,REG_RAY_GI_OCCLUDER,float2(0.))) return float3(0.);
         var continuation=gi_proposal_pdf(guide,normal,direction);var radiance=emitted;
         return radiance*(cosine/(REG_PI*pdf))*gi_mis(pdf,continuation)*frame.radiance.w;
     }
@@ -265,11 +259,11 @@ float3 gi_field_source<V:IVariant,P:IProgram>(float3 from,float3 normal,float3 g
 // Shared surface shadows at GI hits: one ray toward each light (hit_lighting).
 struct GiShadows<P:IProgram> : IShadows {
     static const bool probe_rays=true;
-    static bool probe_visible(float3 world,float3 normal,float3 position_error,float3 probe) {return probe_connection_visible<P,GiGeometry>(ray_scene,ray_alpha,world,normal,position_error,probe);}
+    static bool probe_visible(float3 world,float3 normal,float3 position_error,float3 probe) {return probe_connection_visible<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_scene,ray_alpha,world,normal,position_error,probe);}
     static uint integration_count(uint index,out float3 normalization) {let count=index==0xffffffffu ? sample_count() : 1u;normalization=float3(float(count));return count;}
     static float3 integration_sample(uint tap,inout uint index,inout float3 world) {if(index==0xffffffffu) {index=tap;}return float3(1.);}
     static uint sample_count() {return uint(frame.temporal.y)*max(frame.sampling.w,1u)*uint(frame.ao.z);}
-    static float3 visibility_direction(float3 world,float3 normal,LightValues record,uint light,float3 direction,float distance,float3 position_error,uint index,uint count,bool fibre=false) {return hit_shadow_direction<P,GiGeometry>(ray_scene,ray_alpha,light,world,normal,position_error,direction,distance,index,count,false);}
+    static float3 visibility_direction(float3 world,float3 normal,LightValues record,uint light,float3 direction,float distance,float3 position_error,uint index,uint count,bool fibre=false) {return hit_shadow_direction<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_scene,ray_alpha,light,world,normal,position_error,direction,distance,index,count,false);}
     static const bool subsurface=true;
     static float thickness(uint object,float3 world,float3 direction) {return subsurface_exit(ray_scene,object,world,direction);}
 };
@@ -279,10 +273,12 @@ float3 hit_shading<V:IVariant,P:IProgram>(RayIntersection hit,float3x4 world_to_
     // Hits filter textures with the camera pixel's footprint at the hit.
     // A mixed surface (Blend programs) contributes one lobe picked per ray.
     let u=select(P.lobes,float(screen_ray_hash(pixel,index,REG_SAMPLING_STREAM_RAY_GI_LOBE))*REG_RADICAL_INVERSE_SCALE,0.);
-    var h=hit_surface<V,P,GiGeometry>(hit.instance_index,hit.primitive_index,hit.instance_custom_data,world_to_object,hit.barycentrics,direction,float2(2.)/float2(image_size(receivers)),Lobe(select(P.lobes,LOBE_PICK,0u),u));
+    var h=hit_surface<V,P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),hit.instance_index,hit.primitive_index,hit.instance_custom_data,world_to_object,hit.barycentrics,direction,float2(2.)/float2(image_size(receivers)),Lobe(select(P.lobes,LOBE_PICK,0u),u));
     float3 emitted;
     let radiance=finalized_hit_radiance<V,GiShadows<P>,P>(h,pixel,index,REG_RAY_DIFFUSE,emitted,false,false,gi_hit_light<V>(h.v.world,pixel,index,count,pilot,P.lit && P.lit_material(h.v)));
-    let source_pdf=gi_emitter_pdf<P>(hit,world_to_object,from);
+    // Source MIS weights emission only. Nonemitting hits need no source-tree
+    // probability, triangle reconstruction or solid-angle PDF in either pass.
+    let source_pdf=any(emitted!=float3(0.)) ? gi_emitter_pdf<P>(hit,world_to_object,from) : 0.;
     return (radiance-emitted*(1.-gi_mis(continuation_pdf,source_pdf)))*frame.radiance.w;
 }
 // Absolute cell addressing: the mask contains the exact full-support OR.
@@ -290,6 +286,8 @@ float3 hit_shading<V:IVariant,P:IProgram>(RayIntersection hit,float3x4 world_to_
 bool gi_consumed(uint2 cell) {return demand_mask.Load(int3(cell,0))!=0u;}
 // Scenes with programs compile their own entry with their Programs (SlangForward::program_kernel).
 void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
+    if(any(gid.xy>=gi_source_data.tile.zw)) return;
+    gid.xy+=gi_source_data.tile.xy;
     if(gid.y>=gi_source_data.batch.z) return;
     let at=gid.y*image_size(output).x+gid.x;
     gid.y+=gi_source_data.batch.y;
@@ -316,7 +314,7 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
     GiQuery prepared;
     if(begin==0u) {
     let surface=ao_surface(receivers,normals,gid.xy,int(frame.ao.w),frame.view);
-    if(surface.depth<1.) {cell_receivers[gid.xy]=float4(surface.position,surface.depth);}
+    if(!pilot && surface.depth<1.) {cell_receivers[gid.xy]=float4(surface.position,surface.depth);}
     let active=surface.depth<1. && gi_consumed(gid.xy);
     if(active && !pilot) {
         let maximum=uint(frame.ao.z);
@@ -332,8 +330,10 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
     prepared.error=float4(position_error,float(rays));
     prepared.moments=float4(0.);
     if(pilot) {GiGuide empty={};gi_guide[gid.y*image_size(output).x+gid.x]=empty;}
-    gi_accumulation[at]=prepared;
+    // Pilots publish only gi_guide; beauty initializes its own query and guides.
+    if(!pilot) gi_accumulation[at]=prepared;
     if(!active) {
+        if(pilot) return;
         output[gid.xy]=surface.depth>=1. ? float4(1.,0.,0.,0.) : float4(1.,surface.view_depth,encode_octahedron(surface.normal));
         incident_output[gid.xy]=float4(0.);return;
     }
@@ -394,7 +394,7 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
         // Tangent ones (the sample square's edge maps to the horizon) are traced.
         if (!light_pilot && (dot(direction,ng)<0. || direction_weight<=0.)) {
             let value=dot(incident-before,float3(.2126,.7152,.0722));
-            moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
+            if(!pilot) moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
             if(pilot && !light_pilot) pilot_stats+=float2(value,1.);continue;
         }
         let origin=light_pilot ? light_origin : ray_origin(position,ng,direction,position_error);
@@ -403,14 +403,14 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
         query.TraceRayInline(ray_scene,RAY_FLAG_FORCE_NON_OPAQUE,light_pilot ? REG_RAY_SHADOW : REG_RAY_GI_OCCLUDER,ray);
         while (query.Proceed()) {
             let candidate=RayIntersection(query.CandidateInstanceIndex(),query.CandidateInstanceID(),query.CandidatePrimitiveIndex(),query.CandidateTriangleBarycentrics());
-            if (diffuse_candidate_accepts<P,GiGeometry>(ray_alpha,candidate,query.CandidateTriangleFrontFace(),query.CandidateWorldToObject3x4(),direction,float2(2.)/float2(image_size(receivers)))) {query.CommitNonOpaqueTriangleHit();}
+            if (diffuse_candidate_accepts<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),ray_alpha,candidate,query.CandidateTriangleFrontFace(),query.CandidateWorldToObject3x4(),direction,float2(2.)/float2(image_size(receivers)))) {query.CommitNonOpaqueTriangleHit();}
         }
         DielectricHit closest={};closest.t=-1.;
         if(query.CommittedStatus()==COMMITTED_TRIANGLE_HIT) {
             closest.t=query.CommittedRayT();closest.instance=query.CommittedInstanceIndex();closest.object=query.CommittedInstanceID();
             closest.primitive=query.CommittedPrimitiveIndex();closest.barycentrics=query.CommittedTriangleBarycentrics();closest.world_to_object=query.CommittedWorldToObject3x4();
         }
-        closest=merge_field_hits<P,GiGeometry>(closest,ray_fields(ray_alpha),origin,direction,ray.TMax,light_pilot ? REG_RAY_SHADOW : REG_RAY_GI_OCCLUDER);
+        closest=merge_field_hits<P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),closest,ray_fields(ray_alpha),origin,direction,ray.TMax,light_pilot ? REG_RAY_SHADOW : REG_RAY_GI_OCCLUDER);
         if (closest.t<0.) {
 #if defined(VORK_PROBES)
             // Integrate the complete escaping segment, including medium sources.
@@ -418,21 +418,22 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
             incident+=radiance*frame.radiance.w*direction_weight;
 #endif
             let value=dot(incident-before,float3(.2126,.7152,.0722));
-            moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
+            if(!pilot) moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
             if(pilot && !light_pilot) pilot_stats+=float2(value,1.);
             continue;
         }
         if(closest.field) {
             let shading_direction=light_pilot ? normalize(origin+direction*closest.t-position) : direction;
-            let h=dielectric_surface<V,P,GiGeometry>(closest,shading_direction,float2(2.)/float2(image_size(receivers)),Lobe(0u,0.));
+            let h=dielectric_surface<V,P,GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),closest,shading_direction,float2(2.)/float2(image_size(receivers)),Lobe(0u,0.));
             hits+=direction_weight;
             float3 emitted;
             var radiance=finalized_hit_radiance<V,GiShadows<P>,P>(h,sample_pixel,first+k,REG_RAY_DIFFUSE,emitted,false,false,gi_hit_light<V>(h.v.world,sample_pixel,first+k,count,pilot,P.lit && P.lit_material(h.v)));
             let continuation=direction_weight>0. ? max(dot(n,direction),0.)/(REG_PI*direction_weight) : 0.;
-            radiance-=emitted*(1.-gi_mis(continuation,field_emitter_pdf<GiGeometry>(gi_fields(),closest.instance,position)));
+            if(any(emitted!=float3(0.)))
+                radiance-=emitted*(1.-gi_mis(continuation,field_emitter_pdf<GiGeometry>(GiGeometry(ray_alpha,ray_hit_buffers),gi_fields(),closest.instance,position)));
             incident+=radiance*frame.radiance.w*direction_weight;
             let value=dot(incident-before,float3(.2126,.7152,.0722));
-            moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
+            if(!pilot) moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
             if(pilot && !light_pilot) pilot_stats+=float2(value,1.);
             if(pilot && value>best.w) best=float4(origin+direction*closest.t,value);
             continue;
@@ -448,7 +449,7 @@ void gi_pixel<V:IVariant,P:IProgram>(uint3 gid) {
         var radiance=hit_shading<V,P>(hit,query.CommittedWorldToObject3x4(),world,shading_direction,position,continuation_pdf,sample_pixel,first+k,count,pilot);
         incident+=radiance*direction_weight;
         let value=dot(incident-before,float3(.2126,.7152,.0722));
-            moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
+            if(!pilot) moments+=float4((incident-before)*(incident-before),(hits-before_hits)*(hits-before_hits));
             if(pilot && !light_pilot) pilot_stats+=float2(value,1.);
         if(pilot && value>best.w) best=float4(world,value);
     }

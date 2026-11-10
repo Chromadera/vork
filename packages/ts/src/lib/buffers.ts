@@ -17,6 +17,9 @@ export function externalBuffers(scene: Scene, file: string): Uint8Array | undefi
     if(bytes<BINARY_BUFFER_MIN_BYTES) continue;
     if(buffer.file || (buffer.offset ?? 0)!==0 || buffer.count!=null)
       throw new RangeError(`buffer ${name}: inline data cannot have file, offset or count`);
+    const dims=buffer.dims;
+    if(dims && (dims.length!==3 || dims.some(n=>!Number.isInteger(n)||n<=0) || dims.reduce((a,b)=>a*b,1)!==buffer.data.length))
+      throw new RangeError(`buffer ${name}: data length must match positive dims product`);
     const packed=new Uint8Array(bytes),view=new DataView(packed.buffer);
     let at=0;
     for(const row of buffer.data as readonly unknown[]) {

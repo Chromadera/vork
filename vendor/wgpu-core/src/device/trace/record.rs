@@ -396,6 +396,7 @@ impl IntoTrace for crate::ray_tracing::OwnedTlasPackage<ArcReferences> {
             lowest_unmodified: self.lowest_unmodified,
             native_instances: self.native_instances.map(|native| crate::ray_tracing::OwnedTlasInstanceBuffer {
                 buffer: native.buffer.into_trace(), offset: native.offset, count: native.count,
+                force_rebuild: native.force_rebuild,
                 blas: native.blas.into_iter().map(|blas| blas.into_trace()).collect(),
             }),
         }

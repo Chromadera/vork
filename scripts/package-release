@@ -147,6 +147,11 @@ a.output.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(dir=a.output) as tmp:
     stage = Path(tmp)
     shutil.copy2(a.binary, stage / ('vork.exe' if windows else 'vork'))
+    adapter_name = 'vork-slang-filesystem.exe' if windows else 'vork-slang-filesystem'
+    adapter = a.binary.resolve().parent / adapter_name
+    if not adapter.is_file():
+        p.error('Slang filesystem adapter missing beside binary; rebuild the workspace')
+    shutil.copy2(adapter, stage / adapter_name)
     shaders = a.shader_cache or a.binary.resolve().parent / 'shaders'
     if not shaders.is_dir():
         p.error('portable shaders are required: run scripts/prepare-shaders with this binary before packaging')

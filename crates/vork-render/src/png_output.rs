@@ -9,6 +9,24 @@ use std::{
 
 use crate::constants::CONTROL_PNG_COMPRESSION;
 
+/// Blender ImageFormatSettings.color_depth for PNG colour: 8 or 16 bits per component.
+/// Both carry the same exposure and display transform; control channels keep their own depths.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PngDepth {
+    #[default]
+    Eight,
+    Sixteen,
+}
+impl std::str::FromStr for PngDepth {
+    type Err = String;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "8" => Ok(Self::Eight),
+            "16" => Ok(Self::Sixteen),
+            _ => Err(vork_scene::diagnostics::unknown("png_depth", value, ["8", "16"])),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
     Aov(String),
@@ -67,10 +85,12 @@ impl Outputs {
     pub fn has(&self, output: Output) -> bool {
         self.0.contains(&output)
     }
-    pub fn readback(&self, packed: bool, float: bool) -> ReadbackOutputs {
+    pub fn readback(&self, packed: bool, float: bool, png_depth: PngDepth) -> ReadbackOutputs {
+        let color = packed && self.has(Output::Color);
         ReadbackOutputs {
             aovs: self.0.iter().any(|o|matches!(o,Output::Aov(_))),
-            color: packed && self.has(Output::Color),
+            color: color && png_depth == PngDepth::Eight,
+            color16: color && png_depth == PngDepth::Sixteen,
             depth_ids: (packed && self.has(Output::Depth)) || self.has(Output::ObjectIndex),
             normals: packed && self.has(Output::ViewNormal),
             motion: packed && self.has(Output::Motion),
@@ -114,7 +134,7 @@ enum Job {
     },
 }
 type Files = Vec<(String, Vec<u8>)>;
-fn encode(w: u32, h: u32, p: &FrameOutput, outputs: &Outputs) -> Result<Files> {
+fn encode(w: u32, h: u32, p: &FrameOutput, outputs: &Outputs, png_depth: PngDepth) -> Result<Files> {
     use png::{
         BitDepth::{Eight, Sixteen},
         ColorType::{Grayscale, Rgb, Rgba},
@@ -133,7 +153,13 @@ fn encode(w: u32, h: u32, p: &FrameOutput, outputs: &Outputs) -> Result<Files> {
         Ok(())
     };
     if outputs.has(Output::Color) {
-        png(".png", Rgba, Eight, &p.rgba)?;
+        match png_depth {
+            PngDepth::Eight => png(".png", Rgba, Eight, &p.rgba)?,
+            PngDepth::Sixteen => {
+                let words: Vec<_> = p.rgba16.iter().map(|v| v.map(u16::to_be)).collect();
+                png(".png", Rgba, Sixteen, bytemuck::cast_slice(&words))?
+            }
+        }
     }
     // Keep one output item per pixel. Flattening byte arrays through nested
     // iterators left a scalar Iterator::next state machine on this hot path;
@@ -258,6 +284,7 @@ impl FrameOutputWriter {
         outputs: Outputs,
         exr: bool,
         exr_codec: crate::ExrCodec,
+        png_depth: PngDepth,
         pending_frames: usize,
         // Absolute index of the first pushed frame; output order counts from it.
         first_frame: usize,
@@ -289,8 +316,8 @@ impl FrameOutputWriter {
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         pixels.unpack()
                                     }))
-                                    .map(Arc::new)
-                                    .map_err(|_| anyhow!("readback unpack worker panicked"));
+                                    .map_err(|_| anyhow!("readback unpack worker panicked"))
+                                    .and_then(|result| result).map(Arc::new);
                                 if requests
                                     .send(Input::Unpacked {
                                         frame,
@@ -315,7 +342,7 @@ impl FrameOutputWriter {
                                         if exr {
                                             encode_exr_clock(w, h, &pixels, &outputs, exr_codec,Some(fps))
                                         } else {
-                                            encode(w, h, &pixels, &outputs)
+                                            encode(w, h, &pixels, &outputs, png_depth)
                                         }
                                     }))
                                     .unwrap_or_else(|_| {
@@ -472,12 +499,52 @@ impl FrameOutputWriter {
 mod exr_tests {
     use super::*;
     #[test]
+    fn rendered_png16_preserves_precision_and_scales_dither() -> Result<()> {
+        let Some(r) = crate::test_renderer()? else { return Ok(()); };
+        assert!(!crate::InstallOptions::default().readback.color16);
+        let readback = ReadbackOutputs { color: true, color16: true, ..Default::default() };
+        let scene = serde_json::from_value(serde_json::json!({
+            "version": 2, "nodes": [{"type": "camera"}],
+            "render": {"resolution": [16,16], "background": [0.25,0.25,0.25],
+                "settings": {"samples": 1}, "display": {"program": "display"}},
+            "programs": {"display": {"source": "import std.display; struct Inputs {}; float3 display(DisplayContext ctx, Inputs i) {return finish_display(ctx.color,ctx,1.,1.);}"}}
+        }))?;
+        let installed = r.install_with_options(scene, std::path::Path::new("."), crate::InstallOptions {
+            readback, gpu_color: false, ..Default::default()
+        })?;
+        let mut frame = installed.create_frame_slot(&r, crate::ReadbackPrecision::Packed)?;
+        frame.submit_outputs(&installed, &r, 0., readback)?;
+        let pixels = frame.collect(&r)?;
+        assert_eq!(pixels.rgba16.len(), 256);
+        for (low, high) in pixels.rgba.chunks_exact(4).zip(&pixels.rgba16) {
+            for c in 0..4 {
+                assert!((f32::from(low[c])/255. - f32::from(high[c])/65535.).abs() <= 1./255.);
+            }
+            // A constant 0.25 input must not retain 8-bit dither in RGBA16.
+            assert!((f32::from(high[0])/65535. - 0.25).abs() <= 1.5/65535.);
+        }
+        let files = encode(16,16,&pixels,&Outputs::new(vec![Output::Color]),PngDepth::Sixteen)?;
+        let path = std::env::temp_dir().join(format!("vork-png16-{}.png",std::process::id()));
+        std::fs::write(&path,&files[0].1)?;
+        let bytes = std::fs::read(&path)?;
+        std::fs::remove_file(&path)?;
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info()?;
+        let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded)?;
+        assert_eq!(info.bit_depth,png::BitDepth::Sixteen);
+        let expected: Vec<u8> = pixels.rgba16.iter().flatten().flat_map(|v|v.to_be_bytes()).collect();
+        assert_eq!(&decoded[..info.buffer_size()],expected.as_slice());
+        Ok(())
+    }
+    #[test]
     fn aov_channels_cannot_shadow_built_in_layers() {
         assert!("aov:heat".parse::<Output>().is_ok());
         assert!("aov:color".parse::<Output>().unwrap_err().contains("collides"));
         assert!("aov:object_index".parse::<Output>().unwrap_err().contains("collides"));
         assert_eq!(Output::builtins().count(), vork_scene::v2::OUTPUT_CHANNELS.len());
         assert!("ZIP".parse::<crate::ExrCodec>().is_err());
+        assert_eq!(("8".parse(), "16".parse()), (Ok(PngDepth::Eight), Ok(PngDepth::Sixteen)));
+        assert!("32".parse::<PngDepth>().is_err());
     }
     #[test]
     fn channel_grammar_is_namespaced_and_builtin_defaults_are_stable() {
@@ -500,6 +567,7 @@ mod exr_tests {
                 pixels: vec![[0.25, 0., 0., 0.], [0.75, 0., 0., 0.]],
             })].into(),
             rgba: vec![128, 128, 255, 128, 0, 0, 0, 0],
+            rgba16: vec![[0x0102, 0x8000, 0xffff, 0x7fff], [0, 0, 0, 0]],
             linear_rgba: Some(vec![[0.09, 0.2158605 * 0.5, 2., 0.5], [0., 0., 0., 0.]]),
             depth_f32: Some(vec![1.2345679, 1e10]),
             normals_f32: Some(vec![[0.1234567, 0.2345678, 0.964], [0., 0., 0.]]),
@@ -521,6 +589,9 @@ mod exr_tests {
                 gpu_ms: 0.,
                 nonfinite: None,
                 dropped_light_samples: 0,
+                dropped_path_samples: 0,
+                terminated_medium_paths: 0,
+                discarded_medium_radiance: 0.,
                 gpu_elapsed_ms: 0.,
                 timing_source: "unmeasured",
                 gpu_spans_ms: vec![],
@@ -530,7 +601,7 @@ mod exr_tests {
         // The public PNG protocol uses network byte order, including the zero
         // blue component of the RGB16 motion image. Decode the actual files so
         // this also checks their PNG type, depth and dimensions.
-        let pngs = encode(1, 2, &pixels, &Outputs(vec![Output::Depth, Output::ObjectIndex, Output::Motion]))?;
+        let pngs = encode(1, 2, &pixels, &Outputs(vec![Output::Depth, Output::ObjectIndex, Output::Motion]), PngDepth::Eight)?;
         for (suffix, color, expected) in [
             (".depth.png", png::ColorType::Grayscale, vec![0, 100, 0, 0]),
             (".object_index.png", png::ColorType::Grayscale, vec![255, 255, 0, 0]),
@@ -542,6 +613,20 @@ mod exr_tests {
             let info = reader.next_frame(&mut decoded)?;
             assert_eq!((info.width, info.height, info.color_type, info.bit_depth), (1, 2, color, png::BitDepth::Sixteen));
             assert_eq!(&decoded[..info.buffer_size()], &expected, "{suffix}");
+        }
+        // Colour follows the selected depth; 16-bit components are big-endian RGBA16.
+        for (depth, bit_depth, expected) in [
+            (PngDepth::Eight, png::BitDepth::Eight, vec![128, 128, 255, 128, 0, 0, 0, 0]),
+            (PngDepth::Sixteen, png::BitDepth::Sixteen, vec![1, 2, 128, 0, 255, 255, 127, 255, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ] {
+            let files = encode(1, 2, &pixels, &Outputs(vec![Output::Color]), depth)?;
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].0, ".png");
+            let mut reader = png::Decoder::new(std::io::Cursor::new(&files[0].1)).read_info()?;
+            let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+            let info = reader.next_frame(&mut decoded)?;
+            assert_eq!((info.width, info.height, info.color_type, info.bit_depth), (1, 2, png::ColorType::Rgba, bit_depth));
+            assert_eq!(&decoded[..info.buffer_size()], &expected, "{depth:?}");
         }
         let files = encode_exr(
             1,
@@ -634,7 +719,7 @@ mod exr_tests {
             if count>0 {
                 let selection: Output = format!("aov:a{}",count-1).parse().unwrap();
                 let selected = Outputs::new(vec![selection]);
-                let png = encode(1,2,&pixels,&selected)?;
+                let png = encode(1,2,&pixels,&selected,PngDepth::Eight)?;
                 assert_eq!(png.len(),1);
                 assert_eq!(png[0].0,format!(".aov.a{}.png",count-1));
                 let files = encode_exr(1,2,&pixels,&selected,crate::ExrCodec::default())?;

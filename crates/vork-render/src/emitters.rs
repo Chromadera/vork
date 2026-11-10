@@ -23,12 +23,19 @@ pub(crate) fn has_sources(draws: &[install::Draw], instances: &[(usize,u32)], ma
 pub(crate) fn emitter_topology(
     draws: &[install::Draw], instances: &[(usize, u32)], materials: &[Material], physical: bool,
 ) -> Result<Vec<u32>> {
+    emitter_topology_counts(draws,instances,materials,physical,|_,draw|draws[draw].count/3)
+}
+pub(crate) fn emitter_topology_counts(
+    draws: &[install::Draw], instances: &[(usize,u32)], materials: &[Material], physical: bool,
+    triangles: impl Fn(usize,usize)->u32,
+) -> Result<Vec<u32>> {
     let mut words = vec![0, 0, instances.len() as u32];
     words.resize(3 + instances.len(), u32::MAX);
     for (instance, &(draw, object)) in instances.iter().enumerate() {
+        let count=triangles(instance,draw);
         let draw = &draws[draw];
         if !supports(draw,&materials[draw.material],physical) {continue;}
-        words[1] = words[1].checked_add(draw.count / 3).context("too many emitter triangles")?;
+        words[1] = words[1].checked_add(count).context("too many emitter triangles")?;
         words[3 + instance] = words[0];
         words[0] += 1;
         words.extend([instance as u32, object, words[1]]);

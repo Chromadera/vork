@@ -209,7 +209,7 @@ impl AttributeData {
                 }
             }
             words
-        } else if buffer.dims.is_some() {
+        } else if buffer.dims.is_some() && buffer.file.is_none() {
             vec![0; buffer.len().context("dense grid size overflow")?.checked_mul(width).context("dense grid size overflow")?]
         } else {
             let path = base.join(
@@ -229,8 +229,8 @@ impl AttributeData {
             let stride = width
                 .checked_mul(std::mem::size_of::<u32>())
                 .context("buffer stride overflow")?;
-            let length = if let Some(count) = buffer.count {
-                u64::from(count)
+            let length = if let Some(count) = buffer.len() {
+                u64::try_from(count)?
                     .checked_mul(stride as u64)
                     .context("buffer size overflow")?
             } else {
@@ -375,6 +375,7 @@ pub(crate) fn geometry_v2(
         let widths: Vec<_> = widths.floats::<1>()?.into_iter().map(|v| v[0]).collect();
         let mut geometry = crate::points::cached_spheres(&positions, &widths, curve_sides, cache)?;
         geometry.point_centers = positions.clone();
+        geometry.point_widths = widths;
         let point_vertices = geometry.vertices.len() / positions.len();
         geometry.primitive_ids=geometry.indices.chunks_exact(3).map(|tri|tri[0]/point_vertices as u32).collect();
         apply_point_attributes(attributes, source, names, positions.len(), point_vertices, &mut geometry)?;
@@ -594,6 +595,35 @@ mod buffer_decode_tests {
         assert_eq!(AttributeData::decode(&buffer, Path::new("."))?.count(), 1);
         Ok(())
     }
+    #[test]
+    fn bb107_sdk_written_implicit_field_loads() -> Result<()> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bb107/written.json");
+        let scene = vork_scene::v2::Scene::load(&path)?;
+        let buffers = SceneBuffers::decode(&scene, path.parent().unwrap())?;
+        assert_eq!(buffers.data["field"].words, (0..1024).map(|i| ((i % 16) as f32 - 7.5).to_bits()).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    fn dense_binary_cells_use_dimensions_and_file_range() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("vork-dense-bb107-{}.bin", std::process::id()));
+        let cells: Vec<f32> = (0..1024).map(|i| (i % 16) as f32 - 7.5).collect();
+        let mut bytes = vec![0u8; 16];
+        bytes.extend(cells.iter().flat_map(|v| v.to_le_bytes()));
+        bytes.extend([0u8; 4]);
+        std::fs::write(&path, &bytes)?;
+        for count in [None, Some(1024)] {
+            let buffer = vork_scene::v2::from_test_value(json!({"type":"f32", "dims":[16,8,8], "file":path, "offset":16, "count":count}))?;
+            assert_eq!(AttributeData::decode(&buffer, Path::new("."))?.words,
+                cells.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        }
+        std::fs::write(&path, &bytes[..bytes.len()-8])?;
+        let buffer = vork_scene::v2::from_test_value(json!({"type":"f32", "dims":[16,8,8], "file":path, "offset":16}))?;
+        assert!(AttributeData::decode(&buffer, Path::new(".")).err().unwrap().to_string().contains("too short"));
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
     #[test]
     fn binary_ranges_partial_elements_and_nonfinite_values_are_rejected() -> Result<()> {
         let path =
@@ -1300,6 +1330,8 @@ impl ProgramBuffers {
             .collect();
         names.extend(scene.buffers.iter().filter(|(_,b)|b.dims.is_some()).map(|(n,_)|n.clone()));
         names.extend(scene.simulation.iter().flat_map(|s| s.state.iter().cloned()));
+        // Status is a retained consumer even when no compute program writes it.
+        names.extend(scene.geometry.values().filter_map(|g|g.status.as_ref()).map(|s|s.buffer.clone()));
         for g in scene.geometry.values().filter(|g| crate::computed_geometry::dynamic(scene,g)) {
             names.extend(g.attributes.values().chain(g.widths.iter()).chain(g.count.iter()).chain(g.ids.iter()).cloned());
         }

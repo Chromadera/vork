@@ -37,7 +37,33 @@ nodes.extend([dict(type='light',name='environment',shape='environment',material=
 nodes.append(dict(type='mesh',name='floor_film',geometry='floor_film',materials=['water'],scale=[3.,2.,3.],translation=[0,TABLE_TOP,0]))
 nodes.append(dict(type='mesh',name='whitewater',geometry='whitewater',materials=['whitewater']))
 geometry=dict(fluid['geometry'])
-geometry.update(basin=dict(std='revolve',profile=BOWL_PROFILE,segments=128),box=dict(std='box'))
+def bowl_mesh(profile,sectors):
+ # Authored radius/height section, with separate corner normals and an angular UV seam.
+ edge=[];lengths=[0.]
+ area=sum(a[0]*b[1]-b[0]*a[1] for a,b in zip(profile,profile[1:]+profile[:1]))
+ sign=-1 if area<0 else 1
+ for (r0,y0),(r1,y1) in zip(profile,profile[1:]):
+  length=math.hypot(r1-r0,y1-y0);edge.append([sign*(y1-y0)/length,-sign*(r1-r0)/length]);lengths.append(lengths[-1]+length)
+ def corner(i,incoming):
+  n=edge[max(0,min(i if not incoming else i-1,len(edge)-1))]
+  if i==0 or i==len(profile)-1:return [0.,n[1]] if profile[i][0]==0 else n
+  a,b=edge[i-1],edge[i]
+  if sum(x*y for x,y in zip(a,b))<math.cos(math.pi/6):return a if incoming else b
+  q=[a[0]+b[0],a[1]+b[1]];length=math.hypot(*q);return [v/length for v in q]
+ positions=[];normals=[];uv=[];indices=[]
+ def row(i,n):
+  first=len(positions);r,y=profile[i]
+  for x in range(sectors+1):
+   angle=(0 if x==sectors else x)*math.tau/sectors;c,ss=math.cos(angle),math.sin(angle)
+   positions.append([r*c,y,r*ss] if r else [0.,y,0.]);normals.append([n[0]*c,n[1],n[0]*ss]);uv.append([1-x/sectors,lengths[i]/lengths[-1]])
+  return first
+ for i in range(len(profile)-1):
+  a=row(i,corner(i,False));b=row(i+1,corner(i+1,True))
+  for x in range(sectors):
+   if profile[i+1][0]:indices.extend([a+x,b+x,b+x+1] if sign>0 else [a+x,b+x+1,b+x])
+   if profile[i][0]:indices.extend([a+x,b+x+1,a+x+1] if sign>0 else [a+x,a+x+1,b+x+1])
+ return dict(attributes={key:dict(type=kind,data=value) for key,kind,value in [('POSITION','vec3',positions),('NORMAL','vec3',normals),('TEXCOORD_0','vec2',uv)]},indices=dict(type='u32',data=indices))
+geometry.update(basin=bowl_mesh(BOWL_PROFILE,128),box=dict(std='rounded_box',radius=0,size=[2,2,2]))
 scene=dict(version=2,images=dict(environment=dict(file='../assets/forest_slope_1k.hdr')),buffers=buffers,
  geometry=geometry,programs=programs,materials=materials,nodes=nodes,simulation=fluid['simulation'],
  render=dict(camera='camera',resolution=[1920,1080],fps=24,duration=1.5,motion_blur=dict(shutter=.5),background=[.09,.14,.21]))
@@ -51,12 +77,14 @@ for node in nodes:
 # Lower author-side builders to ordinary buffer geometry, like the other examples.
 mesh_bytes=bytearray()
 for name,definition in list(scene['geometry'].items()):
- if 'std' not in definition: continue
- options={k:v for k,v in definition.items() if k!='std'};options['name']='shape'
- fragment=json.loads(subprocess.check_output([args.vork,'std',definition['std'],json.dumps(options)],text=True))
- mesh=fragment['geometry']['shape']
+ if 'std' in definition:
+  options={k:v for k,v in definition.items() if k!='std'};options['name']='shape'
+  fragment=json.loads(subprocess.check_output([args.vork,'std',definition['std'],json.dumps(options)],text=True))
+  mesh=fragment['geometry']['shape']
+ elif name=='basin':mesh=definition
+ else:continue
  def pack(reference):
-  source=fragment['buffers'][reference];data=source['data'];kind=source['type']
+  source=reference if isinstance(reference,dict) else fragment['buffers'][reference];data=source['data'];kind=source['type']
   flat=[component for value in data for component in (value if isinstance(value,list) else [value])]
   result=dict(type=kind,file='scene.std.bin',offset=len(mesh_bytes),count=len(data))
   mesh_bytes.extend(struct.pack('<'+str(len(flat))+('I' if kind=='u32' else 'f'),*flat))

@@ -1,4 +1,4 @@
-vork — headless 3D rendering from scene JSON. Start small, inspect the image, then refine.
+vork — headless 3D rendering from scene JSON.
 Supported GPUs: Apple Silicon (Metal) and recent NVIDIA (Vulkan).
 Linux CPU rendering: opt in with --gpu cpu or VORK_GPU=cpu; see vork help limits.
 Unknown fields are errors; omit anything at its default.
@@ -8,18 +8,17 @@ vork init my-shot
 cd my-shot
 vork render scene.json --out shot.png
 vork help
-Creates an offline scene from sphere, box and grid primitives; no assets to fetch.
 vork init [DIR] [--language json|typescript|python] (default DIR: ., language: json).
 Always writes scene.json and README.md; TypeScript adds scene.ts and package.json; Python adds scene.py.
-Existing files are never overwritten. Source authoring requires the matching SDK;
-scene.json renders immediately. Edit the source, regenerate JSON, then render again.
+Existing files are never overwritten. Source authoring requires the matching SDK.
+Edit the source, regenerate JSON, then render.
 Paths are relative to scene.json. RGB background changes the backdrop, not lighting.
 
 Supported features and known limits: vork help limits. Source builds: vork help build.
 
 RENDERING
 vork render SCENE --out PATH [--at SECONDS | --frame-start N --frame-end N] [--profile P]
-  [--set KEY=VALUE ...] [--channels LIST] [--exr-codec CODEC] [--diagnostics]
+  [--set KEY=VALUE ...] [--channels LIST] [--exr-codec CODEC] [--png-depth 8|16] [--diagnostics]
   repeat --out PATH; the extension picks the output: .png one still (t=0 unless --at); a directory
   gets every frame as NNNNNN.png; PATH/%06d.exr frames; .mp4; .mov (keeps alpha).
   --channels color (default), depth, object_index, view_normal, motion, camera, shadow_catcher, aov:NAME;
@@ -32,6 +31,8 @@ Quality, sample budgets and denoising: vork help profiles.
 --set KEY=VALUE accepts resolution, fps, seed, samples, denoise.
 <!-- generated-call-keys:end -->
 Values are JSON; resolution also accepts WxH or W,H.
+vork check SCENE|- [--profile P]       CPU-only validation; see vork help check.
+vork export SCENE --out ASSET.glb [--root NODE] [--at SECONDS]  static asset; vork help export
 vork std FUNCTION JSON                 JSON argument; '-' reads stdin; JSON result
 vork setup                             GPU report and init starter warmup at std/final (10 min shader budget)
 vork setup --all                       Warm bundled program/profile catalog and built-in descriptors (no shader time limit)
@@ -65,6 +66,7 @@ Scene {
   animation: layer[] = []
   buffers: {name:buffer} = {}
   geometry: {name:geometry} = {}
+  geometry_stages: (deform|compute|displace)[] = [deform,compute,displace]; ordered, each at most once; default [deform,compute,displace]
   images: {name:image} = {}
   materials: {name:material} = {}
   nodes: node[]
@@ -102,10 +104,10 @@ Camera (type: camera) {
 Light (type: light) {
   color: RGB
   energy: number|null; sun W/m²; local W; environment multiplier
-  material: material-name|inline material|null; environment program
+  material: material-name|inline material|null; environment program; omitted = uniform color × energy radiance
   medium: material-name|inline material|null; environment only; authored medium program for world fog
   shape: sun|point|spot|rectangle|ellipse|environment
-  size: number = 1; rectangle full side, ellipse diameter
+  size: number = 1; rectangle full side, ellipse diameter; size_y sets the second axis
 }
 
 Material {
@@ -144,12 +146,10 @@ Asset nodes also take materials and nodes overrides (vork help nodes).
 LIBRARIES
 Std builders return {buffers,geometry}; name sets standalone CLI/SDK fragment prefixes.
 Shapes are centred; dimensions are metres.
-Common builders (all shapes, text and extrusion: vork help std --all):
+Text, bevelled extrusion and rounded boxes: vork help std --all.
 <!-- generated-shapes:start -->
 Scene geometry: {std: NAME, ...options}; omit name: the table key or inline position owns identity.
-box: {name?:string="box",size?:vec3=[2,2,2]} → GeometryFragment
-sphere: {name?:string="sphere",radius?:number=1,segments?:number=32,rings?:number=16} → GeometryFragment
-grid: {name?:string="grid",size?:vec2=[2,2],segments?:vec2=[1,1]} → GeometryFragment; XZ plane facing +Y; size,segments:[x,z]; u along +X, v along +Z
+
 <!-- generated-shapes:end -->
 Compositor: ordered {material,name?,resolution?} image graph; material may be inline.
 Image inputs bind earlier results with {node:name}; last entry is output. See vork help compositor.
@@ -157,6 +157,7 @@ Environment: light.material evaluates radiance; std/environment_image reads ordi
 vork std environment preprocesses HDR lighting; vork std sky declares atmosphere and an ordinary sun.
 
 Topics (vork help TOPIC [--all]):
+check: validate without rendering
 upgrade: breaking changes
 contract: validation and installation
 nodes: assets, skins, morphs, object IDs
@@ -177,15 +178,13 @@ outputs: channels, metadata, codecs
 camera-json: OpenCV sidecars
 sdk: TypeScript and Python
 std: builders and Slang modules
-blender: Blender Slang functions
 fluid: liquid simulation
 cloth: XPBD fabric, native animated collider references and private geometry state
-post: colour adaptation
 errors: exit codes
 diagnostics: timings and environment variables
 limits: hardware and rendering limits
 build: source build prerequisites
 
-Scene JSON supports `"$schema": "https://raw.githubusercontent.com/voyager-so/vork/v0.4.0/packages/ts/scene.schema.json"` for editor
+Scene JSON supports `"$schema": "https://raw.githubusercontent.com/voyager-so/vork/v0.5.0/packages/ts/scene.schema.json"` for editor
 completion and validation. `vork init` includes it; SDK writers preserve an explicit
 $schema but do not insert one. vork never fetches it or changes the render.

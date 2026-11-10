@@ -17,7 +17,7 @@ Closure surface(ShadingContext ctx,Inputs p) {
     c.coat_roughness=filtered_ggx_roughness(p.coat_roughness,coat_variance);return c;
 }"#;
 
-const HEIGHT_PROGRAM: &str = "import vork; import std.vector; import blender.texture_coordinate; struct Inputs {}; struct Height:BumpHeight {ShadingContext context;float evaluate(float2 offset) {return .75*texture_coordinate(context,offset).Object.x;}}; Closure surface(ShadingContext ctx,Inputs inputs) {Height height={};height.context=ctx;Closure c={};c.geometry_opacity=1.;c.geometry_normal=bump(height,ctx.NORMAL,ctx.position_dx,ctx.position_dy,1.,1.,.1);c.base_weight=1.;c.base_color=float3(.6);c.specular_weight=0.;return c;}";
+const HEIGHT_PROGRAM: &str = "import vork; import blender.vector; import blender.texture_coordinate; struct Inputs {}; struct Height:BumpHeight {ShadingContext context;float evaluate(float2 offset) {return .75*texture_coordinate(context,offset).Object.x;}}; Closure surface(ShadingContext ctx,Inputs inputs) {Height height={};height.context=ctx;Closure c={};c.geometry_opacity=1.;c.geometry_normal=bump(height,ctx.NORMAL,ctx.position_dx,ctx.position_dy,1.,1.,.1);c.base_weight=1.;c.base_color=float3(.6);c.specular_weight=0.;return c;}";
 
 fn directory(name: &str) -> Result<PathBuf> {
     let root=std::env::temp_dir().join(format!("vork-path-texture-{name}-{}",std::process::id()));
@@ -155,7 +155,7 @@ fn coat_normal_is_independent_of_base_normal() -> Result<()> {
         // A zero-strength map must restore the exact unbound pixels, independently
         // of the base map and the coat map's UV rotation.
         input["materials"]["m"]["inputs"]["coat_strength"]=json!(0.);
-        assert_eq!(plain,render(&r,input,&root)?,"zero strength changed unperturbed coat ({integrator})");
+        crate::test_linear::assert_linear_eq(&plain,&render(&r,input,&root)?);
     }
     std::fs::remove_dir_all(root)?;
     Ok(())

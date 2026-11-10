@@ -147,7 +147,13 @@ registry! {
     TRACE_RAY_LIMIT: u32 => u32, "REG_TRACE_RAY_LIMIT" = 0x7fffffff;
     TRACE_TRAVERSAL_LIMIT: u32 => u32, "REG_TRACE_TRAVERSAL_LIMIT" = 65536;
     DROPPED_LIGHT_SAMPLES_WORD: u32 => u32, "REG_DROPPED_LIGHT_SAMPLES_WORD" = 8;
-    SHADER_DIAGNOSTICS_WORDS: u32 => u32, "REG_SHADER_DIAGNOSTICS_WORDS" = 10;
+    DROPPED_PATH_SAMPLES_WORD: u32 => u32, "REG_DROPPED_PATH_SAMPLES_WORD" = 10;
+    TERMINATED_MEDIUM_PATHS_WORD: u32 => u32, "REG_TERMINATED_MEDIUM_PATHS_WORD" = 12;
+    // Sum of absolute accumulated camera-path RGB radiance discarded by fog watchdogs.
+    DISCARDED_MEDIUM_RADIANCE_WORD: u32 => u32, "REG_DISCARDED_MEDIUM_RADIANCE_WORD" = 14;
+    // Linked dielectric interior: next, nine descriptor words, transaction tag, exit distance.
+    PATH_BOUNDARY_NODE_WORDS: u32 => u32, "REG_PATH_BOUNDARY_NODE_WORDS" = 12;
+    SHADER_DIAGNOSTICS_WORDS: u32 => u32, "REG_SHADER_DIAGNOSTICS_WORDS" = 20;
     // Requested output stores in the frame projection's reserved mask component.
     OUTPUT_GPU_COLOR: u32 => u32, "REG_OUTPUT_GPU_COLOR" = 1;
     OUTPUT_COLOR_PLANE: u32 => u32, "REG_OUTPUT_COLOR_PLANE" = 2;
@@ -168,6 +174,8 @@ registry! {
     // Producer requirements for declared compositor inputs; allocate no output planes.
     COMPOSITOR_IDS: u32 => u32, "REG_COMPOSITOR_IDS" = 512;
     COMPOSITOR_MOTION: u32 => u32, "REG_COMPOSITOR_MOTION" = 1024;
+    // Display stage also stores its 16-bit RGBA packing in the display staging planes.
+    OUTPUT_COLOR_PLANE16: u32 => u32, "REG_OUTPUT_COLOR_PLANE16" = 2048;
     FLOAT_COLOR_PLANE: usize => u32, "REG_FLOAT_COLOR_PLANE" = 4;
     FLOAT_DEPTH_PLANE: usize => u32, "REG_FLOAT_DEPTH_PLANE" = 8;
     FLOAT_NORMAL_PLANE: usize => u32, "REG_FLOAT_NORMAL_PLANE" = 9;
@@ -203,7 +211,7 @@ registry! {
     SHADOW_BOUND_NODE_WORDS: usize => u32, "REG_SHADOW_BOUND_NODE_WORDS" = 10;
     // Words per ray-hit record (rt::hit_record): position, index and attribute
     // buffers with their bases and strides, and the layout's field offsets.
-    RAY_HIT_RECORD_WORDS: usize => u32, "REG_RAY_HIT_RECORD_WORDS" = 10;
+    RAY_HIT_RECORD_WORDS: usize => u32, "REG_RAY_HIT_RECORD_WORDS" = 11;
     // Hit buffer array size: geometry pages, per-draw streams and deformed
     // ranges a scene's ray hits read (partially bound).
     RAY_HIT_BUFFERS: u32 => u32, "REG_RAY_HIT_BUFFERS" = 4096;

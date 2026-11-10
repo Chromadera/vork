@@ -5,7 +5,7 @@ pub fn with_test_hair(mut scene: serde_json::Value) -> serde_json::Value {
     scene
 }
 
-/// Expand unit-box test fixtures without invoking the authored std preprocessor.
+/// Expand flat-box test fixtures without invoking the authored std preprocessor.
 #[allow(dead_code)]
 pub fn with_box_geometry(mut scene:serde_json::Value)->serde_json::Value {
     let fixture:serde_json::Value=serde_json::from_str(include_str!("../fixtures/analytic.json")).unwrap();
@@ -18,7 +18,7 @@ pub fn with_box_geometry(mut scene:serde_json::Value)->serde_json::Value {
     }
     fn nodes(value:&mut serde_json::Value) {
         for node in value.as_array_mut().into_iter().flatten() {
-            if node["geometry"]["std"]=="box" {
+            if node["geometry"]["std"]=="rounded_box" && node["geometry"]["radius"]==0 {
                 let size=node["geometry"]["size"].clone();
                 let scale:Vec<_>=(0..3).map(|i|size[i].as_f64().unwrap()*node["scale"][i].as_f64().unwrap_or(1.)).collect();
                 node["geometry"]=serde_json::json!("test_unit_box");node["scale"]=serde_json::json!(scale);

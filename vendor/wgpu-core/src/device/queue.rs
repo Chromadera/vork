@@ -1198,6 +1198,8 @@ impl Queue {
             }
 
             let mut active_executions = Vec::new();
+            let mut submitted_as_builds = Vec::new();
+            let mut as_update_validation = crate::ray_tracing::AsUpdateValidation::default();
 
             let mut used_surface_textures = track::TextureUsageScope::default();
 
@@ -1248,6 +1250,7 @@ impl Queue {
                                     &mut submit_surface_textures_owned,
                                     &mut used_surface_textures,
                                     &mut command_index_guard,
+                                    &mut as_update_validation,
                                 );
                                 if let Err(err) = res {
                                     #[cfg(feature = "trace")]
@@ -1265,6 +1268,14 @@ impl Queue {
                                     self.trace_submission(submit_index, commands);
                                 }
 
+                                for action in &cmd_buf_data.as_actions {
+                                    if let crate::ray_tracing::AsAction::Build(build) = action {
+                                        if build.blas_s_built.iter().any(|blas| blas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate)
+                                            || build.tlas_s_built.iter().any(|entry| entry.tlas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate) {
+                                            submitted_as_builds.push(build.clone());
+                                        }
+                                    }
+                                }
                                 cmd_buf_data.set_acceleration_structure_dependencies(&snatch_guard);
                                 cmd_buf_data.into_baked_commands()
                             }
@@ -1442,6 +1453,21 @@ impl Queue {
                     break 'error Err(e.into());
                 }
 
+                for build in &submitted_as_builds {
+                    for blas in &build.blas_s_built {
+                        *blas.submitted_refit.write() = None;
+                    }
+                    for tlas_build in &build.tlas_s_built {
+                        let generation = *tlas_build.tlas.built_index.read();
+                        *tlas_build.tlas.submitted_refit.write() = tlas_build.refit.and_then(|(_, count)| generation.map(|generation| (generation, count)));
+                    }
+                    for refit in &build.blas_refits {
+                        let generation = refit.blas.built_index.read().unwrap();
+                        *refit.blas.submitted_refit.write() = Some(crate::ray_tracing::SubmittedBlasRefit {
+                            generation, geometries: refit.geometries.clone(),
+                        });
+                    }
+                }
                 drop(command_index_guard);
 
                 // Advance the successful submission index.
@@ -1579,6 +1605,7 @@ impl Queue {
             built_index: RwLock::new(rank::BLAS_BUILT_INDEX, Some(built_index)),
             handle,
             label: new_label,
+            submitted_refit: RwLock::new(rank::BLAS_BUILT_INDEX, None),
             tracking_data: TrackingData::new(blas.device.tracker_indices.blas_s.clone()),
             compaction_buffer: None,
             compacted_state: Mutex::new(rank::BLAS_COMPACTION_STATE, BlasCompactState::Compacted),
@@ -1807,6 +1834,7 @@ fn validate_command_buffer(
     submit_surface_textures_owned: &mut FastHashMap<*const Texture, Arc<Texture>>,
     used_surface_textures: &mut track::TextureUsageScope,
     command_index_guard: &mut RwLockWriteGuard<CommandIndices>,
+    as_update_validation: &mut crate::ray_tracing::AsUpdateValidation,
 ) -> Result<(), QueueSubmitError> {
     command_buffer.same_device_as(queue)?;
 
@@ -1857,7 +1885,7 @@ fn validate_command_buffer(
         }
 
         if let Err(e) =
-            cmd_buf_data.validate_acceleration_structure_actions(snatch_guard, command_index_guard)
+            cmd_buf_data.validate_acceleration_structure_actions(snatch_guard, command_index_guard, as_update_validation)
         {
             return Err(e.into());
         }

@@ -44,15 +44,16 @@ cat > "$work/vork.entitlements" <<'PLIST'
 <key>com.apple.security.cs.disable-library-validation</key><true/>
 </dict></plist>
 PLIST
+adapter="$(dirname "$1")/vork-slang-filesystem"
 while IFS= read -r -d '' binary; do
   if file -b "$binary" | grep -q 'Mach-O'; then
     options=(--options runtime)
-    if [ "$binary" = "$1" ]; then
+    if [ "$binary" = "$1" ] || [ "$binary" = "$adapter" ]; then
       options+=(--entitlements "$work/vork.entitlements")
     fi
     echo "Signing $binary"
     codesign --force --timestamp "${options[@]}" --keychain "$keychain" --sign "$identity" "$binary"
     codesign --verify --strict "$binary"
   fi
-done < <(find "$@" -type f -print0)
+done < <(find "$@" "$adapter" -type f -print0)
 echo "VORK_MACOS_SIGNED=true" >> "$GITHUB_ENV"

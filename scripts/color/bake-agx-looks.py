@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory() as tmp:
     display = ocio.DisplayViewTransform(src='Linear Rec.709', display='sRGB', view='AgX')
     display.setLooksBypass(True)
     # Retain the original Blender PNG16-derived None samples in the single library image.
-    neutral = OpenEXR.File(str(ROOT / 'libraries/blender/agx.exr')).channels()['RGB'].pixels[:65].copy()
+    neutral = OpenEXR.File(str(ROOT / 'libraries/std/agx.exr')).channels()['RGB'].pixels[:65].copy()
     bands = [neutral]
     for look in LOOKS:
         transform = ocio.GroupTransform()
@@ -44,8 +44,8 @@ with tempfile.TemporaryDirectory() as tmp:
         config.getProcessor(transform).getDefaultCPUProcessor().applyRGB(rgb)
         bands.append(rgb.astype(np.float16).reshape(65,65,65,3).transpose(1,0,2,3).reshape(65,65*65,3))
     image = np.ascontiguousarray(np.concatenate(bands))
-    OpenEXR.File({'compression': OpenEXR.ZIP_COMPRESSION, 'type': OpenEXR.scanlineimage}, {'RGB': image}).write(str(ROOT / 'libraries/blender/agx.exr'))
-    (ROOT / 'libraries/blender/agx-manifest.json').write_text(json.dumps({
+    OpenEXR.File({'compression': OpenEXR.ZIP_COMPRESSION, 'type': OpenEXR.scanlineimage}, {'RGB': image}).write(str(ROOT / 'libraries/std/agx.exr'))
+    (ROOT / 'libraries/std/agx-manifest.json').write_text(json.dumps({
         'blender': '5.2.1', 'display': 'sRGB', 'view': 'AgX', 'looks': ['None', *LOOKS],
         'size': 65, 'min_log2': -12.47393, 'max_log2': 12.5260688117,
         'format': 'OpenEXR half RGB, ZIP; sample (r,g,b) of look L at x = 65 b + r, y = 65 L + g; None retains the original PNG16-derived samples',

@@ -44,13 +44,13 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
     assert!(root.contains("all includes render.aovs"));
     assert!(root.contains("applies to every --out"));
     let std_all = help_args(&["std", "--all"]);
-    assert!(std_all.contains("round shapes use Y as axis"));
-    assert_eq!(std_all.matches("Radii and bevels clamp").count(), 1);
-    assert!(std_all.contains("extrusion rims fit depth/2 and profile clearance"));
+    assert!(std_all.contains("preserving exact planar faces"));
+    assert_eq!(std_all.matches("Rounded-box radii fit").count(), 1);
+    assert!(std_all.contains("Extrusion rims fit depth/2") && std_all.contains("profile clearance"));
     assert!(!root.contains("rejects unsafe profile clearance"));
-    assert!(!root.contains("round shapes use Y as axis"));
+    assert!(!root.contains("preserving exact planar faces"));
     // Deep library signatures and inputs remain one --all away.
-    for (library, detail) in [("std", "std.procedurals: noise"), ("blender", "blender/filmic look:"), ("post", "source white to D65")] {
+    for (library, detail) in [("std", "std.color: blackbody"), ("blender", "blender/filmic look:")] {
         assert!(!help(library).contains(detail), "{library} default shows {detail}");
         assert!(help_args(&[library, "--all"]).contains(detail), "{library} --all lost {detail}");
     }
@@ -60,8 +60,17 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
         assert!(!blender_all.contains(removed), "blender --all advertises removed media: {removed}");
     }
     assert!(!std_all.contains("scatter:"));
-    // Common builders stay on root; specialist signatures remain in std --all.
-    assert!(root.contains("sphere: {name?:string") && root.contains("Std builders return {buffers,geometry}"));
+    // Root keeps the fragment contract; retained signatures remain on demand.
+    assert!(root.contains("Std builders return {buffers,geometry}"));
+    let std_page = help("std");
+    let programs_page = help("programs");
+    for builder in ["box", "sphere", "grid", "cylinder", "cone", "torus", "capsule", "revolve"] {
+        let signature = format!("{builder}:");
+        assert!(!root.contains(&signature), "root includes advanced signature {signature}");
+        assert!(std_all.lines().any(|line| line.starts_with(&signature)), "std --all missing {builder}");
+        assert!(std_page.contains(builder), "std page missing {builder}");
+        assert!(programs_page.contains(builder), "programs page missing {builder}");
+    }
     assert!(std_all.contains("rounded_box:"));
     for page in [&root, &std_all] {
         assert!(page.contains("omit name: the table key or inline position owns identity"));
@@ -218,11 +227,11 @@ fn wrong_field_prefix_points_to_the_field_and_setting_override() {
 
 #[test]
 fn library_and_program_field_lookups_point_to_library_help() {
-    for library in ["std", "blender", "post"] {
+    for library in ["std", "blender"] {
         for path in [library.to_owned(), format!("{library}/unknown_program")] {
             let error = field_error(&path);
-            assert!(error.contains("library/program"), "{error}");
-            assert!(error.contains(&format!("vork help {library}`")), "{error}");
+            assert!(error.contains("Nearest valid names"), "{error}");
+            assert!(error.contains(&format!("vork help {library} --all`")), "{error}");
         }
     }
 }
@@ -242,8 +251,8 @@ fn field_typos_rank_full_paths_leaves_and_prefix_areas() {
 
 #[test]
 fn procedural_help_exposes_callable_signatures_and_enum_spelling() {
-    assert!(help("std").contains("import std.procedurals"));
-    let all = help_args(&["std", "--all"]);
+    assert!(help_args(&["blender", "--all"]).contains("blender.procedurals: noise"));
+    let all = help_args(&["blender", "--all"]);
     for signature in ["noise(p, scale=5", "noise_color: same inputs", "voronoi(p, scale=5",
         "white_noise(p, dimensions=3", "gabor(p, scale=5",
         "Smooth_F1", "Chebychev",
@@ -288,11 +297,11 @@ fn optics_and_compositor_programs_are_directly_findable() {
         assert!(help_args(&["field", &format!("std/camera.{name}")]).contains(&line));
     }
     assert!(help_args(&["field", "camera.material"]).contains("node.material (camera)"));
-    let bloom = help("std/bloom");
-    for contract in ["prepare: requires original", "combine: requires original and source", "{channel:color}"] {
-        assert!(bloom.contains(contract), "{contract}");
-    }
-    assert!(!help("post").contains("post/glare"));
+    let compositor=help_args(&["compositor","--all"]);
+    assert!(compositor.contains("compositor_sample(image,uv)"));
+    let root=help_args(&[]);
+    assert!(!root.contains("post: colour adaptation"));
+    assert!(!root.contains("blender: Blender Slang functions"));
 }
 
 #[cfg(target_os = "linux")]
@@ -314,8 +323,8 @@ fn bundled_program_contracts_are_exactly_addressable() {
     for leaf in ["emission_luminance", "subsurface_radius_scale"] {
         let output = Command::new(env!("CARGO_BIN_EXE_vork"))
             .args(["help", "field", &format!("std/openpbr.{leaf}")]).output().unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("material.inputs.{leaf}")));
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("std/openpbr.{leaf}:")));
     }
 }
 
@@ -335,4 +344,53 @@ fn first_render_guidance_explains_profiles_and_display_white() {
     assert!(render.contains("std/standard"));
     assert!(render.contains("sample passes recorded"));
     assert!(help_args(&["fluid"]).contains("vork.fluid"));
+}
+
+#[test]
+fn every_bundled_program_input_is_addressable() {
+    for library in vork_scene::libraries::LIBRARIES {
+        let listing = help_args(&[library.name, "--all"]);
+        for module in library.modules.iter().filter(|module| module.material) {
+            let fields = help_args(&["field", module.name]);
+            assert!(!fields.is_empty(), "{}", module.name);
+            for line in fields.lines() {
+                let path = line.split_once(':').unwrap().0;
+                assert_eq!(help_args(&["field", path]).trim(), line);
+                assert!(listing.contains(line), "{path}");
+            }
+        }
+    }
+    for field in ["std/agx.exposure", "std/openpbr.emission_luminance", "std/openpbr.transmission_depth", "material.inputs.transmission_depth"] {
+        assert!(help_args(&["field", field]).contains("default"));
+    }
+    assert!(help_args(&["field", "std/agx.exposure"]).contains("stops"));
+    assert!(help_args(&["field", "std/agx.lut"]).contains("default bundled image"));
+    let error = field_error("std/agx.exposur");
+    assert!(error.contains("std/agx.exposure") && error.contains("vork help std --all"));
+}
+
+#[test]
+fn std_filename_diagnostic_names_json_and_stdin() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vork")).args(["std", "expand", "scene.json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("JSON argument") && message.contains("vork std expand - < scene.json"), "{message}");
+    let output = Command::new(env!("CARGO_BIN_EXE_vork")).args(["std", "rounded_box", "{}"]).output().unwrap();
+    assert!(output.status.success());
+}
+
+#[test]
+fn quoted_help_arguments_match_separate_arguments() {
+    for (quoted, separate) in [
+        ("programs --all", vec!["programs", "--all"]),
+        ("field node.target", vec!["field", "node.target"]),
+        ("  profiles  ", vec!["profiles"]),
+        ("--all", vec!["--all"]),
+    ] {
+        assert_eq!(help_args(&[quoted]), help_args(&separate));
+    }
+    for args in [vec!["nope --all"], vec!["programs extra"], vec!["field node.target extra"], vec!["field node.target", "other"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vork")).arg("help").args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
 }

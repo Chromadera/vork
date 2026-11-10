@@ -1,5 +1,5 @@
 // Clean-room photographic glare kernels; Blender 5.2 socket names/defaults.
-// Bloom is std/bloom.
+// Bloom is authored separately in bloom.slang.
 import vork;
 public enum GlareType { Streaks, Ghosts, Fog_Glow, Simple_Star };
 public enum GlareQuality { High, Medium, Low };

@@ -4,6 +4,7 @@
 import vork_constants;
 import frame;
 import stream;
+import point_stream;
 import material;
 import surface;
 import decoupled_slots;
@@ -46,9 +47,9 @@ struct Visibility {
     [[vk::location(2)]] nointerpolation uint sample : VISIBILITY_SAMPLE;
 };
 [shader("vertex")]
-Visibility vs([[vk::location(0)]] float3 p : POSITION, uint direct : SV_VulkanInstanceID, [[vk::location(REG_CAMERA_INSTANCE_LOCATION)]] uint mapped : CAMERA_INSTANCE, VISIBILITY_PASS) {
+Visibility vs([[vk::location(0)]] float3 p : POSITION, uint vertex_index : SV_VertexID, uint direct : SV_VulkanInstanceID, [[vk::location(REG_CAMERA_INSTANCE_LOCATION)]] uint mapped : CAMERA_INSTANCE, VISIBILITY_PASS) {
     let object=camera_object(direct,mapped);
-    let single=opaque_single_depth(p,object);
+    let single=opaque_single_depth(point_position(p,object,vertex_index),object);
     Visibility o;
     // A culled object's clip position stays outside the frustum after the sub-pixel shift.
     o.position=offset(single.position,pass,disk);
@@ -116,7 +117,7 @@ TransparentDepth transparent_fragments_fs(Varying v, uint primitive : SV_Primiti
             let z=field_depth(v.object,hit);
             if(stored!=0u && z>asfloat(~stored)) break;
             record_transparent(v,~crossing);
-            hit=field_intersection<FragmentGeometry>(descriptor,v.object,origin,direction,hit.t+REG_FP32_GAMMA7*max(1.,abs(hit.t)),camera_far_distance(origin,direction));
+            hit=field_intersection<FragmentGeometry>(FragmentGeometry(fragment_draw_table,fragment_hit_buffers),descriptor,v.object,origin,direction,hit.t+REG_FP32_GAMMA7*max(1.,abs(hit.t)),camera_far_distance(origin,direction));
         }
         return TransparentDepth(depth);
     }
@@ -135,7 +136,7 @@ VisibilityOutput single_fs(Visibility v, bool front : SV_IsFrontFace, uint primi
 // alpha decided per sample of the exposure (strata times visibility samples).
 [shader("vertex")]
 Varying masked_vs([[vk::location(0)]] VertexIn v, uint direct : SV_VulkanInstanceID, [[vk::location(REG_CAMERA_INSTANCE_LOCATION)]] uint mapped : CAMERA_INSTANCE, VISIBILITY_PASS) {
-    var o=vertex(v,camera_object(direct,mapped));
+    let id=camera_object(direct,mapped);var o=vertex(point_vertex(v,id),id);
     o.position=offset(o.position,pass,disk);
     o.sample=pass.z;
     return o;

@@ -1,4 +1,4 @@
-//! Stage 1 convex carrier admission, with CPU interval and physical oracles.
+//! Optional convex-plane certification, with CPU interval and physical oracles.
 //! Planes retain f64 here: this does not certify a rounded GPU representation.
 use std::collections::BTreeMap;
 

@@ -3,12 +3,9 @@ use super::*;
 
 use std::collections::BTreeMap;
 
-// Qualified stage 1 convex carrier admission.
+// Small convex carriers retain their plane fast path; all others use the BVH.
 #[path = "medium_convex_spike.rs"]
 mod convex_spike;
-#[cfg(test)]
-#[path = "medium_work.rs"]
-mod work_contract;
 
 pub(crate) struct Installed {
     names: BTreeMap<String, (u32, u32)>,
@@ -125,7 +122,27 @@ pub(super) fn install(
     })
 }
 
+fn convex_carrier(draw: &install::Draw) -> Option<convex_spike::Convex> {
+    // Bound certification cost, not scene admission. Larger carriers fall back.
+    if draw.evaluated() || draw.count > 32*3 {return None;}
+    let geometry=draw.exit_geometry.as_ref()?;
+    let start=(draw.primitive_start as usize).checked_mul(3)?;
+    let indices=geometry.indices.get(start..start.checked_add(draw.count as usize)?)?;
+    let faces=indices.chunks_exact(3).map(|i|Some([
+        geometry.vertices.get(i[0] as usize)?.POSITION,
+        geometry.vertices.get(i[1] as usize)?.POSITION,
+        geometry.vertices.get(i[2] as usize)?.POSITION,
+    ])).collect::<Option<Vec<_>>>()?;
+    convex_spike::Convex::certify(&faces).ok()
+}
+
 impl super::Installed {
+    pub(crate) fn select_boundary_format(&mut self,draws:&[install::Draw],materials:&BTreeMap<String,usize>,force_general:bool) {
+        let carriers:std::collections::BTreeSet<_>=self.instances.names.keys().filter_map(|name|materials.get(name).copied()).collect();
+        self.native.convex=!force_general && draws.iter().filter(|draw|carriers.contains(&draw.material))
+            .all(|draw|convex_carrier(draw).is_some());
+        self.native.identity.push(u8::from(self.native.convex));
+    }
     pub(crate) fn mesh_words(
         &mut self,
         _r: &Renderer,
@@ -141,10 +158,6 @@ impl super::Installed {
                 bounded.names.get(name).map(|binding| (*index, (name.as_str(), *binding)))
             })
             .collect();
-        let count=draws.iter().filter(|draw|bindings.contains_key(&draw.material))
-            .map(|draw|draw.instances.len()).sum();
-        if self.native.convex { ensure!(count <= 8, "stage 1 fog supports at most eight finite carriers; combine carriers or render the volume externally"); }
-        admit_domains(count)?;
         let animated = crate::materials::animated_inputs(scene)?;
         if self.native.tracking {
             for (name, (_, base)) in &bounded.names {
@@ -169,12 +182,12 @@ impl super::Installed {
             };
             ensure!(
                 !draw.evaluated(),
-                "stage 1 fog does not support deformed carrier boundaries; bake a closed convex mesh first"
+                "stage 1 fog does not support deformed carrier boundaries; bake a closed triangle mesh first"
             );
             let geometry = draw
                 .exit_geometry
                 .as_ref()
-                .context("unsupported stage 1 fog carrier geometry; use a closed convex triangle mesh, or render the volume externally")?;
+                .context("unsupported stage 1 fog carrier geometry; use a closed triangle mesh, or render the volume externally")?;
             validate_boundary(geometry)?;
             ensure!(
                 draw.count as usize == geometry.indices.len(),
@@ -189,7 +202,7 @@ impl super::Installed {
                     .collect();
                 if self.native.convex {
                     let faces = triangles.iter().map(|t| t.map(|v| v.to_array())).collect::<Vec<_>>();
-                    let carrier = convex_spike::Convex::certify(&faces).map_err(anyhow::Error::msg).context("unsupported stage 1 fog carrier; use a closed convex mesh of at most 32 triangles, or render the volume externally")?;
+                    let carrier = convex_spike::Convex::certify(&faces).map_err(anyhow::Error::msg).context("certified convex medium carrier changed during installation")?;
                     // One record and a bounded plane array; reuse the domain descriptor.
                     self.words.extend([0; 8]);
                     self.words[root as usize + 7] = carrier.planes.len() as u32;
@@ -379,30 +392,26 @@ mod tests {
         assert!(validate_boundary(&mesh).is_err());
         Ok(())
     }
-    fn std_boundary(builder: &str, mut options: serde_json::Value) -> geometry::Geometry {
-        options["name"] = "test".into();
-        let fragment: serde_json::Value =
-            serde_json::from_str(&vork_std::evaluate(builder, &options.to_string()).unwrap())
-                .unwrap();
-        let positions: Vec<[f32; 3]> =
-            serde_json::from_value(fragment["buffers"]["test_position"]["data"].clone()).unwrap();
-        let indices =
-            serde_json::from_value(fragment["buffers"]["test_indices"]["data"].clone()).unwrap();
-        geometry::Geometry::new(
-            positions
-                .into_iter()
-                .map(|position| Vertex {
-                    POSITION: position,
-                    ..Vertex::zeroed()
-                })
-                .collect(),
-            indices,
-            0,
-        )
+    fn boundary_fixture(builder: &str, mut options: serde_json::Value) -> geometry::Geometry {
+        static FIXTURES:std::sync::OnceLock<serde_json::Value>=std::sync::OnceLock::new();
+        let cases=FIXTURES.get_or_init(||serde_json::from_str(include_str!("../tests/fixtures/boundary-meshes.json")).unwrap());
+        let data=include_bytes!("../tests/fixtures/boundary-meshes.bin");
+        options["name"]="test".into();
+        let item=cases.as_array().unwrap().iter().find(|v|v["shape"]==builder && v["options"]==options)
+            .unwrap_or_else(||panic!("missing authored boundary fixture: {builder} {options}"));
+        let at=|field:&str|item[field].as_u64().unwrap() as usize;
+        let start=at("offset");let count=at("count");
+        let vertices=data[start..start+count*12].chunks_exact(12).map(|row|Vertex {
+            POSITION:std::array::from_fn(|i|f32::from_le_bytes(row[i*4..i*4+4].try_into().unwrap())),
+            ..Vertex::zeroed()
+        }).collect();
+        let start=at("indices_offset");let count=at("indices_count");
+        let indices=data[start..start+count*4].chunks_exact(4).map(|v|u32::from_le_bytes(v.try_into().unwrap())).collect();
+        geometry::Geometry::new(vertices,indices,0)
     }
 
     #[test]
-    fn closed_std_primitives_are_exact_volume_boundaries() {
+    fn closed_authored_meshes_are_exact_volume_boundaries() {
         use serde_json::json;
         for r in [1., 6e6] {
             for segments in [3, 4, 7, 16, 31, 32] {
@@ -438,7 +447,7 @@ mod tests {
                             json!({"outline":[[0.,0.],[r,0.],[r,r],[0.,r]],"depth":r}),
                         ),
                     ] {
-                        validate_boundary(&std_boundary(builder, options.clone()))
+                        validate_boundary(&boundary_fixture(builder, options.clone()))
                             .unwrap_or_else(|e| panic!("{builder} {options}: {e}"));
                     }
                     for mut profile in [
@@ -447,7 +456,7 @@ mod tests {
                     ] {
                         for _ in 0..2 {
                             let options = json!({"profile":profile,"segments":segments});
-                            validate_boundary(&std_boundary("revolve", options.clone()))
+                            validate_boundary(&boundary_fixture("revolve", options.clone()))
                                 .unwrap_or_else(|e| panic!("revolve {options}: {e}"));
                             profile.reverse();
                         }
@@ -458,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn std_open_rims_and_real_cracks_still_fail() {
+    fn authored_open_rims_and_real_cracks_still_fail() {
         use serde_json::json;
         for (builder, options) in [
             ("grid", json!({})),
@@ -467,9 +476,9 @@ mod tests {
                 json!({"profile":[[1.,1.],[1.,-1.]],"segments":7}),
             ),
         ] {
-            assert!(validate_boundary(&std_boundary(builder, options)).is_err());
+            assert!(validate_boundary(&boundary_fixture(builder, options)).is_err());
         }
-        let mut mesh = std_boundary("sphere", json!({"segments":7,"rings":3}));
+        let mut mesh = boundary_fixture("sphere", json!({"segments":7,"rings":3}));
         // Move just one UV seam vertex by a representable amount, leaving an authored crack.
         mesh.vertices[8].POSITION[2] += 1e-7;
         assert!(validate_boundary(&mesh).is_err());
@@ -477,19 +486,6 @@ mod tests {
 }
 
 
-fn admit_domains(count: usize) -> Result<()> {
-    ensure!(count <= 256, "media require {count} bounded domains; the supported work budget is 256 (including possible overlaps); reduce or combine medium boundaries");
-    Ok(())
-}
-#[cfg(test)]
-mod admission_tests {
-    #[test]
-    fn excessive_domains_refuse_instead_of_truncating_transport() {
-        assert!(super::admit_domains(256).is_ok());
-        let error=super::admit_domains(257).unwrap_err().to_string();
-        assert!(error.contains("257") && error.contains("reduce or combine"));
-    }
-}
 
 impl super::Installed {
     pub(crate) fn dense_bindings(&self,scene:&v2::Scene,medium_base:u32,draws:&[install::Draw],materials:&BTreeMap<String,usize>)->Result<(Vec<(String,u32)>,Vec<crate::dense::Certificate>)> {

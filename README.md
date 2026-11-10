@@ -194,14 +194,13 @@ for topic fields, and `vork help field PATH` for an exact field reference.
 Use the [prompt above](#paste-this-to-your-agent) to start.
 
 Python and TypeScript can author ordinary scene JSON through the SDKs. You can
-also write JSON directly. For example, save this as `scene.json` (also available as
-[examples/first-scene.json](examples/first-scene.json)):
+also write JSON directly. For example, save this as `scene.json`:
 
 ```json
 {"version":2,"nodes":[
-  {"type":"mesh","geometry":{"std":"sphere","radius":1},
+  {"type":"mesh","geometry":{"std":"rounded_box","size":[2,2,2],"radius":0.3},
    "materials":[{"inputs":{"base_color":[0.12,0.35,0.65],"specular_roughness":0.3}}]},
-  {"type":"mesh","translation":[0,-1,0],"geometry":{"std":"grid","size":[10,10]},
+  {"type":"mesh","translation":[0,-1.1,0],"geometry":{"std":"rounded_box","size":[10,0.2,10],"radius":0},
    "materials":[{"inputs":{"base_color":[0.35,0.35,0.35]}}]},
   {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0,0],
    "energy":700,"size":4,"color":[1,0.92,0.8]},
@@ -384,12 +383,15 @@ see [the method](benchmarks/README.md).
 
 ## Research-preview limits
 
-Participating media (fog, haze, smoke and volumes) are unsupported in 0.3.
-Used medium bindings and volume topology are refused; removed programs such as
-`std/fog` fail lookup even in unused definitions. Bake an image plate and composite
-it, or render the medium externally. For a deliberately dry alternative, remove
-medium-only nodes, bindings and definitions while preserving shared surfaces.
-See `vork help upgrade` and `vork help limits`.
+Current source builds support authored fog under the admission rules in
+`vork help fog`; `vork help limits` describes the installed binary's capabilities.
+
+The released 0.3 binary does not support participating media (fog, haze, smoke or
+volumes): it refuses used medium bindings and volume topology. On that release,
+bake an image plate and composite it, render the medium externally, or remove
+medium-only nodes, bindings and definitions for a dry alternative.
+Removed programs such as `std/fog` still fail lookup even in unused definitions;
+current media use authored programs. See `vork help upgrade`.
 
 Large scenes
 and dense transparency can fail, including on Mac; reducing image resolution
@@ -535,7 +537,7 @@ runtime companions beside the executable.
 ### Manual archive install (Linux or Mac)
 
 The separately downloadable `install.sh` downloads the release from GitHub; to install an archive you already
-have without downloading again, use the manual steps below.
+have without downloading again, use these steps.
 
 Download your platform's `.tar.gz` and `SHA256SUMS` from the release page into a
 new empty folder. In that folder, verify and install the entire archive:

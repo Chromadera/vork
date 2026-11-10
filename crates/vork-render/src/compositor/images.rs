@@ -316,7 +316,9 @@ pub(super) fn pass(
         "compositor dispatch exceeds device limits"
     );
     let d = &r.device;
-    let module=if r.adapter_info.backend==wgpu::Backend::Vulkan && !layout.iter().any(|entry|matches!(entry.ty,wgpu::BindingType::Sampler(_))) {
+    let module=if r.check_only {
+        crate::native::module(d,"check compositor image pass",None,Some(""),(group[0],group[1],1))
+    } else if r.adapter_info.backend==wgpu::Backend::Vulkan && !layout.iter().any(|entry|matches!(entry.ty,wgpu::BindingType::Sampler(_))) {
         // Vulkan HAL packs each group's sparse bindings in sorted order. Its
         // automatic shader remapping applies to Naga modules, not passthrough.
         let mut authored:Vec<_>=layout.iter().map(|entry|entry.binding).collect();authored.sort_unstable();

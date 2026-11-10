@@ -10,7 +10,9 @@ use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-fn default_name() -> String { "text".into() }
+fn default_name() -> String {
+    "text".into()
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,7 +55,8 @@ const ALIGN_Y: &[&str] = &["top_baseline", "top", "center", "bottom_baseline", "
 /// Builder facts generated from the same defaults used by serde.
 pub fn input_help() -> String {
     let d = Options::default();
-    format!("std/text.name: string; default {name}; standalone prefix only.\n\
+    format!(
+        "std/text.name: string; default {name}; standalone prefix only.\n\
 std/text.body: string; required; text to lay out.\n\
 std/text.font: string; required; TrueType/OpenType file.\n\
 std/text.size: number; default {size}; metres per font em; > 0.\n\
@@ -62,9 +65,16 @@ std/text.bevel_depth: number; default {bevel}; metres; >= 0.\n\
 std/text.bevel_resolution: uint; default {resolution}; range [0,32]; subdivisions.\n\
 std/text.align_x: enum {x_tokens}; default {x}.\n\
 std/text.align_y: enum {y_tokens}; default {y}.\n",
-        name=d.name, size=d.size, extrude=d.extrude, bevel=d.bevel_depth,
-        resolution=d.bevel_resolution, x=d.align_x, y=d.align_y,
-        x_tokens=ALIGN_X.join("|"), y_tokens=ALIGN_Y.join("|"))
+        name = d.name,
+        size = d.size,
+        extrude = d.extrude,
+        bevel = d.bevel_depth,
+        resolution = d.bevel_resolution,
+        x = d.align_x,
+        y = d.align_y,
+        x_tokens = ALIGN_X.join("|"),
+        y_tokens = ALIGN_Y.join("|")
+    )
 }
 
 fn default_size() -> f32 {
@@ -276,14 +286,8 @@ fn validate_options(o: &Options) -> Result<()> {
             && o.bevel_resolution <= 32,
         "invalid text size/extrude/bevel"
     );
-    ensure!(
-        ALIGN_X.contains(&o.align_x.as_str()),
-        "invalid align_x"
-    );
-    ensure!(
-        ALIGN_Y.contains(&o.align_y.as_str()),
-        "invalid align_y"
-    );
+    ensure!(ALIGN_X.contains(&o.align_x.as_str()), "invalid align_x");
+    ensure!(ALIGN_Y.contains(&o.align_y.as_str()), "invalid align_y");
     Ok(())
 }
 pub(crate) fn evaluate(argument: &str) -> Result<String> {

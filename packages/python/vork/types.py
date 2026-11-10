@@ -7,7 +7,7 @@ AovType = Literal['value', 'color']
 Background = Union[list[float], 'BackgroundMode']
 BackgroundMode = Literal['environment', 'transparent']
 Blend = Literal['replace', 'add']
-Buffer = Union['InlineBuffer', 'FileBuffer', 'DenseBuffer']
+Buffer = Union['InlineBuffer', 'FileBuffer', 'DenseBuffer', 'DenseFileBuffer']
 BufferType = Literal['f32', 'i32', 'u32', 'vec2', 'vec3', 'vec4', 'uvec4', 'mat4']
 Channel = Literal['r', 'g', 'b', 'a', 'rgb']
 Clock = Union[float, str]
@@ -18,6 +18,7 @@ ComputeDispatch = Union[int, list[int]]
 ComputeSchedule = Union[Literal['frame', 'install'], Literal['simulation']]
 Factor = Union[float, list[float]]
 Geometry = Union['BufferGeometry', 'StdGeometry']
+GeometryStage = Literal['deform', 'compute', 'displace']
 InlineDataSchema = Union[list[float], list[list[float]]]
 Input = Union[float, list[float], bool, 'GeometryBinding', 'TextureBinding', 'AttributeBinding', 'GridBinding', 'AovBinding', 'ChannelBinding', 'NodeBinding', str]
 Interpolation = Literal['STEP', 'LINEAR', 'CUBICSPLINE']
@@ -49,13 +50,15 @@ AttributeBinding = TypedDict('AttributeBinding', {'attribute': Required[str], 'c
 InlineBuffer = TypedDict('InlineBuffer', {'count': Union[int, None], 'data': Required[Union['InlineDataSchema']], 'dims': None, 'file': None, 'grid': Union[str, None], 'offset': int, 'type': Required['BufferType']}, total=False)
 FileBuffer = TypedDict('FileBuffer', {'count': Union[int, None], 'data': None, 'dims': None, 'file': Required[Union[str]], 'grid': Union[str, None], 'offset': int, 'type': Required['BufferType']}, total=False)
 DenseBuffer = TypedDict('DenseBuffer', {'count': None, 'data': Union['InlineDataSchema', None], 'dims': Required[list[int]], 'file': None, 'grid': None, 'offset': int, 'type': Required['BufferType']}, total=False)
+DenseFileBuffer = TypedDict('DenseFileBuffer', {'count': Union[int, None], 'data': None, 'dims': Required[list[int]], 'file': Required[Union[str]], 'grid': None, 'offset': int, 'type': Required['BufferType']}, total=False)
 ChannelBinding = TypedDict('ChannelBinding', {'channel': Required['KernelChannel']}, total=False)
 Clip = TypedDict('Clip', {'file': Union[str, None], 'index': Union[int, None], 'name': Union[str, None], 'target': Required[str]}, total=False)
 CompositeNode = TypedDict('CompositeNode', {'material': Required['NameOr'], 'name': Union[str, None], 'resolution': Union['CompositeResolution', None]}, total=False)
 EdgeCrease = TypedDict('EdgeCrease', {'crease': Required[float], 'vertices': Required[list[int]]}, total=False)
-BufferGeometry = TypedDict('BufferGeometry', {'attributes': Required[dict[str, 'NameOr3']], 'count': Union['NameOr3', None], 'crease_edge': list['EdgeCrease'], 'curve_vertex_counts': Union['NameOr3', None], 'face_vertex_counts': Union[list[int], None], 'ids': Union['NameOr3', None], 'indices': Union['NameOr3', None], 'material_ranges': list['MaterialRange'], 'morphs': dict[str, 'Morph'], 'subdivision': Union['SubdivisionSurface', None], 'topology': 'Topology', 'widths': Union['NameOr3', None]}, total=False)
+BufferGeometry = TypedDict('BufferGeometry', {'attributes': Required[dict[str, 'NameOr3']], 'count': Union['NameOr3', None], 'crease_edge': list['EdgeCrease'], 'curve_vertex_counts': Union['NameOr3', None], 'face_vertex_counts': Union[list[int], None], 'ids': Union['NameOr3', None], 'indices': Union['NameOr3', None], 'material_ranges': list['MaterialRange'], 'morphs': dict[str, 'Morph'], 'status': Union['GeometryStatus', None], 'subdivision': Union['SubdivisionSurface', None], 'topology': 'Topology', 'widths': Union['NameOr3', None]}, total=False)
 StdGeometry = TypedDict('StdGeometry', {'font': Union[str, None], 'std': Required[str]}, total=False)
 GeometryBinding = TypedDict('GeometryBinding', {'geometry': Required[str]}, total=False)
+GeometryStatus = TypedDict('GeometryStatus', {'buffer': Required['NameOr3'], 'message': Required[str]}, total=False)
 GridBinding = TypedDict('GridBinding', {'grid': Required['NameOr3']}, total=False)
 Image = TypedDict('Image', {'color_space': Union['ColorSpace', None], 'file': Union[str, None], 'mag_filter': 'MagFilter', 'min_filter': 'MinFilter', 'render': Union['ImageRender', None], 'time': Union['Clock', None], 'wrap_s': 'Wrap', 'wrap_t': 'Wrap'}, total=False)
 ImageRender = TypedDict('ImageRender', {'background': 'Background', 'camera': Union[str, None], 'compositor': list['CompositeEntry'], 'resolution': list[int], 'root': Union[str, None]}, total=False)
@@ -85,4 +88,4 @@ Skin = TypedDict('Skin', {'inverse_bind_matrices': Required['NameOr3'], 'joints'
 SubdivisionSurface = TypedDict('SubdivisionSurface', {'render_levels': int, 'subdivision_type': 'SubdivisionType', 'use_limit_surface': bool}, total=False)
 TextureBinding = TypedDict('TextureBinding', {'image': Required['NameOr4']}, total=False)
 Track = TypedDict('Track', {'interpolation': Union['Interpolation', None], 'keys': Required['Keys'], 'path': Required[list[str]]}, total=False)
-Scene = TypedDict('Scene', {'$schema': Union[str, None], 'animation': list['Layer'], 'buffers': dict[str, 'Buffer'], 'geometry': dict[str, 'Geometry'], 'images': dict[str, 'Image'], 'materials': dict[str, 'Material'], 'nodes': Required[list['Node']], 'programs': dict[str, 'Program'], 'propagation': Union['Propagation', None], 'render': 'Render', 'simulation': Union['Simulation', None], 'version': Required[Literal[2]]}, total=False)
+Scene = TypedDict('Scene', {'$schema': Union[str, None], 'animation': list['Layer'], 'buffers': dict[str, 'Buffer'], 'geometry': dict[str, 'Geometry'], 'geometry_stages': list['GeometryStage'], 'images': dict[str, 'Image'], 'materials': dict[str, 'Material'], 'nodes': Required[list['Node']], 'programs': dict[str, 'Program'], 'propagation': Union['Propagation', None], 'render': 'Render', 'simulation': Union['Simulation', None], 'version': Required[Literal[2]]}, total=False)

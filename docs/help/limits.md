@@ -7,13 +7,10 @@ macOS and Linux provide install.sh as a separate release asset.
 The bundled Slang toolchain targets macOS 26; older macOS is unqualified.
 See README.md (Install) for binary setup.
 
-Stage 1 fog supports finite homogeneous convex carriers and constant/height
-world media through complete-camera path transport. See vork help fog for the
-program contract and limits. Arbitrary smoke, grids and procedural density,
-custom surface callbacks and nonconvex carriers remain unsupported; use constant
-convex carriers or render externally and composite a plate. Surface subsurface
-scattering remains supported. std/fog and blender/principled_volume stay removed;
-author a medium program for the supported scope.
+Homogeneous fog uses closed triangle carriers or constant/height world media
+through complete-camera path transport. Arbitrary smoke, grids, procedural density
+and custom surface callbacks remain unsupported. See vork help fog.
+
 Additional environment lights also fail;
 combine their contributions in one environment program or precomposite their maps.
 
@@ -29,6 +26,9 @@ direct contributions are unclamped. Bright indirect lighting can still lose ener
 A non-finite path contribution (an infinite light sample) is dropped as zero rather
 than refusing the frame. Each affected frame warns with its dropped count;
 `dropped_light_samples` records the count in frame metadata, even without `--diagnostics`.
+Non-finite camera path samples are also zeroed and reported as `dropped_path_samples`.
+Drops above 0.1% of the authored camera-sample budget refuse delivery; this
+protects against systematic broken transport. Very small frames may have no allowance.
 Final's rough glass shadows follow straight connections: roughness does not spread
 transmitted shadows, light off-axis receivers, or test scattered-direction blockers.
 
@@ -96,6 +96,5 @@ macOS requires Apple Silicon; CPU mode is unavailable through Metal. Windows
 requires a Vulkan loader and a recent Mesa lavapipe driver with its ICD manifest;
 CPU rendering there has not been qualified.
 
-Stage 1 fog with subsurface scattering is unsupported: its chord/random-walk
-queries are outside the fog ledger. Set subsurface_weight to zero and remove its
-texture/animation binding, or render the shot externally and composite a plate.
+Fog watchdog termination reports a count and discarded accumulated radiance; the untraced energy remains unknown. Ordinary paths terminate by sampled transport and compensated roulette.
+Custom surface shaders with fog are not yet supported; use builtin surfaces.

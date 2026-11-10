@@ -87,6 +87,7 @@ impl ViewLighting {
 
 pub(crate) struct SharedBindings<'a> {
     pub compute: Option<&'a wgpu::Buffer>,
+    pub points: &'a wgpu::Buffer,
     pub objects: &'a wgpu::Buffer,
     pub deforms: &'a [Option<EvaluatedGeometry>],
     pub materials: &'a Option<materials::FrameMaterials>,
@@ -245,7 +246,7 @@ impl ViewState {
                            config: &wgpu::Buffer,
                            mask: &wgpu::Buffer,
                            objects: &wgpu::Buffer| {
-            global(s, d, uniform, lights, config, mask, objects)
+            global(s, d, uniform, lights, config, mask, objects, shared.points)
         };
         let dummy_lights = init(
             d,
@@ -258,7 +259,7 @@ impl ViewState {
         // Compute work the pass modules record for this view's graph steps.
         let mut work = crate::graph::Recorder::default();
         let capture_owner = capture.then_some(label.as_str());
-        let targets = Targets::new(s, r, internal, aov_bytes, &uniform, &view_graph, &mut work, capture_owner);
+        let targets = Targets::new(s, r, internal, aov_bytes, &uniform, &view_graph, &mut work, capture_owner)?;
         // Float-only capture resolve never writes the display output. Reuse
         // the existing binding rather than allocating a throwaway texture.
         let output = shared.output.cloned().unwrap_or_else(|| {
@@ -681,6 +682,7 @@ pub(crate) fn global(
     config: &wgpu::Buffer,
     mask: &wgpu::Buffer,
     object_buffer: &wgpu::Buffer,
+    points: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     d.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("frame bindings"),
@@ -688,6 +690,7 @@ pub(crate) fn global(
         entries: &[
             entry(0, uniform.as_entire_binding()),
             entry(1, object_buffer.as_entire_binding()),
+            entry(10, points.as_entire_binding()),
             entry(2, lights.as_entire_binding()),
             entry(7, config.as_entire_binding()),
             entry(8, mask.as_entire_binding()),
@@ -740,7 +743,7 @@ impl Targets {
         graph: &crate::graph::Graph,
         recorder: &mut crate::graph::Recorder,
         capture_owner: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self> {
         use crate::graph::Pass;
         let d = &r.device;
         let [w, h] = resolution;
@@ -775,7 +778,7 @@ impl Targets {
             1,
             usage | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::STORAGE_BINDING,
         );
-        let ids = view("ID 4x", wgpu::TextureFormat::R32Uint, samples, usage);
+        let ids = view("ID 4x", wgpu::TextureFormat::Rgba32Uint, samples, usage);
         let motion = view(
             "screen motion 4x",
             wgpu::TextureFormat::Rgba16Float,
@@ -823,8 +826,9 @@ impl Targets {
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT);
         let denoising_guides = (s.pipelines.denoise && (graph.runs(Pass::Path) || graph.runs(Pass::Controls))).then(|| buffer( "denoising guides", u64::from(w)*u64::from(h)*32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC));
         let post_motion = control_view("resolved motion", wgpu::TextureFormat::Rgba16Float);
-        if !s.plan.effects.fuse_controls() && graph.runs(crate::graph::Pass::Controls) {
-        let control_resolve = pipelines::base(&s.pipelines.control_resolve_pipeline);
+        if graph.runs(crate::graph::Pass::Controls) {
+        let control_resolve = s.pipelines.control_resolve_pipeline.get()
+            .context("scheduled controls pass has no installed control-resolve pipeline")?;
         let mut control_entries = vec![
                 entry(0, wgpu::BindingResource::TextureView(&depth)),
                 entry(1, wgpu::BindingResource::TextureView(&ids)),
@@ -862,7 +866,7 @@ impl Targets {
             ],
         );
         }
-        Self {
+        Ok(Self {
             depth,
             resolved,
             aov_values, catcher, nonfinite,
@@ -877,7 +881,7 @@ impl Targets {
             post_normals,
             post_ambient,
             post_motion,
-        }
+        })
     }
 }
 

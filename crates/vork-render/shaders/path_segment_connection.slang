@@ -5,7 +5,7 @@
 // Jacobian is assumed. Small emitters can have high variance.
 // Finite analytic lights keep their own shadow links and shadow-enable flag.
 // Evaluate their shape along the authored path; no straight endpoint PDF is used.
-float3 segment_analytic<V:IVariant,P:IProgram>(float3 origin,float3 direction,uint light,uint transparent,DielectricSegment optical,float optical_length,inout uint rng) {
+float3 segment_analytic<V:IVariant,P:IProgram>(float3 origin,float3 direction,uint light,uint transparent,DielectricSegment optical,float optical_length,inout uint rng VORK_WORK_PARAMETER) {
     let l=light_values<Unspecialized>(light);
     let flags=lights[light].shadow_offsets[REG_LIGHT_RAY_WORD];
     let shadowed=(flags&REG_LIGHT_RAY_SHADOWED)!=0u;
@@ -17,15 +17,15 @@ float3 segment_analytic<V:IVariant,P:IProgram>(float3 origin,float3 direction,ui
         let source=emitter_eval_li<V>(l,origin,direction);
         let found=source.pdf>0. && source.distance<=limit;
         let distance=found ? source.distance : limit;
-        throughput*=straight_participating_transmittance(origin,direction,distance,rng)*segment_attenuation(optical,distance);
-        if(shadowed) throughput*=straight_shadow_transmittance<V,P>(origin,direction,distance,lights[light].shadow_offsets[REG_LIGHT_RAY_LINK_WORD],(flags&REG_LIGHT_RAY_SHADOWED_BY_ALL)!=0u,transparent,optical.ior);
+        throughput*=straight_participating_transmittance(origin,direction,distance,rng VORK_WORK_ARGUMENT)*segment_attenuation(optical,distance);
+        if(shadowed) throughput*=straight_shadow_transmittance<V,P>(origin,direction,distance,lights[light].shadow_offsets[REG_LIGHT_RAY_LINK_WORD],(flags&REG_LIGHT_RAY_SHADOWED_BY_ALL)!=0u,transparent,optical.ior VORK_WORK_ARGUMENT);
         if(found) return throughput*path_spectrum(source.radiance,true)*connection_arrival(optical_length,distance,optical.ior);
         if(limit==REG_FP32_MAX || !any(throughput>float3(0.))) return float3(0.);
         origin+=direction*limit;optical_length+=limit*optical.ior;
     }
     path_boundary_error(REG_PATH_PROPAGATION_ERROR,3u);return float3(0.);
 }
-float3 segment_connection<V:IVariant,P:IProgram>(float3 origin,float3 direction,uint event,uint groups,uint transparent,DielectricSegment optical,float optical_length,float surface_weight,inout uint rng) {
+float3 segment_connection<V:IVariant,P:IProgram>(float3 origin,float3 direction,uint event,uint groups,uint transparent,DielectricSegment optical,float optical_length,float surface_weight,inout uint rng VORK_WORK_PARAMETER) {
     var escaped=false;var previous_distance=0.;var throughput=float3(1.);var radiance=float3(0.);var pending=0.;
     for(uint work=0u;work<REG_PROPAGATION_WORK_LIMIT;work++) {
         if(pending<=0.) {
@@ -34,9 +34,9 @@ float3 segment_connection<V:IVariant,P:IProgram>(float3 origin,float3 direction,
             throughput*=transfer;
         }
         let limit=pending;
-        let hit=trace<V,P>(origin,direction,limit,event);
+        let hit=trace<V,P>(origin,direction,limit,event VORK_WORK_ARGUMENT);
         let stop=hit.t>=0. ? hit.t : limit;
-        throughput*=straight_participating_transmittance(origin,direction,stop,rng)*segment_attenuation(optical,stop);
+        throughput*=straight_participating_transmittance(origin,direction,stop,rng VORK_WORK_ARGUMENT)*segment_attenuation(optical,stop);
         if(!any(throughput>float3(0.))) return radiance;
         if(hit.t<0.) {
             if(limit==REG_FP32_MAX) return radiance+throughput*path_environment(direction,event,groups)*surface_weight*path_arrival(REG_FP32_MAX);
@@ -74,7 +74,7 @@ float3 segment_light_direction<V:IVariant>(LightValues light,float3 world,float3
     pdf=segment_light_pdf<V>(light,world,direction);
     return direction;
 }
-float3 segment_next_event<V:IVariant,P:IProgram>(HitSurface receiver,Closure c,float3 view,float3 world,float3 error,float3 geometric,DielectricInterface media,uint groups,uint continuation,uint transparent,TransportPreparation prepared,PathSampler sampler,float optical_length,inout uint rng) {
+float3 segment_next_event<V:IVariant,P:IProgram>(HitSurface receiver,Closure c,float3 view,float3 world,float3 error,float3 geometric,DielectricInterface media,uint groups,uint continuation,uint transparent,TransportPreparation prepared,PathSampler sampler,float optical_length,inout uint rng VORK_WORK_PARAMETER) {
     let direction=segment_direction(path_environment(sampler));let pdf=1./(4.*REG_PI);
     if(receiver.s.is_hair) return float3(0.);
     var result=float3(0.);
@@ -85,7 +85,7 @@ float3 segment_next_event<V:IVariant,P:IProgram>(HitSurface receiver,Closure c,f
         if(!any(response>float3(0.))) continue;
         let bsdf_pdf=(continuation&event)!=0u ? transport_pdf_mask(c,view,direction,event,prepared) : 0.;
         let optical=dot(geometric,direction)<0. ? media.transmitted : media.incident;
-        result+=response/pdf*segment_connection<V,P>(path_origin(receiver,world,error,direction),direction,event,groups,transparent,optical,optical_length,mis_power(pdf,bsdf_pdf),rng);
+        result+=response/pdf*segment_connection<V,P>(path_origin(receiver,world,error,direction),direction,event,groups,transparent,optical,optical_length,mis_power(pdf,bsdf_pdf),rng VORK_WORK_ARGUMENT);
     }
     return result;
 }

@@ -68,6 +68,9 @@ public LightTreePick light_tree_pick(StructuredBuffer<LightTreeNode> nodes, uint
         } else {
             left = choice < p;
             choice = left ? choice/p : (choice-p)/(1.-p);
+            // Renormalization can round to 1 even from a half-open input.
+            // Preserve [0,1): a subsequent p=1 must not enter a dark subtree
+            // and divide by its zero branch mass (#1186).
             choice = min(choice,(1. - REG_FP32_EPSILON * .5));
         }
         probability *= left ? p : 1.-p;

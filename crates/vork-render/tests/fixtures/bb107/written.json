@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "buffers": {
+    "field": {
+      "type": "f32",
+      "dims": [
+        16,
+        8,
+        8
+      ],
+      "file": "written.json.buffers.d96f3574-6ead-4ef7-afd8-376969e42ec3.bin",
+      "offset": 0,
+      "count": 1024
+    }
+  },
+  "geometry": {
+    "shape": {
+      "topology": "implicit",
+      "attributes": {
+        "field": "field"
+      }
+    }
+  },
+  "nodes": [
+    {
+      "type": "mesh",
+      "name": "surface",
+      "geometry": "shape"
+    },
+    {
+      "type": "camera",
+      "name": "camera",
+      "translation": [
+        0,
+        0,
+        5
+      ],
+      "target": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "render": {
+    "resolution": [
+      32,
+      32
+    ],
+    "camera": "camera"
+  }
+}

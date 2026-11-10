@@ -85,19 +85,19 @@ Coordinates hit_coordinates(HitTriangle t, float3 b, Varying v, float3 geometric
 }
 public struct HitSurface { public Surface s; public Varying v; public Coordinates k; public float3 face; public bool entering; };
 // The surface a ray arriving along `direction` sees at barycentrics `barycentrics`.
-public HitSurface hit_surface<V:IVariant, P:IProgram, G:IHitGeometry>(uint instance, uint primitive, uint object, float3x4 world_to_object, float2 barycentrics, float3 direction, float2 pixel) {
-    return hit_surface<V,P,G>(instance,primitive,object,world_to_object,barycentrics,direction,pixel,Lobe(0u,0.));
+public HitSurface hit_surface<V:IVariant, P:IProgram, G:IHitGeometry>(G g,uint instance, uint primitive, uint object, float3x4 world_to_object, float2 barycentrics, float3 direction, float2 pixel) {
+    return hit_surface<V,P,G>(g,instance,primitive,object,world_to_object,barycentrics,direction,pixel,Lobe(0u,0.));
 }
 // `lobe` selects a mixed surface's lobe (surface.slang Lobe).
-public HitSurface hit_surface<V:IVariant, P:IProgram, G:IHitGeometry>(uint instance, uint primitive, uint object, float3x4 world_to_object, float2 barycentrics, float3 direction, float2 pixel, Lobe lobe) {
-    return triangle_surface<V,P>(hit_triangle<G>(instance,primitive,object,world_to_object),primitive,barycentrics,direction,pixel,lobe);
+public HitSurface hit_surface<V:IVariant, P:IProgram, G:IHitGeometry>(G g,uint instance, uint primitive, uint object, float3x4 world_to_object, float2 barycentrics, float3 direction, float2 pixel, Lobe lobe) {
+    return triangle_surface<V,P>(hit_triangle<G>(g,instance,primitive,object,world_to_object),primitive,barycentrics,direction,pixel,lobe);
 }
 // Shared retained point/footprint reconstruction, also used to prove that a
 // transparent collection candidate cannot contribute at its shading sample.
 public HitSurface triangle_point(HitTriangle t, uint primitive, float2 barycentrics, float3 direction, float2 pixel) {
     let b=float3(1.-barycentrics.x-barycentrics.y,barycentrics);
     var h=(HitSurface)0;
-    h.v=hit_varying(t,b);h.v.primitive=primitive;
+    h.v=hit_varying(t,b);h.v.primitive=primitive+t.primitive_offset;
     h.face=hit_face(t);
     h.entering=dot(h.face,direction)<0.;
     let geometric=surface_geometric(h.v,h.entering);

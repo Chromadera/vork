@@ -6,7 +6,7 @@ Python: from vork import std, write_scene, render; install into a virtual enviro
 TypeScript (Node 22.18+): @voyager-so/vork; import builders, writeScene and render.
 
 Requires Node 22.18+ and npm. On older Node, upgrade (recommended), or run `node --experimental-strip-types scene.ts` instead of `node scene.ts`.
-Python std("sphere", name="ball", radius=0.5); TS sphere("ball", {radius:0.5}).
+Python std(function, **options); TS roundedBox, extrude and text. Contracts: vork help std --all.
 Builders return buffers and geometry maps to merge into the scene.
 write_scene(scene, path, base_dir) / writeScene(scene, path, baseDir) rebase paths
 and externalize large buffers. base_dir/baseDir defaults to the working directory;

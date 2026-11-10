@@ -14,7 +14,10 @@ Use vork help fluid --all for the simulation reference.
 
 Authoring: vork.fluid.build (Python SDK) returns ordinary scene maps.
 GPU modules: #include "fluid/config.slang", "fluid/solver.slang",
-"fluid/surface.slang", "fluid/whitewater.slang". Includes deliberately share the
+"fluid/reconstruction.slang", "fluid/surface.slang", "fluid/film.slang",
+"fluid/whitewater.slang". Exact capacity and distance fallback use reconstruction;
+solver and reconstruction share the volume integral in "fluid/volume.slang".
+Includes deliberately share the
 program's generated buffer accessors. Declare struct Inputs {int stage=0;}; in
 the wrapper, before inclusion. No fluid kernel primitive or scheduler.
 
@@ -25,6 +28,24 @@ one-way population. Defaults: terrestrial gravity, room-temperature water, APIC.
 Numerics: cubic grid cells, surface_grid, bins, square XZ film_grid, dt (seconds),
 speed (maximum expected m/s for timestep validation), pressure_iterations, flip
 (0 APIC, 1 FLIP; intermediate values blend both transfers), seed. Defaults are in build's signature.
+
+DIMENSIONS (Python build arguments; lists or tuples, in X, Y, Z order)
+extent: exactly three positive finite domain half-sizes in metres. origin: exactly
+three finite world coordinates in metres; scale converts metres to solver units.
+grid, surface_grid, bins: exactly three positive integer counts each. Each grid
+requires cubic physical cells: 2*extent[i]/counts[i] agrees across its three axes.
+The grids may use different resolutions. Rectangular domains require proportionate
+axis counts, not equal counts. Only None selects derived defaults: surface_grid
+uses twice grid per axis; bins uses grid. Empty sequences and other falsy values
+are not defaults.
+film_grid: exactly three positive integer counts (X, 1, Z), with square physical XZ
+cells: extent[0]/X == extent[2]/Z. It defaults to (grid[0], 1, grid[2]). Supplied
+film dimensions are checked even if film_accept disables wetting. This singleton Y
+storage differs from the output film_surface's three Y samples for height encoding.
+particle_budget: a positive integer count or exactly three positive integer lattice
+counts (X, Y, Z), preserved for initial_marker indexing. A count becomes (count, 1,
+1); the lattice need not match the domain or grid aspect ratio.
+
 Film diffusivity is m²/s; film depth buffers are in solver length units.
 All mutable buffers are retained simulation state; scratch is included in seek checkpoints.
 No automatic runtime CFL adaptation: author must bound velocities and refine dt/grid.
@@ -65,15 +86,27 @@ The helper uses unprefixed buffer/program names: rename maps/references for mult
 METHODS AND LIMITS
 Jiang et al. 2015 APIC; FLIP velocity increments use the unforced P2G grid.
 Ghost-fluid pressure with Laplace jump; fixed red/black SOR iteration count.
-Covariance anisotropy via Yu–Turk 2013 / std.particles. Kernels stay centred on
+Covariance anisotropy via Yu–Turk 2013 / fluid.particles. Kernels stay centred on
 material markers and carry fixed rest volume; smoothing does not move their mass.
 A minimum support contains each marker's rest-volume sphere. Display correction
 targets interpolated surface volume plus deposited film, with solid clipping after
 the offset. Analytic X/Y integration and edge-partitioned Gaussian Z quadrature integrate the
 trilinear surface, including sub-cell parcels. A safeguarded
-bracketed solve stops at 0.01% relative residual; 40 unsuccessful evaluations reject
-publication. correction stores offset, bracket endpoints, status (1 converged,
--1 failed), signed residual in display-cell volumes, and evaluation count. The private raw field tags solid samples; public fields remain finite.
+bracketed solve stops at 0.01% relative residual. The density family's saturated
+capacity is certified first by a whole-cell lower bound. Only inconclusive
+bounds evaluate the saturated field. Insufficient density capacity selects a Zhu–Bridson
+weighted-centre distance field, with a two-cell exterior band and correction
+bounded to one display cell of expansion. Its admitted capacity is checked before
+40 safeguarded evaluations. This retains isolated drops and thin parcels missed
+by compact density support; it cannot resolve every sub-grid pocket or packing.
+correction stores offset, bracket endpoints, status (1 converged, -1 failed),
+signed residual in display-cell volumes, evaluation count, and distance-mode flag.
+fluid_status is a sticky u32 receipt bound to bulk and film geometry.status. Nonzero
+values refuse the exposure with the mesh node name and remedy: 1 domain escape,
+2 insufficient reconstruction capacity, 3 nonconvergence, 4 invalid numeric
+state, 5 unresolved zero cell, 6 overflowing film height. Enlarge the free container or refine surface_grid
+for capacity; correct callbacks or reduce dt for invalid/escaping state. The
+private raw field tags solid samples; failures never deliberately publish NaNs.
 Rest-density feedback in ghost-fluid pressure relaxes over the cell's gravity/
 capillary time. Signed feedback is restricted to a bulk neighbourhood covering
 quadratic transfer support; boundary cells only correct over-density. Scalar
@@ -101,3 +134,16 @@ body coupling. Fine spray does not repair unresolved sheets or an authored regul
 References: https://doi.org/10.1145/2766996 (APIC);
 https://doi.org/10.1145/2421636.2421641 (Yu–Turk);
 https://cg.informatik.uni-freiburg.de/publications/2012_CGI_sprayFoamBubbles.pdf
+
+fluid.particles: Yu–Turk anisotropic particle-surface mathematics (ACM TOG 2013).
+  particle_moment(inout ParticleMoments, relative:float3, neighbourhood_radius:float):
+    accumulate weighted relative moments within compact support; initialize moments to zero.
+  particle_metric(moments, radius, neighbourhood_radius, minimum_neighbours:uint,
+    maximum_ratio, out support:float) → float3x3 world-to-kernel metric.
+    Positive radii and maximum_ratio >= 1 required; sparse neighbourhoods use a sphere.
+    Radius is the isotropic compact support; covariance normalization is scale invariant.
+  particle_kernel(relative:float3, metric:float3x3) → normalized 3D cubic density.
+  particle_cubic(q:float) → radial cubic shape, q >= 0, zero for q >= 1.
+  Fit from a retained particle generation, then evaluate from a separate dispatch.
+  Neighbour search must cover returned support plus any authored centre relocation.
+  Density normalization, surface isovalue and particle relocation belong to the caller.

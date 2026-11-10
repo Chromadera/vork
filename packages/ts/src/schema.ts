@@ -16,7 +16,7 @@ export type Keys =
  * A resource name or inline definition.
  */
 export type NameOr3 = string | Buffer;
-export type Buffer = InlineBuffer | FileBuffer | DenseBuffer;
+export type Buffer = InlineBuffer | FileBuffer | DenseBuffer | DenseFileBuffer;
 /**
  * Inline numeric elements. Matrices contain 16 column-major components.
  */
@@ -25,6 +25,10 @@ export type BufferType = "f32" | "i32" | "u32" | "vec2" | "vec3" | "vec4" | "uve
 export type Geometry = BufferGeometry | StdGeometry;
 export type SubdivisionType = "catmull_clark" | "simple";
 export type Topology = ("triangles" | "points" | "curves") | "implicit";
+/**
+ * Native deformation (including subdivision), geometry compute, and displacement.
+ */
+export type GeometryStage = "deform" | "compute" | "displace";
 /**
  * Blender colour space names, verbatim.
  */
@@ -131,6 +135,10 @@ export interface Scene {
   geometry?: {
     [k: string]: Geometry;
   };
+  /**
+   * Ordered geometry lowerings; compute contains ordinary geometry programs.
+   */
+  geometry_stages?: GeometryStage[];
   images?: {
     [k: string]: Image;
   };
@@ -201,7 +209,7 @@ export interface DenseBuffer {
   count?: null;
   data?: InlineDataSchema | null;
   /**
-   * Dense typed array, x contiguous. Initially zero unless data is supplied.
+   * Dense typed array, x contiguous. Initially zero unless data or a binary file is supplied.
    * Field consumers interpret cell centres in local [-1,1]³.
    *
    * @minItems 3
@@ -209,6 +217,22 @@ export interface DenseBuffer {
    */
   dims: [number, number, number];
   file?: null;
+  grid?: null;
+  offset?: number;
+  type: BufferType;
+}
+export interface DenseFileBuffer {
+  count?: number | null;
+  data?: null;
+  /**
+   * Dense typed array, x contiguous. Initially zero unless data or a binary file is supplied.
+   * Field consumers interpret cell centres in local [-1,1]³.
+   *
+   * @minItems 3
+   * @maxItems 3
+   */
+  dims: [number, number, number];
+  file: string;
   grid?: null;
   offset?: number;
   type: BufferType;
@@ -259,6 +283,10 @@ export interface BufferGeometry {
     [k: string]: Morph;
   };
   /**
+   * Solver-owned sticky failure receipt, collected with evaluated geometry.
+   */
+  status?: GeometryStatus | null;
+  /**
    * Blender Subdivision Surface, evaluated after deformation and before displacement.
    */
   subdivision?: SubdivisionSurface | null;
@@ -287,6 +315,10 @@ export interface MaterialRange {
 export interface Morph {
   NORMAL?: NameOr3 | null;
   POSITION: NameOr3;
+}
+export interface GeometryStatus {
+  buffer: NameOr3;
+  message: string;
 }
 export interface SubdivisionSurface {
   render_levels?: number;

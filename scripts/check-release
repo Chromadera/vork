@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix='vork-release-') as tmp:
         lut.write_bytes(data)
     scene = {'version': 2, 'nodes': [
         {'type': 'camera', 'translation': [0, 0, 4], 'target': [0, 0, 0]},
-        {'type': 'mesh', 'geometry': {'std': 'sphere'}, 'materials': [{'program': {
+        {'type': 'mesh', 'geometry': {'std': 'rounded_box'}, 'materials': [{'program': {
             'source': 'import vork; struct Inputs {}; Closure surface(ShadingContext ctx, Inputs inputs) { Closure c = {}; '
                       'c.base_weight = 1.; c.specular_weight = 1.; c.base_color = float3(0.1, 0.4, 0.7); '
                       'c.specular_roughness = 0.4; return c; }'}}]},

@@ -25,14 +25,17 @@ var z=1.;var nearest=0;var fill=float3(0.); \
         let d=CONTROL_LOAD(depth,p,s);if (d<z) {z=d;nearest=s;} \
         fill+=CONTROL_LOAD(ambient,p,s).rgb/float(samples); \
     } \
-    /* Transport retains the same nearest sample as normal and visibility. */ \
+    /* Join a continuous crease within one pixel of depth slope, never a larger depth gap. */ \
     let transport=z; \
     if (z<1.) { \
-        let selected=CONTROL_LOAD(ids,p,nearest).x&REG_INDIRECT_ID_MASK; \
+        let selected=CONTROL_LOAD(ids,p,nearest); \
         var sum=0.;var covered=0u; \
         for(var s=0;s<int(samples);s++) { \
             let d=CONTROL_LOAD(depth,p,s); \
-            if (d<1. && (CONTROL_LOAD(ids,p,s).x&REG_INDIRECT_ID_MASK)==selected) { \
+            let candidate=CONTROL_LOAD(ids,p,s); \
+            let footprint=max(asfloat(candidate.w),asfloat(selected.w)); \
+            let continuous=candidate.z==selected.z || abs(d-transport)<=footprint+4.*1.1920929e-7; \
+            if (d<1. && candidate.y==selected.y && continuous) { \
                 sum+=d;covered++; \
             } \
         } \

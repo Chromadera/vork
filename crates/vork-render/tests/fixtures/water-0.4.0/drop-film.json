@@ -1,0 +1,2950 @@
+{
+  "version": 2,
+  "buffers": {
+    "phi": {
+      "type": "f32",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "pa": {
+      "type": "f32",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "div": {
+      "type": "f32",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "capillary": {
+      "type": "f32",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "vel": {
+      "type": "vec3",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "adv": {
+      "type": "vec3",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "transfer": {
+      "type": "vec3",
+      "dims": [
+        1,
+        1,
+        1
+      ]
+    },
+    "markers": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "marker_velocity": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "affine_x": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "affine_y": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "affine_z": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "metric_x": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "metric_y": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "metric_z": {
+      "type": "vec3",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "links": {
+      "type": "u32",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "landed": {
+      "type": "u32",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "centres": {
+      "type": "vec4",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "amplitude": {
+      "type": "f32",
+      "dims": [
+        10,
+        10,
+        10
+      ]
+    },
+    "bins": {
+      "type": "u32",
+      "dims": [
+        60,
+        20,
+        20
+      ]
+    },
+    "overflow": {
+      "type": "u32",
+      "data": [
+        4294967295
+      ]
+    },
+    "bounds": {
+      "type": "u32",
+      "data": [
+        4294967295,
+        4294967295,
+        4294967295,
+        4294967295,
+        4294967295,
+        4294967295,
+        4294967295
+      ]
+    },
+    "surface": {
+      "type": "f32",
+      "dims": [
+        120,
+        40,
+        40
+      ]
+    },
+    "density_boundary": {
+      "type": "f32",
+      "dims": [
+        1,
+        1,
+        1
+      ]
+    },
+    "mass_blocks": {
+      "type": "u32",
+      "dims": [
+        4,
+        1,
+        1
+      ]
+    },
+    "film_surface": {
+      "type": "f32",
+      "dims": [
+        60,
+        3,
+        20
+      ]
+    },
+    "correction": {
+      "type": "f32",
+      "data": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "wetness": {
+      "type": "f32",
+      "dims": [
+        60,
+        1,
+        20
+      ]
+    },
+    "wet_next": {
+      "type": "f32",
+      "dims": [
+        60,
+        1,
+        20
+      ]
+    },
+    "volume": {
+      "type": "vec3",
+      "dims": [
+        120,
+        1,
+        40
+      ]
+    },
+    "volume_partial": {
+      "type": "vec3",
+      "dims": [
+        19,
+        1,
+        1
+      ]
+    },
+    "volume_total": {
+      "type": "vec3",
+      "dims": [
+        1,
+        1,
+        1
+      ]
+    },
+    "film_partial": {
+      "type": "f32",
+      "dims": [
+        5,
+        1,
+        1
+      ]
+    },
+    "film_total": {
+      "type": "f32",
+      "dims": [
+        1,
+        1,
+        1
+      ]
+    }
+  },
+  "programs": {
+    "init": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "transfer_velocity": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "divergence": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "pressure_red": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "pressure_black": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "project": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "volume": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 4800,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "correct": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "reset_correction": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "marker_init": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "marker_advect": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "bin_clear": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "bin_fill": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "marker_surface": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 192000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "marker_publish": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 192000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "pressure_surface": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "reduce_volume": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 19,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "reduce_total": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "wet_spread": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1200,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "wet_publish": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1200,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "film_reduce": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 5,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "film_total": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "mass": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 4,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "density_mask": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "density_mask_expand": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "density_mask_publish": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/solver.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 24000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "fit": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/surface.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 1000,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    },
+    "film_publish": {
+      "source": "static const float METRES_PER_UNIT = 1;\nstatic const float GRAVITY = 9.81;\nstatic const float CAPILLARY = 7.28e-05;\nstatic const float DOMAIN = 0.15;\nstatic const float MARKER_SPACING = 0.002;\nstatic const float KERNEL_SUPPORT = 0.00538461538462;\nstatic const float CONTACT_OFFSET = 0.000769230769231;\nstatic const float FLIP_BLEND = 0;\nstatic const float FILM_DIFFUSIVITY = 0.0001;\nstatic const float3 DOMAIN_EXTENT = float3(0.15,0.05,0.05);\nstatic const float3 DOMAIN_ORIGIN = float3(0.0,0.0,0.0);\nstatic const uint3 BIN_DIMS = uint3(60,20,20);\nstatic const uint BIN_RES = 60u;\n#include \"fluid/config.slang\"\n\nfloat container(float3 p) { return max(-p.y, max(abs(p.x)-0.148, abs(p.z)-0.048)); }\nfloat initial_field(float3 p) { return max(length(p-float3(0,0.030,0))-0.009,container(p)); }\nbool initial_marker(uint id, out float3 p) {\n uint x=id%10; uint y=(id/10)%10; uint z=id/100;\n p=float3(x,y,z)*0.002-float3(0.009,0.009,0.009)+float3(0,0.030,0);\n return length(p-float3(0,0.030,0))<0.009;\n}\nfloat3 initial_velocity(float3 p,float dx) { return float3(0,-0.2,0); }\nfloat initial_pressure(float3 p) { return 0; }\nbool film_accept(float2 xz) { return abs(xz.x)<0.148 && abs(xz.y)<0.048; }\nfloat film_height(float2 xz) { return 0; }\nfloat3 boundary_velocity(float3 p,float time,float3 v) { return v; }\n\nstruct Inputs {int stage=0;};\n#include \"fluid/film.slang\"\n",
+      "schedule": "simulation",
+      "dispatch": 3600,
+      "bindings": {
+        "phi": "phi",
+        "pa": "pa",
+        "div": "div",
+        "capillary": "capillary",
+        "vel": "vel",
+        "adv": "adv",
+        "transfer": "transfer",
+        "markers": "markers",
+        "marker_velocity": "marker_velocity",
+        "affine_x": "affine_x",
+        "affine_y": "affine_y",
+        "affine_z": "affine_z",
+        "metric_x": "metric_x",
+        "metric_y": "metric_y",
+        "metric_z": "metric_z",
+        "links": "links",
+        "landed": "landed",
+        "centres": "centres",
+        "amplitude": "amplitude",
+        "bins": "bins",
+        "overflow": "overflow",
+        "bounds": "bounds",
+        "surface": "surface",
+        "density_boundary": "density_boundary",
+        "mass_blocks": "mass_blocks",
+        "film_surface": "film_surface",
+        "correction": "correction",
+        "wetness": "wetness",
+        "wet_next": "wet_next",
+        "volume": "volume",
+        "volume_partial": "volume_partial",
+        "volume_total": "volume_total",
+        "film_partial": "film_partial",
+        "film_total": "film_total"
+      }
+    }
+  },
+  "materials": {
+    "init": {
+      "program": "init",
+      "inputs": {
+        "stage": 0
+      }
+    },
+    "transfer_velocity": {
+      "program": "transfer_velocity",
+      "inputs": {
+        "stage": 1
+      }
+    },
+    "divergence": {
+      "program": "divergence",
+      "inputs": {
+        "stage": 2
+      }
+    },
+    "pressure_red": {
+      "program": "pressure_red",
+      "inputs": {
+        "stage": 3
+      }
+    },
+    "pressure_black": {
+      "program": "pressure_black",
+      "inputs": {
+        "stage": 4
+      }
+    },
+    "project": {
+      "program": "project",
+      "inputs": {
+        "stage": 5
+      }
+    },
+    "volume": {
+      "program": "volume",
+      "inputs": {
+        "stage": 9
+      }
+    },
+    "correct": {
+      "program": "correct",
+      "inputs": {
+        "stage": 10
+      }
+    },
+    "reset_correction": {
+      "program": "reset_correction",
+      "inputs": {
+        "stage": 11
+      }
+    },
+    "marker_init": {
+      "program": "marker_init",
+      "inputs": {
+        "stage": 14
+      }
+    },
+    "marker_advect": {
+      "program": "marker_advect",
+      "inputs": {
+        "stage": 15
+      }
+    },
+    "bin_clear": {
+      "program": "bin_clear",
+      "inputs": {
+        "stage": 16
+      }
+    },
+    "bin_fill": {
+      "program": "bin_fill",
+      "inputs": {
+        "stage": 17
+      }
+    },
+    "marker_surface": {
+      "program": "marker_surface",
+      "inputs": {
+        "stage": 19
+      }
+    },
+    "marker_publish": {
+      "program": "marker_publish",
+      "inputs": {
+        "stage": 20
+      }
+    },
+    "pressure_surface": {
+      "program": "pressure_surface",
+      "inputs": {
+        "stage": 21
+      }
+    },
+    "reduce_volume": {
+      "program": "reduce_volume",
+      "inputs": {
+        "stage": 22
+      }
+    },
+    "reduce_total": {
+      "program": "reduce_total",
+      "inputs": {
+        "stage": 23
+      }
+    },
+    "wet_spread": {
+      "program": "wet_spread",
+      "inputs": {
+        "stage": 24
+      }
+    },
+    "wet_publish": {
+      "program": "wet_publish",
+      "inputs": {
+        "stage": 25
+      }
+    },
+    "film_reduce": {
+      "program": "film_reduce",
+      "inputs": {
+        "stage": 26
+      }
+    },
+    "film_total": {
+      "program": "film_total",
+      "inputs": {
+        "stage": 27
+      }
+    },
+    "mass": {
+      "program": "mass",
+      "inputs": {
+        "stage": 30
+      }
+    },
+    "density_mask": {
+      "program": "density_mask",
+      "inputs": {
+        "stage": 31
+      }
+    },
+    "density_mask_expand": {
+      "program": "density_mask_expand",
+      "inputs": {
+        "stage": 32
+      }
+    },
+    "density_mask_publish": {
+      "program": "density_mask_publish",
+      "inputs": {
+        "stage": 33
+      }
+    },
+    "fit": {
+      "program": "fit"
+    },
+    "film_publish": {
+      "program": "film_publish"
+    },
+    "ceramic": {
+      "inputs": {
+        "base_color": [
+          0.78,
+          0.79,
+          0.73
+        ],
+        "specular_roughness": 0.19,
+        "coat_weight": 0.25
+      }
+    },
+    "blue_water": {
+      "opacity": "transmittance",
+      "inputs": {
+        "base_color": [
+          0.01,
+          0.1,
+          0.5
+        ],
+        "transmission_weight": 0.94,
+        "transmission_color": [
+          0.04,
+          0.32,
+          0.85
+        ],
+        "transmission_depth": 0.015,
+        "specular_ior": 1.333,
+        "specular_roughness": 0.055
+      }
+    },
+    "marks": {
+      "inputs": {
+        "base_color": [
+          0.025,
+          0.04,
+          0.055
+        ],
+        "specular_roughness": 0.4
+      }
+    },
+    "table": {
+      "inputs": {
+        "base_color": [
+          0.14,
+          0.17,
+          0.2
+        ],
+        "specular_roughness": 0.35
+      }
+    }
+  },
+  "geometry": {
+    "water": {
+      "topology": "implicit",
+      "attributes": {
+        "phi": "surface"
+      }
+    },
+    "floor_film": {
+      "topology": "implicit",
+      "attributes": {
+        "phi": "film_surface"
+      }
+    },
+    "drop_surface": {
+      "topology": "implicit",
+      "attributes": {
+        "field": "surface"
+      }
+    },
+    "wet_patch": {
+      "topology": "implicit",
+      "attributes": {
+        "field": "film_surface"
+      }
+    }
+  },
+  "simulation": {
+    "t0": 0,
+    "dt": 0.0005,
+    "seed": 7,
+    "state": [
+      "phi",
+      "pa",
+      "div",
+      "capillary",
+      "vel",
+      "adv",
+      "transfer",
+      "markers",
+      "marker_velocity",
+      "affine_x",
+      "affine_y",
+      "affine_z",
+      "metric_x",
+      "metric_y",
+      "metric_z",
+      "links",
+      "landed",
+      "centres",
+      "amplitude",
+      "bins",
+      "overflow",
+      "bounds",
+      "surface",
+      "density_boundary",
+      "mass_blocks",
+      "film_surface",
+      "correction",
+      "wetness",
+      "wet_next",
+      "volume",
+      "volume_partial",
+      "volume_total",
+      "film_partial",
+      "film_total"
+    ],
+    "init": [
+      "init",
+      "marker_init",
+      "mass",
+      "bin_clear",
+      "bin_fill",
+      "wet_spread",
+      "wet_publish",
+      "film_publish",
+      "film_reduce",
+      "film_total",
+      "fit",
+      "marker_surface",
+      "reset_correction",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "marker_publish",
+      "pressure_surface"
+    ],
+    "steps": [
+      "transfer_velocity",
+      "density_mask",
+      "density_mask_expand",
+      "density_mask_publish",
+      "divergence",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "pressure_red",
+      "pressure_black",
+      "project",
+      "marker_advect",
+      "bin_clear",
+      "bin_fill",
+      "wet_spread",
+      "wet_publish",
+      "film_publish",
+      "film_reduce",
+      "film_total",
+      "fit",
+      "marker_surface",
+      "reset_correction",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "volume",
+      "reduce_volume",
+      "reduce_total",
+      "correct",
+      "marker_publish",
+      "pressure_surface"
+    ]
+  },
+  "nodes": [
+    {
+      "type": "mesh",
+      "name": "tray floor",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.3,
+          0.006,
+          0.1
+        ]
+      },
+      "translation": [
+        0,
+        -0.003,
+        0
+      ],
+      "materials": [
+        "ceramic"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "left rim",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.006,
+          0.018,
+          0.106
+        ]
+      },
+      "translation": [
+        -0.153,
+        0.003,
+        0
+      ],
+      "materials": [
+        "ceramic"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "right rim",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.006,
+          0.018,
+          0.106
+        ]
+      },
+      "translation": [
+        0.153,
+        0.003,
+        0
+      ],
+      "materials": [
+        "ceramic"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "front rim",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.3,
+          0.018,
+          0.006
+        ]
+      },
+      "translation": [
+        0,
+        0.003,
+        0.053
+      ],
+      "materials": [
+        "ceramic"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "back rim",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.3,
+          0.018,
+          0.006
+        ]
+      },
+      "translation": [
+        0,
+        0.003,
+        -0.053
+      ],
+      "materials": [
+        "ceramic"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "studio table",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.8,
+          0.02,
+          0.6
+        ]
+      },
+      "translation": [
+        0,
+        -0.028,
+        0
+      ],
+      "materials": [
+        "table"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 0",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.009
+        ]
+      },
+      "translation": [
+        -0.14,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 1",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.13,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 2",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.12000000000000001,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 3",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.11000000000000001,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 4",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.1,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 5",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.009
+        ]
+      },
+      "translation": [
+        -0.09000000000000001,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 6",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.08000000000000002,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 7",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.07,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 8",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.06000000000000001,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 9",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.05000000000000002,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 10",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.009
+        ]
+      },
+      "translation": [
+        -0.04000000000000001,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 11",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.030000000000000013,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 12",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.020000000000000018,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 13",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        -0.010000000000000009,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 14",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.0,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 15",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.009
+        ]
+      },
+      "translation": [
+        0.009999999999999981,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 16",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.01999999999999999,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 17",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.03,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 18",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.03999999999999998,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 19",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.04999999999999999,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 20",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.009
+        ]
+      },
+      "translation": [
+        0.06,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 21",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.06999999999999998,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 22",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.07999999999999999,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 23",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.09,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 24",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.09999999999999998,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 25",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.009
+        ]
+      },
+      "translation": [
+        0.10999999999999999,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 26",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.12,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 27",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.13,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "rule 28",
+      "geometry": {
+        "std": "box",
+        "size": [
+          0.0005,
+          0.0002,
+          0.005
+        ]
+      },
+      "translation": [
+        0.14,
+        0.0001,
+        0.037
+      ],
+      "materials": [
+        "marks"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "simulated blue drop",
+      "geometry": "drop_surface",
+      "scale": [
+        0.15,
+        0.05,
+        0.05
+      ],
+      "materials": [
+        "blue_water"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "simulated deposited film",
+      "geometry": "wet_patch",
+      "scale": [
+        0.15,
+        0.1,
+        0.05
+      ],
+      "materials": [
+        "blue_water"
+      ]
+    },
+    {
+      "type": "camera",
+      "name": "camera",
+      "translation": [
+        0.28,
+        0.23,
+        0.34
+      ],
+      "target": [
+        0,
+        0.006,
+        0
+      ],
+      "material": {
+        "program": "std/camera",
+        "inputs": {
+          "lens": 48,
+          "clip_start": 0.005
+        }
+      }
+    },
+    {
+      "type": "light",
+      "name": "softbox",
+      "shape": "rectangle",
+      "translation": [
+        0.05,
+        0.4,
+        0.1
+      ],
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "size": 0.4,
+      "size_y": 0.2,
+      "energy": 30,
+      "color": [
+        1,
+        0.94,
+        0.87
+      ]
+    },
+    {
+      "type": "light",
+      "name": "fill",
+      "shape": "rectangle",
+      "translation": [
+        -0.25,
+        0.2,
+        -0.1
+      ],
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "size": 0.3,
+      "energy": 12,
+      "color": [
+        0.8,
+        0.9,
+        1
+      ]
+    },
+    {
+      "type": "light",
+      "name": "ambient",
+      "shape": "environment",
+      "energy": 0.15,
+      "color": [
+        0.8,
+        0.88,
+        1
+      ]
+    }
+  ],
+  "render": {
+    "resolution": [
+      640,
+      480
+    ],
+    "duration": 0.2,
+    "fps": 20,
+    "camera": "camera",
+    "background": [
+      0.12,
+      0.14,
+      0.17
+    ]
+  }
+}

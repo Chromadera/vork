@@ -65,20 +65,21 @@ import vork_sampling;
 [[vk::binding(1,0)]] StructuredBuffer<float> distribution;
 [[vk::binding(2,0)]] StructuredBuffer<uint> support;
 struct Geometry : IHitGeometry {
-    static uint word(uint i) {return support[i];}
-    static uint load(uint buffer,uint i) {return 0u;}
+    StructuredBuffer<uint> support;
+    uint word(uint i) {return support[i];}
+    uint load(uint buffer,uint i) {return 0u;}
 }
 [shader("compute")][numthreads(64,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID) {
     let i=id.x;let x=pixel_hash(i);let y=pixel_hash(x);let z=pixel_hash(y);
     // Exhaust the centered 16-bit choice lattice in each mixture component.
     // Barycentric coordinates stay independently hashed.
     let u=float3((float(i)+.5)/65536.,(float(y>>9u)+.5)/8388608.,(float(z>>9u)+.5)/8388608.);
-    let large=Geometry.word(1u)>65536u;
-    let choice=large ? (float(i)+.5)/float(Geometry.word(1u)) : (i==0u ? 1. : (i==1u ? 0. : u.x));
+    let large=Geometry(support).word(1u)>65536u;
+    let choice=large ? (float(i)+.5)/float(Geometry(support).word(1u)) : (i==0u ? 1. : (i==1u ? 0. : u.x));
     for(uint component=0u;component<2u;component++) {
-        let sample=emitter_mesh_sample<Geometry>(0u,float3(choice,u.y,(u.z+float(component))*.5),distribution);
+        let sample=emitter_mesh_sample<Geometry>(Geometry(support),0u,float3(choice,u.y,(u.z+float(component))*.5),distribution);
         let triangle=sample.primitive+(sample.instance==0u ? 0u : 1u);
-        let pdf=emitter_mesh_probability<Geometry>(0u,sample.instance,sample.primitive,distribution);
+        let pdf=emitter_mesh_probability<Geometry>(Geometry(support),0u,sample.instance,sample.primitive,distribution);
         result[2u*i+component]=float4(float(triangle),abs(sample.probability-pdf)<1e-6 ? pdf : -1.,sample.barycentrics);
     }
 }

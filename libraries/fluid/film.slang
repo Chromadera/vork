@@ -21,7 +21,12 @@ void compute(ComputeContext ctx,Inputs inputs) {
    depth+=wetness_load(uint(cell.x)+wetness_dims.x*uint(cell.y))*(x==0 ? 1.-fraction.x : fraction.x)*(z==0 ? 1.-fraction.y : fraction.y);
   }
  }
+#ifdef VORK_FLUID_STATUS_BOUND
+ if(!isfinite(depth) || !isfinite(roundoff)) {fluid_status_atomic_compare_exchange(0,0u,4u);return;}
+ if(depth>=upper_height) {fluid_status_atomic_compare_exchange(0,0u,6u);return;}
+#else
  if(depth>=upper_height) {film_surface_store(id,asfloat(0x7fc00000u));return;}
+#endif
  float y=c.y==film_surface_dims.y/2u ? 0. : upper_height;
  // Keep only a strictly positive dry sentinel above the floor; the larger
  // lower-face roundoff budget must not erase representable sub-cell depths.

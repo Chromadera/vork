@@ -154,7 +154,7 @@ pub enum NodeKind {
         #[schemars(extend("x-source" = "Blender 5.2.1 SpotLight.spot_blend", "x-help-path" = "light.spot_blend", "x-help" = "number; 0..1"))]
         spot_blend: f32,
         #[serde(default = "constants::area_dimension")]
-        #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight.size (Add Light default)", "x-help-path" = "light.size", "x-help" = "number; rectangle full side, ellipse diameter"))]
+        #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight.size (Add Light default)", "x-help-path" = "light.size", "x-help" = "number; rectangle full side, ellipse diameter; size_y sets the second axis"))]
         size: f32,
         #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight square/disk sizing", "x-help-path" = "light.size_y", "x-help" = "number|null; second side/diameter; omitted = size (square/disk)"))]
         size_y: Option<f32>,
@@ -166,7 +166,7 @@ pub enum NodeKind {
         #[schemars(with = "Option<NameOr<Material>>")]
         medium: Option<String>,
         /// Environment radiance material instance.
-        #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "light.material", "x-help" = "material-name|inline material|null; environment program"))]
+        #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "light.material", "x-help" = "material-name|inline material|null; environment program; omitted = uniform color × energy radiance"))]
         #[schemars(with = "Option<NameOr<Material>>")]
         material: Option<String>,
         #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "light.illuminates", "x-help" = "light-link-tag[]|null; receivers with any tag; null=all; []=none"))]

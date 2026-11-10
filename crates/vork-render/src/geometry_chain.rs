@@ -1,6 +1,7 @@
 //! Ordered geometry execution. Every lowering consumes and returns the same
 //! draw-indexed geometry packet; numerical kernels remain in their owners.
 use crate::*;
+use vork_scene::v2;
 
 /// A packet retains immutable topology, domains, source correspondence and
 /// object/instance identity through its installed draw. Only owned evaluated
@@ -13,8 +14,13 @@ impl Geometry {
     fn publish(&mut self, s: &InstalledScene, mut output: EvaluatedGeometry) -> Result<()> {
         let draw = &s.draws[self.draw];
         let bytes = u64::from(draw.vertex_count) * std::mem::size_of::<DeformedVertex>() as u64;
+        let capacity_matches=if let Some((capacity,shape_vertices))=output.point_domain {
+            u64::from(capacity)*u64::from(shape_vertices)==u64::from(draw.vertex_count)
+                && output.output.size==(2+u64::from(capacity)*10+u64::from(shape_vertices)*5)*4
+                && output.previous_output.size==u64::from(capacity)*80
+        } else {output.output.size==bytes && output.previous_output.size==bytes*2};
         ensure!(
-            output.output.size == bytes && output.previous_output.size == bytes * 2,
+            capacity_matches,
             "geometry stage changed vertex capacity without a topology transition for draw {}",
             self.draw
         );
@@ -29,13 +35,13 @@ impl Geometry {
         }
         if let Some(attributes) = &output.attributes {
             ensure!(
-                attributes.size() >= u64::from(draw.vertex_count) * draw.layout.attribute_stride(),
+                attributes.size() >= u64::from(output.point_domain.map_or(draw.vertex_count,|p|p.0)) * draw.layout.attribute_stride(),
                 "geometry stage lost carried attribute rows for draw {}",
                 self.draw
             );
         }
         if let Some(attributes)=&output.previous_attributes {
-            ensure!(attributes.size()>=u64::from(draw.vertex_count)*draw.layout.attribute_stride()*2,
+            ensure!(attributes.size()>=u64::from(output.point_domain.map_or(draw.vertex_count,|p|p.0))*draw.layout.attribute_stride()*2,
                 "geometry stage lost historical attribute rows for draw {}",self.draw);
         }
         self.evaluated = Some(output);
@@ -50,7 +56,8 @@ type Lowering = fn(&Renderer, &InstalledScene, &mut [Geometry]) -> Result<Box<dy
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind { Deform, Compute, Displace }
 impl Kind {
-    pub(crate) const DEFAULT: [Self;3] = [Self::Deform,Self::Compute,Self::Displace];
+    pub(crate) const DEFAULT: [Self;3] = [Self::from_scene(v2::GeometryStage::DEFAULT[0]),Self::from_scene(v2::GeometryStage::DEFAULT[1]),Self::from_scene(v2::GeometryStage::DEFAULT[2])];
+    pub(crate) const fn from_scene(stage:v2::GeometryStage)->Self {match stage {v2::GeometryStage::Deform=>Self::Deform,v2::GeometryStage::Compute=>Self::Compute,v2::GeometryStage::Displace=>Self::Displace}}
     pub(crate) fn deformation_before_compute(list: &[Self]) -> bool {
         Self::before(list,Self::Deform,Self::Compute)
     }
@@ -239,6 +246,7 @@ impl Compute {
         let mut carried=Vec::new();
         for (index,(packet, source)) in input.iter_mut().zip(&frames).enumerate() {
             if let Some(source) = source {
+                let mut output=source.geometry.clone();
                 if let Some(predecessor)=&packet.evaluated {
                     let draw=&s.draws[index];
                     let NodeKind::Mesh {geometry,..}=&s.nodes[s.roots[draw.object as usize].node].node.kind else {unreachable!()};
@@ -249,11 +257,12 @@ impl Compute {
                     let position=owns("POSITION");
                     let mask=[!position,!owns("NORMAL") && (!position || shape.attributes.contains_key("NORMAL")),
                         !owns("TANGENT") && (!position || shape.attributes.contains_key("TANGENT"))];
+                    if mask[0] {output.gpu_bounds=None;}
                     if mask.iter().any(|&carry|carry) {
                         carried.push((index,crate::geometry_stage_source::Carried::new(r,predecessor,&source.geometry,mask)?));
                     }
                 }
-                packet.publish(s, source.geometry.clone())?;
+                packet.publish(s, output)?;
             }
         }
         let sources=s.computed_geometry.iter().flatten().flat_map(|mesh|mesh.source_names().iter().cloned())
@@ -631,6 +640,11 @@ impl Frame {
                     *output = next;
                 }
             }
+        }
+        // A later GPU publication replaces the predecessor's spatial domain.
+        // Unknown to the CPU must not retain an earlier stage's smaller bounds.
+        for (bounds,packet) in bounds.iter_mut().zip(&self.geometry) {
+            if packet.evaluated.as_ref().is_some_and(|g|g.gpu_bounds.is_some()) {*bounds=None;}
         }
         Ok(bounds)
     }

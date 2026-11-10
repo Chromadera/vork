@@ -40,6 +40,72 @@ class BuilderTest(unittest.TestCase):
         self.assertEqual(a['simulation']['steps'][-1],'white_publish')
         self.assertLess(a['simulation']['steps'].index('white_step'),a['simulation']['steps'].index('white_birth'))
 
+    def rectangular(self, **changes):
+        args = dict(extent=(.24, .16, .16), origin=[1., -.2, 3.],
+                    grid=[24, 16, 16], surface_grid=(72, 48, 48),
+                    bins=[12, 8, 8], film_grid=(48, 1, 32),
+                    particle_budget=[7, 3, 5])
+        args.update(changes)
+        return self.make(**args)
+
+    def test_rectangular_dimension_family(self):
+        scene = self.rectangular()
+        buffers = scene['buffers']
+        for name, dims in [('phi', [24, 16, 16]), ('surface', [72, 48, 48]),
+                           ('bins', [12, 8, 8]), ('wetness', [48, 1, 32]),
+                           ('film_surface', [48, 3, 32]), ('markers', [7, 3, 5])]:
+            self.assertEqual(buffers[name]['dims'], dims)
+        self.assertEqual(scene['programs']['marker_init']['dispatch'], 105)
+        count = self.rectangular(particle_budget=19)
+        self.assertEqual(count['buffers']['markers']['dims'], [19, 1, 1])
+        derived = self.rectangular(surface_grid=None, bins=None, film_grid=None)
+        self.assertEqual(derived['buffers']['surface']['dims'], [48, 32, 32])
+        self.assertEqual(derived['buffers']['bins']['dims'], [24, 16, 16])
+        self.assertEqual(derived['buffers']['wetness']['dims'], [24, 1, 16])
+
+    def test_dimension_rank_and_integer_boundaries(self):
+        malformed = [(4, 4), (4, 4, 4, 4)]
+        for invalid in (0, -1, 4., True):
+            for axis in range(3):
+                dims = [4, 4, 4]
+                dims[axis] = invalid
+                malformed.append(dims)
+        for name in ('grid', 'surface_grid', 'bins', 'film_grid', 'particle_budget'):
+            for dims in malformed:
+                with self.subTest(argument=name, dims=dims), self.assertRaises(ValueError):
+                    self.rectangular(**{name: dims})
+
+    def test_optional_dimensions_only_none_selects_defaults(self):
+        derived = self.rectangular(surface_grid=None, bins=None, film_grid=None)
+        explicit = self.rectangular(surface_grid=[48, 32, 32], bins=[24, 16, 16],
+                                    film_grid=[24, 1, 16])
+        self.assertEqual(derived, explicit)
+        for name in ('surface_grid', 'bins', 'film_grid'):
+            for dims in ([], (), 0, False, ''):
+                with self.subTest(argument=name, dims=dims):
+                    # Wrong scalar types fail sequence conversion; rank-zero
+                    # sequences fail the existing dimension validator.
+                    with self.assertRaises((TypeError, ValueError)):
+                        self.rectangular(**{name: dims})
+
+    def test_physical_dimension_boundaries(self):
+        for name in ('grid', 'surface_grid', 'bins'):
+            with self.subTest(argument=name), self.assertRaises(ValueError):
+                self.rectangular(**{name: (16, 16, 16)})
+        for dims in ((24, 2, 16), (24, 1, 24)):
+            with self.subTest(film_grid=dims), self.assertRaises(ValueError):
+                self.rectangular(film_grid=dims,
+                                 callbacks='bool film_accept(float2 xz) { return false; }')
+        for extent in ((.24, .16), (.24, .16, .16, .16), (0, .16, .16),
+                       (-.24, .16, .16), (float('nan'), .16, .16),
+                       (.24, float('inf'), .16)):
+            with self.subTest(extent=extent), self.assertRaises(ValueError):
+                self.rectangular(extent=extent)
+        for origin in ((0, 0), (0, 0, 0, 0), (0, float('nan'), 0),
+                       (float('inf'), 0, 0)):
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
+                self.rectangular(origin=origin)
+
     def test_reject_unstable_and_malformed(self):
         for change in [dict(scale=0),dict(dt=1),dict(spacing=-1),dict(gravity=float('nan')),
                        dict(grid=[96,30,96]),dict(whitewater_budget=-1),dict(particle_budget=0)]:

@@ -46,8 +46,14 @@ pub enum AccelerationStructureUpdateMode {
     Build,
     /// If possible, perform an incremental update.
     ///
-    /// Not advised for major topology changes.
-    /// (Useful for e.g. skinning)
+    /// Useful for fixed-topology deformation such as skinning. Local native
+    /// backends update only a successfully submitted, compatible source build;
+    /// indexed geometry requires an immutable index buffer (no COPY_DST,
+    /// STORAGE or MAP_WRITE usage). Other inputs fall back to a full build.
+    /// Vertex activity must not change: do not introduce/remove NaN vertices
+    /// between builds. Degenerate finite triangles may change shape. TLAS
+    /// updates require the same instance count and active/inactive status;
+    /// changing a visibility mask does not change activity.
     PreferUpdate,
 }
 

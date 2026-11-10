@@ -25,5 +25,5 @@ replace `post.vignette` with `vignette`, `post.glare` with `glare`,
 `std.highlight` with `highlight`. For `post.lens_distortion`, copy
 `chromatic-dispersion.slang` as `lens_distortion.slang` and use
 `import lens_distortion;`. Update qualified module references too.
-For shipped bloom, `vork help std/bloom` shows a two-entry graph; bloom is not
-an exact replacement for these looks.
+The authored `bloom.slang` program provides a thresholded image pyramid; its
+graph wiring is in `../compositor_graph.py`.

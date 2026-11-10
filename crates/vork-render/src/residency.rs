@@ -177,6 +177,14 @@ impl Ledger {
 mod tests {
     use super::*;
     #[test]
+    fn camera_headroom_ignores_staging_but_not_local_pressure() {
+        assert_eq!(local_headroom([(true, 4<<30), (false, 32<<30)]), Some(4<<30));
+        assert_eq!(local_headroom([(true, 0), (false, 32<<30)]), Some(0));
+        assert_eq!(local_headroom([(true, 4<<30), (true, 2<<30)]), None);
+        assert_eq!(local_headroom([(false, 32<<30)]), None);
+    }
+
+    #[test]
     fn unrelated_heaps_never_supply_an_admission_budget() {
         assert_eq!(common_headroom([]), None);
         assert_eq!(common_headroom([4096]), Some(4096));
@@ -250,6 +258,26 @@ fn common_headroom(heaps: impl IntoIterator<Item = u64>) -> Option<u64> {
     let mut heaps = heaps.into_iter();
     let first = heaps.next()?;
     heaps.next().is_none().then_some(first)
+}
+
+/// Camera storage prefers device-local memory. A host staging heap must not
+/// hide pressure on the single VRAM heap (the usual discrete Vulkan adapter).
+/// Multiple local heaps remain unknown because their allocation type is opaque.
+pub(crate) fn camera_headroom(device: &wgpu::Device) -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if let Some(hal) = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() } {
+        use ash::{ext, vk};
+        if !hal.enabled_device_extensions().contains(&ext::memory_budget::NAME) {return None;}
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        unsafe {hal.shared_instance().raw_instance().get_physical_device_memory_properties2(hal.raw_physical_device(), &mut properties);}
+        return local_headroom(properties.memory_properties.memory_heaps_as_slice().iter().enumerate()
+            .map(|(i, heap)| (heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL), budget.heap_budget[i].saturating_sub(budget.heap_usage[i]))));
+    }
+    available(device)
+}
+fn local_headroom(heaps: impl IntoIterator<Item = (bool, u64)>) -> Option<u64> {
+    common_headroom(heaps.into_iter().filter_map(|(local, free)| local.then_some(free)))
 }
 
 pub(crate) fn available(device: &wgpu::Device) -> Option<u64> {

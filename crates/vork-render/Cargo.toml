@@ -31,6 +31,7 @@ half = "2"
 basisu_c_sys = { version = "0.9.1", features = ["encoder", "extra"] }
 
 [dev-dependencies]
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11"] }
 serde = { version = "1", features = ["derive"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 

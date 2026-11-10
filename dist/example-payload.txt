@@ -76,6 +76,7 @@ examples/compositor-effects/glare.slang
 examples/compositor-effects/highlight.slang
 examples/compositor-effects/vignette.slang
 examples/compositor_graph.py
+examples/compositor-effects/bloom.slang
 examples/first-scene.json
 examples/kitchen/CREDITS.md
 examples/kitchen/README.md

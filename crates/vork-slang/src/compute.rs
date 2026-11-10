@@ -173,6 +173,7 @@ print(json.dumps(scenes))
                     let buffer=&scene["buffers"][target.as_str().unwrap()];
                     let ty=match buffer["type"].as_str().unwrap() {"f32"=>"float","u32"=>"uint","vec2"=>"float2","vec3"=>"float3","vec4"=>"float4",_=>unreachable!()};
                     bindings+=&format!("{ty} {alias}_load(uint i){{return {ty}(0);}} void {alias}_store(uint i,{ty} value){{}}");
+                    if ty=="uint" {bindings+=&format!("uint {alias}_atomic_max(uint i,uint value){{return 0u;}}");}
                 }
                 let result=Compiler::discover().compile_compute(program["source"].as_str().unwrap(),Path::new("cloth-include.slang"),&bindings,64,[64,1,1])?;
                 ensure!(result.dependencies.is_empty(),"bundled cloth includes must not depend on checkout paths");
@@ -183,15 +184,33 @@ print(json.dumps(scenes))
     #[test]
     #[ignore = "requires pinned Slang"]
     fn compute_includes_fluid_templates() -> Result<()> {
-        let scene:serde_json::Value=serde_json::from_str(include_str!("../../../examples/water/scene.json"))?;
+        check_fluid_templates(include_str!("../../../examples/water/scene.json"), &["init","capacity","fit","white_step"])
+    }
+    #[test]
+    #[ignore = "requires pinned Slang"]
+    fn compute_includes_frozen_040_fluid_without_status() -> Result<()> {
+        // Original water with whitewater, impact without whitewater, and a
+        // drop with a published film cover the old authored binding patterns.
+        for scene in [
+            include_str!("../../vork-render/tests/fixtures/water-0.4.0/scene.json"),
+            include_str!("../../vork-render/tests/fixtures/water-0.4.0/impact.json"),
+            include_str!("../../vork-render/tests/fixtures/water-0.4.0/drop-film.json"),
+        ] {
+            check_fluid_templates(scene, &["init","marker_publish","film_publish"])?;
+        }
+        Ok(())
+    }
+    fn check_fluid_templates(json:&str, programs:&[&str]) -> Result<()> {
+        let scene:serde_json::Value=serde_json::from_str(json)?;
         let mut bindings=String::from("struct Tick {uint frame;float time;float dt;uint reserved;}; [[vk::binding(0,0)]] ConstantBuffer<Tick> vork_tick; struct Offset {uint4 value;}; [[vk::binding(1,0)]] ConstantBuffer<Offset> vork_offset;");
         for (name,b) in scene["buffers"].as_object().unwrap() {
+            if name == "fluid_status" { bindings += "\n#define VORK_FLUID_STATUS_BOUND 1\n"; }
             let ty=match b["type"].as_str().unwrap() {"f32"=>"float","u32"=>"uint","vec3"=>"float3","vec4"=>"float4",_=>unreachable!()};
             let dims=b["dims"].as_array().map(|d|d.iter().map(|v|v.as_u64().unwrap()).collect::<Vec<_>>()).unwrap_or_else(||vec![b["data"].as_array().unwrap().len() as u64,1,1]);
             bindings+=&format!("static const uint {name}_count={}u; static const uint3 {name}_dims=uint3({},{},{}); {ty} {name}_load(uint i) {{return {ty}(0);}} void {name}_store(uint i,{ty} v) {{}}",dims.iter().product::<u64>(),dims[0],dims[1],dims[2]);
-            if ty=="uint" {bindings+=&format!("uint {name}_atomic_min(uint i,uint v) {{return 0xffffffffu;}}");}
+            if ty=="uint" {bindings+=&format!("uint {name}_atomic_min(uint i,uint v) {{return 0xffffffffu;}} uint {name}_atomic_compare_exchange(uint i,uint expected,uint desired) {{return expected;}}");}
         }
-        for name in ["init","fit","white_step"] {
+        for &name in programs {
             let result=Compiler::discover().compile_compute(scene["programs"][name]["source"].as_str().unwrap(),Path::new("fluid-include.slang"),&bindings,64,[1,1,1])?;
             ensure!(result.dependencies.is_empty(),"bundled fluid includes must not depend on checkout paths");
         }

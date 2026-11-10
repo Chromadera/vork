@@ -39,7 +39,7 @@ pub(crate) fn prepare_with_packed(r:&Renderer,source:&v2::Scene,base:&std::path:
         if let v2::NodeKind::Mesh {geometry:name,..}=&node.kind {
             let Some(shape)=source.geometry.get(name).filter(|shape|crate::computed_geometry::dynamic(source,shape)) else {continue;};
             if geometry.contains_key(name) {continue;}
-            let names:BTreeSet<String>=shape.attributes.values().chain(shape.widths.iter()).chain(shape.count.iter()).chain(shape.ids.iter()).cloned().collect();
+            let names:BTreeSet<String>=shape.attributes.values().chain(shape.widths.iter()).chain(shape.count.iter()).chain(shape.ids.iter()).chain(shape.status.iter().map(|s| &s.buffer)).cloned().collect();
             let (programs,state)=geometry_solver_dependencies(source,names.clone());
             let plan=private_geometry_plan(named,&state,&names)?;
             geometry.insert(name.clone(),(programs,plan.buffers));
@@ -62,6 +62,33 @@ pub(crate) fn prepare_with_packed(r:&Renderer,source:&v2::Scene,base:&std::path:
     }
     Ok(prepared)
 }
+fn atomic_accessors(header: &mut String, binding: &str, ty: v2::BufferType, layout: &AttributeBinding) -> Result<()> {
+    if matches!(ty, v2::BufferType::U32) {
+        for operation in ["add", "sub", "min", "max", "and", "or", "xor", "exchange", "compare_exchange"] {
+            let (parameters, method, arguments) = if operation == "compare_exchange" {
+                ("uint expected, uint desired", "compareExchange", "expected, desired")
+            } else { ("uint value", operation, "value") };
+            writeln!(header, "uint {binding}_atomic_{operation}(uint i, {parameters}) {{")?;
+            for span in &layout.spans {
+                let end = span.first + span.count;
+                writeln!(header, "if(i >= {}u && i < {end}u) return vork_page_{}[{}u + i - {}u].{method}({arguments});", span.first, span.page, span.offset, span.first)?;
+            }
+            let missing = if operation == "min" { "0xffffffffu" } else { "0u" };
+            writeln!(header, "return {missing}; }}")?;
+        }
+    } else if matches!(ty, v2::BufferType::F32) {
+        // CAS over the existing u32 pages works on every supported compute device;
+        // native float-atomic features are not required for the public operation.
+        writeln!(header, "float {binding}_atomic_add(uint i, float value) {{")?;
+        for span in &layout.spans {
+            let end = span.first + span.count;
+            writeln!(header, "if(i >= {}u && i < {end}u) {{ uint word={}u+i-{}u; uint old=vork_page_{}[word].load(); for(;;) {{ uint prior=vork_page_{}[word].compareExchange(old,asuint(asfloat(old)+value)); if(prior==old) return asfloat(old); old=prior; }} }}", span.first, span.offset, span.first, span.page, span.page)?;
+        }
+        header.push_str("return 0.; }\n");
+    }
+    Ok(())
+}
+
 fn prepare_program(r:&Renderer,source:&v2::Scene,base:&std::path::Path,named:&ProgramBuffers,attributes:&ProgramBuffers,geometry:Option<&v2::Geometry>,packed:bool,name:&str,program:&v2::Program)->Result<PreparedProgram> {
     let threads=program.dispatch.context("compute dispatch required")?.threads();
             let used: BTreeSet<_> = program
@@ -74,7 +101,7 @@ fn prepare_program(r:&Renderer,source:&v2::Scene,base:&std::path::Path,named:&Pr
                 "compute {name}: too many buffer pages"
             );
             let atomic_pages: BTreeSet<_> = program.bindings.values()
-                .filter(|name| matches!(source.buffers[*name].element_type, v2::BufferType::U32))
+                .filter(|name| matches!(source.buffers[*name].element_type, v2::BufferType::U32 | v2::BufferType::F32))
                 .flat_map(|name| attributes.bindings[name].spans.iter().map(|span| span.page)).collect();
             let mut header = String::from(CONTEXT_BINDINGS);
             for (i, page) in used.iter().enumerate() {
@@ -122,14 +149,7 @@ fn prepare_program(r:&Renderer,source:&v2::Scene,base:&std::path::Path,named:&Pr
                     )?;
                 }
                 header.push_str("}\n");
-                if matches!(source.buffers[buffer].element_type, v2::BufferType::U32) {
-                    writeln!(header, "uint {binding}_atomic_min(uint i, uint value) {{")?;
-                    for span in &layout.spans {
-                        let end = span.first + span.count;
-                        writeln!(header, "if(i >= {}u && i < {end}u) {{ return vork_page_{}[{}u + i - {}u].min(value); }}", span.first, span.page, span.offset, span.first)?;
-                    }
-                    header.push_str("return 0xffffffffu; }\n");
-                }
+                atomic_accessors(&mut header, binding, source.buffers[buffer].element_type, layout)?;
                 typed_accessors(&mut header, binding, source.buffers[buffer].element_type)?;
             }
             let implicit = geometry_input_header(&mut header, source,
@@ -522,7 +542,7 @@ impl Compute {
             let Some(v2::Node { kind: v2::NodeKind::Mesh { geometry, .. }, .. }) = sources[root.node] else { continue; };
             let geometry_name = geometry.clone();
             let geometry = &source.geometry[&geometry_name];
-            let names: BTreeSet<String> = geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.count.iter()).chain(geometry.ids.iter()).cloned().collect();
+            let names: BTreeSet<String> = geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.count.iter()).chain(geometry.ids.iter()).chain(geometry.status.iter().map(|s| &s.buffer)).cloned().collect();
             let (programs, state) = geometry_solver_dependencies(source, names.clone());
             if !programs.is_empty() && programs.is_subset(&global_programs) {
                 // Keep the geometry view, but alias its geometry-independent named
@@ -1807,6 +1827,9 @@ fn typed_accessors(
     binding: &str,
     kind: vork_scene::v2::BufferType,
 ) -> Result<()> {
+    if binding == "fluid_status" {
+        header.push_str("#define VORK_FLUID_STATUS_BOUND 1\n");
+    }
     typed_element_accessors(header, binding, kind, true)
 }
 fn typed_element_accessors(header: &mut String, binding: &str, kind: v2::BufferType, writable: bool) -> Result<()> {
@@ -1904,4 +1927,68 @@ fn water_simulation_and_reconstruction_timing() -> Result<()> {
     }
     eprintln!("water warm five-tick frame (48 fps): simulation_wall_s={:.6} reconstruction_wall_s={:.6} occupancy_five_publications_wall_s={:.6}",totals[0],totals[1],totals[2]);
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "GPU phase timing through bench/bench; VORK_WATER_SCENE names the frozen fluid scene"]
+fn fluid_step_timing() -> Result<()> {
+    let path=PathBuf::from(std::env::var_os("VORK_WATER_SCENE").context("VORK_WATER_SCENE is required")?);
+    let scene=Scene::from_json(&std::fs::read(&path)?)?;
+    let base=path.parent().unwrap();let r=Renderer::new()?;
+    ensure!(r.device.features().contains(wgpu::Features::TIMESTAMP_QUERY),"fluid timing needs GPU timestamps");
+    let decoded=buffers::SceneBuffers::decode(&scene,base)?;
+    let attrs=ProgramBuffers::install(&r,&scene,&decoded)?;
+    let compute=Compute::test_install(&r,&scene,base,Some(&attrs),&[],&[],&[],vork_time::Time::integer(24),1.)?.context("fluid compute")?;
+    let sim=compute.simulation.as_ref().context("fluid simulation")?;
+    let split=sim.steps.iter().position(|name|name=="marker_advect").context("fluid marker advancement")?+1;
+    let mut cursor=compute.cursor.lock().unwrap();r.wait(None)?;
+    let mut totals=[0.;2];
+    for tick in 0..6 {
+        for (phase,names) in [&sim.steps[..split],&sim.steps[split..]].into_iter().enumerate() {
+            let mut encoder=r.device.create_command_encoder(&Default::default());
+            compute.set_tick(&mut encoder,tick,sim.t0.as_f64()+f64::from(tick)*sim.dt.as_f64(),sim.dt.as_f64(),sim.seed);
+            let probe=TickProbe::new(&r.device);
+            compute.run_named_uploaded(&mut encoder,&mut cursor,names,(sim.t0.as_f64()+f64::from(tick)*sim.dt.as_f64()) as f32,None,Some(&probe.queries));
+            let mut cost=probe.resolve(&mut encoder,compute.timestamp_period);
+            let submission=r.queue.submit([encoder.finish()]);r.wait(Some(submission))?;
+            let gpu_ms=cost.value().context("missing fluid phase GPU timestamps")?;
+            if tick>0 {totals[phase]+=gpu_ms;}
+        }
+    }
+    // Failed publication is not a fast simulation. Check both generations of
+    // the fluid library's receipts before reporting any measurement.
+    for (name,element,expected) in [("correction",3,1_f32.to_bits()),("fluid_status",0,0)] {
+        let Some(binding)=attrs.bindings.get(name) else {continue};
+        let span=binding.spans.iter().find(|span|element>=span.first && element<span.first+span.count).context("fluid timing receipt")?;
+        let readback=r.device.create_buffer(&wgpu::BufferDescriptor {label:Some("fluid timing validity"),size:4,usage:wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
+        let mut encoder=r.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&attrs.storage[span.page as usize],u64::from(span.offset+element-span.first)*4,&readback,0,4);
+        let submission=r.queue.submit([encoder.finish()]);let(tx,rx)=std::sync::mpsc::channel();
+        readback.map_async(wgpu::MapMode::Read,..,move |value|{let _=tx.send(value);});r.wait(Some(submission))?;rx.recv()??;
+        let data=readback.get_mapped_range(..);let actual=u32::from_le_bytes(data[..4].try_into().unwrap());drop(data);readback.unmap();
+        ensure!(actual==expected,"{name} refused fluid timing: {actual:#x}");
+    }
+    eprintln!("FLUID_STEP_TIMING {}",serde_json::json!({"simulation_gpu_ms":totals[0]/5.,"reconstruction_gpu_ms":totals[1]/5.,"step_gpu_ms":(totals[0]+totals[1])/5.,"steps":5,"warmup_steps":1}));
+    Ok(())
+}
+
+#[cfg(test)]
+mod atomic_contract_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires pinned Slang"]
+    fn scalar_atomic_helpers_compile_through_compute_validation() -> Result<()> {
+        let layout = AttributeBinding { count: 2, width: 1, spans: vec![
+            buffers::AttributeSpan { page: 0, offset: 7, first: 0, count: 1 },
+            buffers::AttributeSpan { page: 1, offset: 3, first: 1, count: 1 },
+        ] };
+        let mut header = String::from(CONTEXT_BINDINGS);
+        header.push_str("[[vk::binding(2,0)]] RWStructuredBuffer<Atomic<uint>> vork_page_0; [[vk::binding(3,0)]] RWStructuredBuffer<Atomic<uint>> vork_page_1;");
+        atomic_accessors(&mut header,"u",v2::BufferType::U32,&layout)?;
+        atomic_accessors(&mut header,"f",v2::BufferType::F32,&layout)?;
+        let source = "struct Inputs {}; void compute(ComputeContext c, Inputs i) {uint j=c.id.x; uint x=u_atomic_add(j,1u); x+=u_atomic_sub(j,1u); x+=u_atomic_min(j,3u); x+=u_atomic_max(j,4u); x+=u_atomic_and(j,7u); x+=u_atomic_or(j,8u); x+=u_atomic_xor(j,1u); x+=u_atomic_exchange(j,9u); x+=u_atomic_compare_exchange(j,9u,x); f_atomic_add(j,float(x));}";
+        vork_slang::Compiler::discover().compile_compute(source,Path::new("atomic-contract.slang"),&header,64,[3,1,1])?;
+        Ok(())
+    }
 }

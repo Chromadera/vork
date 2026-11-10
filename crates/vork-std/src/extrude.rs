@@ -8,7 +8,9 @@ use serde::Deserialize;
 /// packages/ts/src/lib/constants.ts: wall corners turning further are sharp.
 const SMOOTH_ANGLE_DEGREES: f32 = 30.;
 
-fn default_name() -> String { "extrude".into() }
+fn default_name() -> String {
+    "extrude".into()
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +29,9 @@ pub(crate) struct Options {
     #[serde(default = "default_bevel_resolution")]
     bevel_resolution: u32,
 }
-fn default_bevel_resolution() -> u32 { 4 }
+fn default_bevel_resolution() -> u32 {
+    4
+}
 fn default_depth() -> f32 {
     1.
 }
@@ -116,9 +120,14 @@ fn geometry(mut o: Options) -> Result<serde_json::Value> {
         o.depth.is_finite() && o.depth > 0.,
         "depth must be finite and positive"
     );
-    ensure!(o.bevel_depth.is_finite() && o.bevel_depth >= 0.,
-        "bevel_depth must be finite and nonnegative");
-    ensure!((1..=32).contains(&o.bevel_resolution), "bevel_resolution must be in 1..32");
+    ensure!(
+        o.bevel_depth.is_finite() && o.bevel_depth >= 0.,
+        "bevel_depth must be finite and nonnegative"
+    );
+    ensure!(
+        (1..=32).contains(&o.bevel_resolution),
+        "bevel_resolution must be in 1..32"
+    );
     let mut contours: Vec<Vec<Point>> = std::iter::once(&o.outline)
         .chain(&o.holes)
         .map(|c| c.iter().map(|&[x, y]| point(x, y)).collect())
@@ -204,27 +213,61 @@ fn geometry(mut o: Options) -> Result<serde_json::Value> {
     // Offset line intersections use the same contour orientation for outline and holes.
     // Bound every vertex's motion below half the shortest edge/non-neighbour clearance:
     // no edge can reverse and no moving contours can meet anywhere along the bevel.
-    let miters: Vec<Vec<Vector>> = contours.iter().map(|c| (0..c.len()).map(|i| {
-        let a = right(c[(i + c.len() - 1) % c.len()], c[i]);
-        let b = right(c[i], c[(i + 1) % c.len()]);
-        (a + b) / (1. + a.dot(b))
-    }).collect()).collect();
+    let miters: Vec<Vec<Vector>> = contours
+        .iter()
+        .map(|c| {
+            (0..c.len())
+                .map(|i| {
+                    let a = right(c[(i + c.len() - 1) % c.len()], c[i]);
+                    let b = right(c[i], c[(i + 1) % c.len()]);
+                    (a + b) / (1. + a.dot(b))
+                })
+                .collect()
+        })
+        .collect();
     if o.bevel_depth > 0. {
-        let longest = miters.iter().flatten().map(|m| m.length()).fold(0f32, f32::max);
-        ensure!(miters.iter().flatten().all(|m| m.x.is_finite() && m.y.is_finite()),
-            "profile must have finite inward rim intersections");
+        let longest = miters
+            .iter()
+            .flatten()
+            .map(|m| m.length())
+            .fold(0f32, f32::max);
+        ensure!(
+            miters
+                .iter()
+                .flatten()
+                .all(|m| m.x.is_finite() && m.y.is_finite()),
+            "profile must have finite inward rim intersections"
+        );
         // Leave the merge tolerance between moving edges. Round down so the strict
         // clearance bound remains safe when converted back to output precision.
         let limit = (clearance - f64::from(merge)) / (2. * f64::from(longest));
         let rounded = limit as f32;
-        let profile_limit = if f64::from(rounded) >= limit { rounded.next_down() } else { rounded };
-        o.bevel_depth = crate::clamp_radii(&[o.bevel_depth], &[
-            (o.depth, &[0, 0]), (profile_limit.max(0.), &[0]),
-        ])[0];
+        let profile_limit = if f64::from(rounded) >= limit {
+            rounded.next_down()
+        } else {
+            rounded
+        };
+        o.bevel_depth = crate::clamp_radii(
+            &[o.bevel_depth],
+            &[(o.depth, &[0, 0]), (profile_limit.max(0.), &[0])],
+        )[0];
     }
-    let cap_contours: Vec<Vec<Point>> = contours.iter().zip(&miters).map(|(c, m)|
-        c.iter().zip(m).map(|(p, m)| if o.bevel_depth > 0. { *p - *m * o.bevel_depth } else { *p }).collect()
-    ).collect();
+    let cap_contours: Vec<Vec<Point>> = contours
+        .iter()
+        .zip(&miters)
+        .map(|(c, m)| {
+            c.iter()
+                .zip(m)
+                .map(|(p, m)| {
+                    if o.bevel_depth > 0. {
+                        *p - *m * o.bevel_depth
+                    } else {
+                        *p
+                    }
+                })
+                .collect()
+        })
+        .collect();
     let caps = fill(&cap_contours, 2. * merge)?;
     let z = o.depth / 2.;
     let size = hi - lo;
@@ -253,16 +296,33 @@ fn geometry(mut o: Options) -> Result<serde_json::Value> {
         let r = o.bevel_depth;
         for sign in [1f32, -1.] {
             for step in 0..=o.bevel_resolution {
-                let k = if sign > 0. { step } else { o.bevel_resolution - step };
+                let k = if sign > 0. {
+                    step
+                } else {
+                    o.bevel_resolution - step
+                };
                 let angle = k as f32 / o.bevel_resolution as f32 * std::f32::consts::FRAC_PI_2;
-                let (inset, height, nxy, nz) = if k == 0 { (r, sign * z, 0., sign) }
-                    else if k == o.bevel_resolution { (0., sign * (z - r), 1., 0.) }
-                    else { (r * (1. - angle.sin()), sign * (z - r + r * angle.cos()), angle.sin(), sign * angle.cos()) };
-                if sign < 0. && step == 0 && r == z { continue; }
+                let (inset, height, nxy, nz) = if k == 0 {
+                    (r, sign * z, 0., sign)
+                } else if k == o.bevel_resolution {
+                    (0., sign * (z - r), 1., 0.)
+                } else {
+                    (
+                        r * (1. - angle.sin()),
+                        sign * (z - r + r * angle.cos()),
+                        angle.sin(),
+                        sign * angle.cos(),
+                    )
+                };
+                if sign < 0. && step == 0 && r == z {
+                    continue;
+                }
                 rings.push((inset, height, nxy, nz));
             }
         }
-    } else { rings.extend([(0., z, 1., 0.), (0., -z, 1., 0.)]); }
+    } else {
+        rings.extend([(0., z, 1., 0.), (0., -z, 1., 0.)]);
+    }
     let rows = rings.len() as u32;
     for (contour, miter) in contours.iter().zip(&miters) {
         let n = contour.len();
@@ -276,9 +336,16 @@ fn geometry(mut o: Options) -> Result<serde_json::Value> {
         let mut column = |i: usize, normal: Vector, u: f32| {
             let front = mesh.p.len() as u32;
             for &(inset, height, nxy, nz) in &rings {
-                let p = if inset > 0. { contour[i] - miter[i] * inset } else { contour[i] };
-                mesh.vertex_uv([p.x, p.y, height], [normal.x * nxy, normal.y * nxy, nz],
-                    [u, (z - height) / o.depth]);
+                let p = if inset > 0. {
+                    contour[i] - miter[i] * inset
+                } else {
+                    contour[i]
+                };
+                mesh.vertex_uv(
+                    [p.x, p.y, height],
+                    [normal.x * nxy, normal.y * nxy, nz],
+                    [u, (z - height) / o.depth],
+                );
             }
             front
         };
@@ -297,11 +364,8 @@ fn geometry(mut o: Options) -> Result<serde_json::Value> {
                     (ends[previous], starts[i]) = (c, c);
                 }
                 _ => {
-                    ends[previous] = column(
-                        i,
-                        shared.unwrap_or(incoming),
-                        if i == 0 { 1. } else { u },
-                    );
+                    ends[previous] =
+                        column(i, shared.unwrap_or(incoming), if i == 0 { 1. } else { u });
                     starts[i] = column(i, shared.unwrap_or(outgoing), u);
                 }
             }
@@ -365,24 +429,32 @@ mod tests {
 
     #[test]
     fn bevels_close_concave_profiles_and_holes_without_changing_bounds() {
-        let star: Vec<[f32; 2]> = (0..10).map(|i| {
-            let a = i as f32 * std::f32::consts::PI / 5.;
-            let r = if i % 2 == 0 { 1. } else { 0.45 };
-            [r * a.cos(), r * a.sin()]
-        }).collect();
+        let star: Vec<[f32; 2]> = (0..10)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::PI / 5.;
+                let r = if i % 2 == 0 { 1. } else { 0.45 };
+                [r * a.cos(), r * a.sin()]
+            })
+            .collect();
         for outline in [SQUARE.to_vec(), star] {
             for resolution in [1, 4, 32] {
                 for depth in [0.2, 0.04] {
                     let g = extrude(json!({"name":"e", "outline":outline, "depth":depth,
-                        "bevel_depth":0.02, "bevel_resolution":resolution})).unwrap();
-                    watertight(&g, "e").unwrap_or_else(|e| panic!("{outline:?}, resolution {resolution}, depth {depth}: {e}"));
+                        "bevel_depth":0.02, "bevel_resolution":resolution}))
+                    .unwrap();
+                    watertight(&g, "e").unwrap_or_else(|e| {
+                        panic!("{outline:?}, resolution {resolution}, depth {depth}: {e}")
+                    });
                     let p: Vec<[f32; 3]> = data(&g, "position");
                     let n: Vec<[f32; 3]> = data(&g, "normal");
                     assert!(p.iter().all(|p| p[2].abs() <= depth / 2.));
                     assert!(n.iter().any(|n| n[2] > 0. && n[2] < 1.) || resolution == 1);
-                    assert!(n.iter().all(|n| (n.iter().map(|v| v*v).sum::<f32>() - 1.).abs() < 1e-5));
+                    assert!(
+                        n.iter()
+                            .all(|n| (n.iter().map(|v| v * v).sum::<f32>() - 1.).abs() < 1e-5)
+                    );
                     for axis in 0..2 {
-                        for fold in [f32::min as fn(f32,f32)->f32, f32::max] {
+                        for fold in [f32::min as fn(f32, f32) -> f32, f32::max] {
                             let expected = outline.iter().map(|p| p[axis]).reduce(fold).unwrap();
                             let actual = p.iter().map(|p| p[axis]).reduce(fold).unwrap();
                             assert_eq!(actual, expected);
@@ -393,32 +465,53 @@ mod tests {
         }
         for reverse in [false, true] {
             let mut outline = SQUARE.to_vec();
-            let mut hole = vec![[-0.3,-0.3],[-0.3,0.3],[0.3,0.3],[0.3,-0.3]];
-            if reverse { outline.reverse(); hole.reverse(); }
-            let g = extrude(json!({"name":"e","outline":outline,"holes":[hole],"depth":0.3,"bevel_depth":0.03})).unwrap();
-            watertight(&g,"e").unwrap();
+            let mut hole = vec![[-0.3, -0.3], [-0.3, 0.3], [0.3, 0.3], [0.3, -0.3]];
+            if reverse {
+                outline.reverse();
+                hole.reverse();
+            }
+            let g = extrude(
+                json!({"name":"e","outline":outline,"holes":[hole],"depth":0.3,"bevel_depth":0.03}),
+            )
+            .unwrap();
+            watertight(&g, "e").unwrap();
         }
         for options in [
             json!({"outline":SQUARE,"bevel_depth":-0.1}),
             json!({"outline":SQUARE,"bevel_resolution":0}),
             json!({"outline":SQUARE,"bevel_resolution":33}),
-        ] { assert!(extrude(options).unwrap_err().to_string().contains("bevel")); }
+        ] {
+            assert!(extrude(options).unwrap_err().to_string().contains("bevel"));
+        }
     }
 
     #[test]
     fn oversized_bevel_matches_maximum_exactly() {
-        for (outline, depth) in [(SQUARE.to_vec(), 0.1),
-            (vec![[0.,0.],[2.,0.],[2.,0.01],[0.,0.01]], 1.)] {
-            let oversized = extrude(json!({"name":"e","outline":outline,"depth":depth,"bevel_depth":100.})).unwrap();
+        for (outline, depth) in [
+            (SQUARE.to_vec(), 0.1),
+            (vec![[0., 0.], [2., 0.], [2., 0.01], [0., 0.01]], 1.),
+        ] {
+            let oversized =
+                extrude(json!({"name":"e","outline":outline,"depth":depth,"bevel_depth":100.}))
+                    .unwrap();
             // Exercise both the depth bound and the thin profile clearance bound.
-            let maximum = if depth == 0.1 { depth / 2. } else {
+            let maximum = if depth == 0.1 {
+                depth / 2.
+            } else {
                 let merge = 2. * 8. * f32::EPSILON;
-                let bound = (f64::from(0.01f32) - f64::from(merge)) /
-                    (2. * f64::from(2f32.sqrt()));
+                let bound = (f64::from(0.01f32) - f64::from(merge)) / (2. * f64::from(2f32.sqrt()));
                 let rounded = bound as f32;
-                if f64::from(rounded) >= bound { rounded.next_down() } else { rounded }
+                if f64::from(rounded) >= bound {
+                    rounded.next_down()
+                } else {
+                    rounded
+                }
             };
-            assert_eq!(oversized, extrude(json!({"name":"e","outline":outline,"depth":depth,"bevel_depth":maximum})).unwrap());
+            assert_eq!(
+                oversized,
+                extrude(json!({"name":"e","outline":outline,"depth":depth,"bevel_depth":maximum}))
+                    .unwrap()
+            );
             watertight(&oversized, "e").unwrap();
         }
     }

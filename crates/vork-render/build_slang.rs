@@ -187,7 +187,7 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
     println!("cargo:rerun-if-changed={sampling}");
     fs::copy(sampling,generated.join("vork_sampling.slang")).unwrap();
     // The same core and Rust-registry constants used by std programs and the oracle.
-    let opacity = "../../libraries/std/opacity.slang";
+    let opacity = "shaders/std_opacity.slang";
     println!("cargo:rerun-if-changed={opacity}");
     fs::copy(opacity, generated.join("std_opacity.slang")).unwrap();
     let core = "../../libraries/std/openpbr_core.slang";
@@ -378,7 +378,7 @@ pub fn compile(out: &Path, closure_dir: &Path) -> (String, blake3::Hash) {
                         command.arg(path);
                         module_options(&mut command, path, true);
                         if target == "metal" {
-                            if *stage == "vertex" {command.args(["-DVORK_MATERIAL_WORDS_REGISTER=t2","-DVORK_FRAME_LIGHTS_REGISTER=t30"]);}
+                            if *stage == "vertex" {command.args(["-DVORK_MATERIAL_WORDS_REGISTER=t3","-DVORK_FRAME_LIGHTS_REGISTER=t30","-DVORK_FRAME_CLUSTERS_REGISTER=b29","-DVORK_POINT_WORDS_REGISTER=t2"]);}
                             command.args(forward_variant::hit_kernel_registers(
                                 path.file_stem().unwrap().to_str().unwrap(),
                                 *entry == "path_main",path.file_stem().unwrap() == "probe_update"));

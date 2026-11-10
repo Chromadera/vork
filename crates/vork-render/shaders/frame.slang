@@ -30,7 +30,10 @@ float4x4 object_normal(uint object) {return object_normal_matrix(objects[object]
 [[vk::binding(4,0)]] SamplerState env_sampler : register(s0);
 [[vk::binding(5,0)]] Texture2D env_diffuse : register(t1);
 [[vk::binding(6,0)]] Texture2D env_brdf : register(t2);
-[[vk::binding(7,0)]] ConstantBuffer<ClusterConfig> clusters : register(b3);
+#ifndef VORK_FRAME_CLUSTERS_REGISTER
+#define VORK_FRAME_CLUSTERS_REGISTER b3
+#endif
+[[vk::binding(7,0)]] ConstantBuffer<ClusterConfig> clusters : register(VORK_FRAME_CLUSTERS_REGISTER);
 [[vk::binding(8,0)]] StructuredBuffer<uint> cluster_lights : register(t4);
 [[vk::binding(9,0)]] Texture2D ltc_amplitude : register(t3);
 

@@ -175,6 +175,7 @@ class PackageReleaseTests(unittest.TestCase):
 
             version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
             write(root / 'vork', f'#!/bin/sh\necho vork {version}\n', True)
+            write(root / 'vork-slang-filesystem', '#!/bin/sh\nexit 0\n', True)
             slang = root / 'slang'
             pin = json.loads((ROOT / 'dist/slang.json').read_text())['version']
             write(slang / 'bin/slangc', f'#!/bin/sh\necho {pin} >&2\n', True)
@@ -199,6 +200,7 @@ class PackageReleaseTests(unittest.TestCase):
             archive = next((root / 'out').glob('*.tar.gz'))
             with tarfile.open(archive) as package:
                 self.assertIn('vork', package.getnames())
+                self.assertIn('vork-slang-filesystem', package.getnames())
                 sdk_metadata = json.loads(package.extractfile('sdk/package.json').read())
                 self.assertEqual(sdk_metadata['exports'], {
                     '.': {'types': './index.d.ts', 'import': './index.js'},
@@ -232,7 +234,7 @@ class PackageReleaseTests(unittest.TestCase):
                 self.assertEqual(package.extractfile('shaders/' + shader).read(), envelope(shader))
                 path = 'libraries/blender/filmic.exr'
                 self.assertEqual(package.extractfile(path).read(), (ROOT / path).read_bytes())
-                self.assertNotIn('libraries/blender/agx.exr', package.getnames())
+                self.assertNotIn('libraries/std/agx.exr', package.getnames())
             # A hosted job must never silently produce a cold archive.
             shutil.rmtree(root / 'shaders')
             missing = subprocess.run([sys.executable, str(ROOT / 'scripts/package-release'),

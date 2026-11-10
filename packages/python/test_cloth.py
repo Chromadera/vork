@@ -47,6 +47,20 @@ class ClothTest(unittest.TestCase):
             )
         )
 
+    def test_rest_positions_and_named_capacity_receipt(self):
+        s = scene()
+        positions = copy.deepcopy(s["buffers"]["p"]["data"])
+        attach(s, "fabric", collision_margin=0.006)
+        g = s["geometry"][s["nodes"][0]["geometry"]]
+        status = g["status"]
+        self.assertEqual(s["buffers"][status["buffer"]], dict(type="u32", data=[0]))
+        self.assertIn("fabric", status["message"])
+        self.assertIn("512", status["message"])
+        self.assertIn("collision_margin", status["message"])
+        rest = next(v for k, v in s["buffers"].items() if k.endswith("rest_position"))
+        self.assertEqual(rest["data"], positions)
+        self.assertTrue(all("contact_status" in p["bindings"] for p in s["programs"].values()))
+
     def test_authored_predecessor_normals_survive(self):
         s = scene()
         normals = [[0, -1, 0]] * 3

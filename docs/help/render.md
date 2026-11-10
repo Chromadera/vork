@@ -14,6 +14,7 @@ white into the display's middle range to leave room for bright highlights.
 std/standard at default exposure/gamma maps white background RGB to screen white;
 this display transform affects the whole image. EXR remains scene-linear.
 Motion-blur shutter is in output frames: exposure time in seconds is shutter/fps.
+Previous-pose and shutter sample times clamp to zero before animation-layer retiming.
 AgX exposure is stops, default 0, with no automatic exposure.
 RGB backgrounds affect camera escapes only, not scene illumination.
 Named display inputs use material tracks; look/bool keys use STEP. White balance is a compositor.

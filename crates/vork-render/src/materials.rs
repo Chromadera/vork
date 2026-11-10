@@ -3,7 +3,7 @@ use super::*;
 use ::vork_scene::v2::{OPENPBR, OpenPbrKind, OpenPbrParam};
 
 // Fatal errors, transmission warning, evaluation demand and current-view capacity feedback.
-pub(crate) const SHADER_DIAGNOSTICS_INIT: [u32; vork_slang::registry::SHADER_DIAGNOSTICS_WORDS as usize] = [0, u32::MAX, 0, 0, 0, 0, 0, 0, 0, 0];
+pub(crate) const SHADER_DIAGNOSTICS_INIT: [u32; vork_slang::registry::SHADER_DIAGNOSTICS_WORDS as usize] = [0, u32::MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, u32::MAX, u32::MAX, u32::MAX, 0];
 pub(crate) const SHADER_DIAGNOSTICS_BYTES: u64 = std::mem::size_of_val(&SHADER_DIAGNOSTICS_INIT) as u64;
 
 /// One material: OpenPBR inputs as constants, each optionally multiplied by a channel
@@ -195,6 +195,7 @@ pub(crate) struct MaterialTable {
     views: Vec<TextureSlot>,
     samplers: Vec<wgpu::Sampler>,
     layout: wgpu::BindGroupLayout,
+    boundary_spill: bool,
 }
 /// One frame slot's material records and the group 1 binding that reads them. Frame
 /// values write animated inputs at [`value_location`] through the one change tracker,
@@ -232,13 +233,14 @@ impl MaterialTable {
         let fallback=self.views.iter().find_map(|slot|match slot {TextureSlot::File(view)=>Some(view),_=>None})
             .context("canonical material table requires its dummy file view")?;
         let views:Vec<_>=self.views.iter().map(|slot|match slot {TextureSlot::File(view)=>view.clone(),_=>fallback.clone()}).collect();
-        Ok(frame_materials(r,&self.layout,&self.records,&views,&self.samplers))
+        Ok(frame_materials(r,&self.layout,&self.records,&views,&self.samplers,false,0))
     }
 
     pub(crate) fn frame_with_images(
         &self,
         r: &Renderer,
         images: &[wgpu::TextureView],
+        spill_reservation: u64,
     ) -> FrameMaterials {
         let views: Vec<_> = self
             .views
@@ -248,7 +250,7 @@ impl MaterialTable {
                 TextureSlot::Render(index) => images[*index].clone(),
             })
             .collect();
-        frame_materials(r, &self.layout, &self.records, &views, &self.samplers)
+        frame_materials(r, &self.layout, &self.records, &views, &self.samplers,self.boundary_spill,spill_reservation)
     }
 }
 fn frame_materials(
@@ -257,6 +259,8 @@ fn frame_materials(
     bytes: &[u8],
     views: &[wgpu::TextureView],
     samplers: &[wgpu::Sampler],
+    boundary_spill: bool,
+    spill_reservation: u64,
 ) -> FrameMaterials {
     let records = init(
         &r.device,
@@ -264,7 +268,22 @@ fn frame_materials(
         bytes,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     );
-    let shader_errors = init(&r.device, "shader diagnostics", bytemuck::cast_slice(&SHADER_DIAGNOSTICS_INIT), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST);
+    // The existing writable material binding also owns rare dielectric spills.
+    // No per-scene solid count sizes invocation-private arrays. Slots are live
+    // only while occupied, and are immediately reusable by other invocations.
+    let limits=r.device.limits();
+    let spill_bytes=if boundary_spill {
+        // Start with a small share of a legal binding. Collection grows this
+        // reservation and replays an exhausted exposure; only the native
+        // buffer/binding limit is a hard bound.
+        let maximum=limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        (maximum/1024).max(64<<10).max(spill_reservation).min(maximum)&!3
+    } else {SHADER_DIAGNOSTICS_BYTES+8};
+    let shader_errors=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some("material diagnostics and dielectric spill arena"),size:spill_bytes,
+        usage:wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
+    r.queue.write_buffer(&shader_errors,0,bytemuck::cast_slice(&SHADER_DIAGNOSTICS_INIT));
+    let groups=((spill_bytes-SHADER_DIAGNOSTICS_BYTES-8)/4/(1+32*u64::from(vork_slang::registry::PATH_BOUNDARY_NODE_WORDS))) as u32;
+    r.queue.write_buffer(&shader_errors,SHADER_DIAGNOSTICS_BYTES,bytemuck::cast_slice(&[groups,0u32]));
     let mut views: Vec<_> = views.iter().collect();
     let mut samplers: Vec<_> = samplers.iter().collect();
     views.resize(views.len().max(vork_slang::registry::MATERIAL_TEXTURE_CAPACITY as usize),views[0]);
@@ -812,6 +831,7 @@ impl<'a> TextureInstaller<'a> {
         &mut self,
         layout: &wgpu::BindGroupLayout,
         records: Vec<u8>,
+        boundary_spill: bool,
     ) -> Result<MaterialTable> {
         crate::gpu_memory::storage_binding(
             &self.r.device.limits(),
@@ -839,13 +859,14 @@ impl<'a> TextureInstaller<'a> {
             })
             .collect();
         let shared =
-            file_views.map(|views| frame_materials(self.r, layout, &records, &views, &samplers));
+            file_views.map(|views| frame_materials(self.r, layout, &records, &views, &samplers,false,0));
         Ok(MaterialTable {
             shared,
             records,
             views,
             samplers,
             layout: layout.clone(),
+            boundary_spill,
         })
     }
     fn mip_resources(&self) -> &([wgpu::RenderPipeline; 3], wgpu::Sampler) {
@@ -3052,6 +3073,7 @@ mod tests {
             .into_iter()
             .flat_map(|uv| {
                 (0..6).map(move |flags| crate::geometry::VertexLayout {
+                points:false,
                     deform: flags >= 4,
                     tangent: flags >= 4 || flags & 2 != 0,
                     color: flags & 1 != 0,
@@ -3463,7 +3485,7 @@ mod descriptor_capacity_tests {
         }
         assert_eq!(installer.counts()?,(1025,65));
         let material_layout=r.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:None,entries:&crate::pipelines::material_entries_for(1025,65)});
-        let table=installer.table(&material_layout,vec![0;16])?;
+        let table=installer.table(&material_layout,vec![0;16],false)?;
         let output_layout=r.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:None,entries:&[crate::pipelines::buffer_entry(0,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false})]});
         let output=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:None,size:16,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false});
         let readback=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:None,size:16,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false});
@@ -3491,4 +3513,69 @@ mod descriptor_capacity_tests {
         for (actual,expected) in color.iter().zip([23.,191.,91.,255.]) {assert!((actual-expected/255.).abs()<1e-5);}
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn dielectric_spills_preserve_records_and_return_every_slot() -> Result<()> {
+    let Some(r)=crate::test_renderer()? else {return Ok(());};
+    let images=Default::default();
+    let mut installer=TextureInstaller::new(&r,&images);
+    let material_layout=r.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:None,entries:&crate::pipelines::material_entries(false)});
+    let table=installer.table(&material_layout,vec![0;16],true)?;
+    let materials=table.frame_with_images(&r,&[],0);
+    let output_layout=r.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:None,entries:&[crate::pipelines::buffer_entry(0,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false})]});
+    let buffer=|label,size,usage|crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some(label),size,usage,mapped_at_creation:false});
+    let output=buffer("interior test results",128,wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
+    let readback=buffer("interior test readback",128+materials.shader_errors.size(),wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ);
+    let bind=r.device.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&output_layout,entries:&[entry(0,output.as_entire_binding())]});
+    let layout=r.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {label:None,bind_group_layouts:&[Some(&output_layout),Some(&material_layout)],immediate_size:0});
+    let source=r#"import path_boundary;
+[[vk::binding(0,0)]] RWStructuredBuffer<uint> results : register(u0);
+[shader("compute")][numthreads(32,1,1)] void interior_test(uint3 id:SV_DispatchThreadID) {
+    PathOccupancy<8> state={};uint good=1u;let count=17u+id.x;
+    for(uint repeat=0u;repeat<4u;repeat++) {
+        for(uint i=0u;i<count;i++) {
+            var b=path_air();b.object=id.x*64u+i;b.ior=1.+float(i)/64.;
+            if(!state.cross<EqualBoundaryPriority>(b,true)) {good=0u;break;}
+        }
+        if(state.count==count) {
+            // Remove below the owner, forcing inline/spill moves in both directions.
+            let removed=count/2u;
+            for(uint i=0u;i<removed;i++) state.remove(0u);
+            for(uint i=0u;i<count-removed;i++) {
+                let b=state.at(i);
+                if(b.object!=id.x*64u+removed+i || b.ior!=1.+float(removed+i)/64.) good=0u;
+            }
+            while(state.count>0u) state.remove(state.count-1u);
+        }
+        state.clear();
+    }
+    results[id.x]=good;
+}"#;
+    let mut modules=crate::native::SOURCES.to_vec();modules.push(("interior_test",source));
+    let metal=r.adapter_info.backend==wgpu::Backend::Metal;
+    let (_,target,flags)=if metal {crate::forward_variant::METAL_TARGET} else {crate::forward_variant::SPIRV_TARGET};
+    let registers=crate::binding_abi::material_registers(1);
+    let args:Vec<_>=["-target",target].into_iter().chain(flags.iter().copied()).chain(registers.iter().map(String::as_str)).collect();
+    let code=vork_slang::Compiler::discover().compile_modules(&modules,"interior_test",&[("interior_test","compute")],&args)?;
+    let shader=if metal {crate::native::module(&r.device,"interior test",None,Some(&String::from_utf8(code)?),(32,1,1))}
+        else {crate::native::module(&r.device,"interior test",Some(&code),None,(32,1,1))};
+    let pipeline=r.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {label:None,layout:Some(&layout),module:&shader,entry_point:Some("interior_test"),compilation_options:Default::default(),cache:None});
+    let mut encoder=r.device.create_command_encoder(&Default::default());
+    for _ in 0..3 {
+        let mut pass=encoder.begin_compute_pass(&Default::default());pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.set_bind_group(1,&materials.bind,&[]);pass.dispatch_workgroups(1,1,1);
+    }
+    encoder.copy_buffer_to_buffer(&output,0,&readback,0,128);
+    encoder.copy_buffer_to_buffer(&materials.shader_errors,0,&readback,128,materials.shader_errors.size());
+    let submission=crate::command_finish::Segments::submit(&r.queue,encoder);
+    let (tx,rx)=std::sync::mpsc::channel();readback.map_async(wgpu::MapMode::Read,..,move |value|{let _=tx.send(value);});
+    r.wait(Some(submission))?;rx.recv()??;
+    let mapped=readback.get_mapped_range(..);let words:&[u32]=bytemuck::cast_slice(&mapped);
+    assert!(words[..32].iter().all(|&word|word==1),"interior records were corrupted or allocation failed");
+    let heap=&words[32+vork_slang::registry::SHADER_DIAGNOSTICS_WORDS as usize..];
+    let groups=(heap.len()-2)/(1+32*vork_slang::registry::PATH_BOUNDARY_NODE_WORDS as usize);
+    assert_eq!(heap[0] as usize,groups);
+    assert!(heap[2..2+groups].iter().all(|&word|word==0),"completed invocations leaked interior slots");
+    Ok(())
 }

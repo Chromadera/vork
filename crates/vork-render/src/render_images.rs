@@ -237,6 +237,7 @@ impl CaptureView {
             desc,
             &shared.queries,
             crate::view::SharedBindings {
+                points: &shared.point_publication.buffer,
                 rays: shared.rays.as_ref(),
                 compute: shared.compute_commands.as_ref(),
                 objects: &shared.objects,

@@ -1,6 +1,6 @@
 // Yu–Turk surface fitting from one retained particle generation.
 // Separate from the solver so its covariance work does not inflate every solver dispatch.
-import std.particles;
+import fluid.particles;
 
 void compute(ComputeContext ctx,Inputs i) {uint id=ctx.id.x;
 

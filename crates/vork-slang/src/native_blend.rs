@@ -283,7 +283,7 @@ fn separate(code: &[u8]) -> Result<Option<Vec<u32>>> {
 }
 
 type Output = unsafe extern "C" fn(*const c_void, usize, *mut c_void);
-// Pinned Slang 2026.20 glslang_CompileRequest_1_3. The optimizer is already part
+// Pinned Slang 2026.21 glslang_CompileRequest_1_3. The optimizer is already part
 // of the required Slang toolchain; this does not load a system SPIRV-Tools build.
 #[repr(C)]
 struct Request {

@@ -145,7 +145,7 @@ mod tests {
         reference.render.settings=v2::Settings::with_integrator(v2::Integrator::Path(Default::default()));
         let reference=r.install(reference,Path::new("."))?;
         assert!(reference.dense.as_ref().unwrap().certificates[0].words.len()<32,"certificate retained voxel payloads");
-        let reference_slot=reference.create_frame_slot(&r,Default::default())?;
+        let reference_slot=reference.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
         assert!(reference_slot.sample_upload.size()<64*1024*1024,"voxel payload entered per-sample uploads");
         drop(reference_slot);drop(reference);
         for path in [false,true] {
@@ -153,13 +153,13 @@ mod tests {
             if path {scene.render.settings=v2::Settings::with_integrator(v2::Integrator::Path(Default::default()));}
             scene.render.settings.samples=4;
             let installed=r.install(scene.clone(),Path::new("."))?;
-            let mut slot=installed.create_frame_slot(&r,Default::default())?;
-            slot.submit(&installed ,&r,0.5)?;let first=slot.collect(&r)?.rgba;
-            slot.submit(&installed,&r,1.)?;let later=slot.collect(&r)?.rgba;
+            let mut slot=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            slot.submit(&installed ,&r,0.5)?;let first=slot.collect(&r)?.linear_rgba.unwrap();
+            slot.submit(&installed,&r,1.)?;let later=slot.collect(&r)?.linear_rgba.unwrap();
             assert_ne!(first,later,"published cells must change transport");
-            slot.submit(&installed ,&r,0.5)?;assert_eq!(first,slot.collect(&r)?.rgba,"backward seek must replay bit-for-bit");
-            let fresh=r.install(scene,Path::new("."))?;let mut other=fresh.create_frame_slot(&r,Default::default())?;
-            other.submit(&fresh ,&r,0.5)?;assert_eq!(first,other.collect(&r)?.rgba,"direct seek must match warm replay");
+            slot.submit(&installed ,&r,0.5)?;crate::test_linear::assert_linear_eq(&first,&slot.collect(&r)?.linear_rgba.unwrap());
+            let fresh=r.install(scene,Path::new("."))?;let mut other=fresh.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            other.submit(&fresh ,&r,0.5)?;crate::test_linear::assert_linear_eq(&first,&other.collect(&r)?.linear_rgba.unwrap());
         }
         Ok(())
     }

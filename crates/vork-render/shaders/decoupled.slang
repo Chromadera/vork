@@ -187,16 +187,7 @@ bool receiver_before(float3 point,float3 normal,float3 other,float3 other_normal
     if(normal.y!=other_normal.y) {return normal.y<other_normal.y;}
     return normal.z<other_normal.z;
 }
-struct CameraGeometry : IHitGeometry {
-    static uint word(uint index) {return draw_table[index];}
-    static uint load(uint buffer, uint index) {
-#ifdef VORK_METAL
-        return camera_hit_buffers.buffers[buffer][index];
-#else
-        return camera_hit_buffers[NonUniformResourceIndex(buffer)][index];
-#endif
-    }
-};
+typedef RayGeometry CameraGeometry;
 
 void camera_ray(float2 position, uint2 size, out float3 origin, out float3 direction) {
     camera_ray(position,size,shading_lens,origin,direction);
@@ -310,7 +301,7 @@ bool transparent_slot(uint at) {return object_draws[slot_object(at)]>=0x80000000
 // A slot's triangle, loaded once for all its evaluations: its key's hit record
 // and world corners.
 SurfaceTriangle slot_triangle(uint at) {
-    return surface_triangle<CameraGeometry>(slot_draw(at),slot_key(at).y,slot_object(at));
+    return surface_triangle<CameraGeometry>(CameraGeometry(draw_table,camera_hit_buffers),slot_draw(at),slot_key(at).y,slot_object(at));
 }
 // The slot's surface where the camera ray through `position` (pixels) meets its
 // triangle; the slot's shading state follows that point.
@@ -323,7 +314,7 @@ HitSurface slot_surface<V:IVariant,P:IProgram,let decode_table:bool=true>(Surfac
     }
     float3 origin;float3 direction;camera_ray(position,size,origin,direction);
     if(field_primitive(st.primitive)) {
-        let root=field_crossing<CameraGeometry>(draw_table[slot_draw(at)*REG_RAY_SLOT_WORDS+1u],st.t.object,st.primitive,origin,direction,camera_near_distance(origin,direction),REG_FP32_MAX);
+        let root=field_crossing<CameraGeometry>(CameraGeometry(draw_table,camera_hit_buffers),draw_table[slot_draw(at)*REG_RAY_SLOT_WORDS+1u],st.t.object,st.primitive,origin,direction,camera_near_distance(origin,direction),REG_FP32_MAX);
         b=float2(0.);ray_distance=root.t;
         var h=field_surface<V,P>(st.t.object,root,direction,float2(2.)/float2(size),Lobe(0u,0.));
         h.v.position.xy=position;
@@ -818,9 +809,15 @@ void refraction_camera_ray(float2 position,uint2 size,float2 lens,out float3 ori
 uint refraction_occupancy_at(uint2 pixel,uint width,uint sample) {
     return camera_config.boundaries.w+(((pixel.y-camera_config.band)*width+pixel.x)*visibility_samples()+sample)*(1u+7u*VORK_REFRACTION_BOUNDARIES);
 }
-PathOccupancy<VORK_REFRACTION_BOUNDARIES> read_refraction_occupancy(uint2 pixel,uint width,uint sample) {
+PathOccupancy<VORK_REFRACTION_BOUNDARIES> read_refraction_occupancy<V:IVariant,P:IProgram>(uint2 pixel,uint width,uint sample,float3 origin,float2 footprint) {
     PathOccupancy<VORK_REFRACTION_BOUNDARIES> state={};
     let at=refraction_occupancy_at(pixel,width,sample);state.count=evaluation_metadata[at];
+    // Capacities below the inline limit cannot spill: append() reports an
+    // overflow instead. Do not compile unreachable containment recovery into
+    // every evaluator for these geometrically bounded scenes.
+    if(VORK_REFRACTION_BOUNDARIES>=REG_PATH_REGISTER_BOUNDARIES && state.count>VORK_REFRACTION_BOUNDARIES) {
+        return camera_occupancy<V,P,ReceiverGeometry,VORK_REFRACTION_BOUNDARIES>(ReceiverGeometry(ray_alpha,ray_hit_buffers),ray_scene,origin,float3(1.,0.,0.),camera_config.boundaries.xy,footprint,frame.field_geometry.x,frame.field_geometry.y);
+    }
     for(var i=0u;i<state.count;i++) {
         let k=at+1u+i*7u;PathBoundary b;
         b.object=evaluation_metadata[k];b.medium=evaluation_metadata[k+1u];b.ior=asfloat(evaluation_metadata[k+2u]);
@@ -872,13 +869,14 @@ void prepare_refraction_occupancy<V:IVariant,P:IProgram>(uint3 gid) {
         if((coverage.bits&(1u<<(sample%32u)))==0u) {evaluation_metadata[at]=0u;continue;}
         float3 origin,direction;
         refraction_camera_ray(sample_position(pixel,visibility_lattice(sample)-.5),uint2(w,h),sample_lens(sample),origin,direction);
-        let state=camera_occupancy<V,P,ReceiverGeometry,VORK_REFRACTION_BOUNDARIES>(ray_scene,origin,float3(1.,0.,0.),camera_config.boundaries.xy,float2(2.)/float2(w,h),frame.field_geometry.x,frame.field_geometry.y);
+        var state=camera_occupancy<V,P,ReceiverGeometry,VORK_REFRACTION_BOUNDARIES>(ReceiverGeometry(ray_alpha,ray_hit_buffers),ray_scene,origin,float3(1.,0.,0.),camera_config.boundaries.xy,float2(2.)/float2(w,h),frame.field_geometry.x,frame.field_geometry.y);
         evaluation_metadata[at]=state.count;
-        for(var i=0u;i<state.count;i++) {
+        for(var i=0u;i<min(state.count,VORK_REFRACTION_BOUNDARIES);i++) {
             let k=at+1u+i*7u;let b=state.at(i);
             evaluation_metadata[k]=b.object;evaluation_metadata[k+1u]=b.medium;evaluation_metadata[k+2u]=asuint(b.ior);
             evaluation_metadata[k+3u]=asuint(b.color.x);evaluation_metadata[k+4u]=asuint(b.color.y);evaluation_metadata[k+5u]=asuint(b.color.z);evaluation_metadata[k+6u]=asuint(b.depth);
         }
+        state.clear();
     }
 }
 
@@ -911,7 +909,7 @@ float3 slot_transmitted<V:IVariant,P:IProgram>(Varying v,Surface s,Coordinates k
             if(interface_transport) {
                 float3 camera_origin;float3 camera_direction;
                 refraction_camera_ray(sample_v.position.xy,size,shading_sample==0xffffffffu ? shading_mean_lens : sample_lens(shading_sample),camera_origin,camera_direction);
-                color+=refraction_transport<V,P,VORK_REFRACTION_BOUNDARIES>(sample_v,sample_s,k,camera_origin,read_refraction_occupancy(shading_pixel,size.x,shading_sample==0xffffffffu ? 0u : shading_sample),shading_face,float2(2.)/float2(size),shading_pixel,lighting_sample());
+                color+=refraction_transport<V,P,VORK_REFRACTION_BOUNDARIES>(sample_v,sample_s,k,camera_origin,read_refraction_occupancy<V,P>(shading_pixel,size.x,shading_sample==0xffffffffu ? 0u : shading_sample,camera_origin,float2(2.)/float2(size)),shading_face,float2(2.)/float2(size),shading_pixel,lighting_sample());
             } else
 #endif
             {color+=transmission_radiance<V,SlotTransmission,P>(sample_v,sample_s,shading_face);}
@@ -932,7 +930,7 @@ struct SlotTransmission : ITransmission {
     }
     static float3 background(float2 uv) {return camera_background_at(uv*float2(size()),size(),float2(0.)).rgb;}
     static SolidExit solid_exit(uint object,float3 origin,float3 direction,float eta) {
-        return mesh_solid_exit<CameraGeometry>(object_draws[object]&0x7fffffffu,object,origin,direction,eta);
+        return mesh_solid_exit<CameraGeometry>(CameraGeometry(draw_table,camera_hit_buffers),object_draws[object]&0x7fffffffu,object,origin,direction,eta);
     }
     static void exhausted(uint object) {InterlockedMax(shader_errors[2],object+1u);}
 };
@@ -965,7 +963,7 @@ SlotPlane slot_plane(uint at) {return slot_plane(slot_triangle(at));}
 float ray_plane(float3 origin,float3 direction,SlotPlane st) {
     if(field_primitive(st.primitive)) {
         let draw=object_draws[st.object]&0x7fffffffu;
-        let root=field_crossing<CameraGeometry>(draw_table[draw*REG_RAY_SLOT_WORDS+1u],st.object,st.primitive,origin,direction,camera_near_distance(origin,direction),REG_FP32_MAX);
+        let root=field_crossing<CameraGeometry>(CameraGeometry(draw_table,camera_hit_buffers),draw_table[draw*REG_RAY_SLOT_WORDS+1u],st.object,st.primitive,origin,direction,camera_near_distance(origin,direction),REG_FP32_MAX);
         return root.found ? root.t : REG_FP32_MAX;
     }
     return dot(st.point-origin,st.normal)/dot(direction,st.normal);
@@ -973,7 +971,7 @@ float ray_plane(float3 origin,float3 direction,SlotPlane st) {
 bool ray_front(float3 origin,float3 direction,SlotPlane st) {
     if(!field_primitive(st.primitive)) return dot(st.normal,direction)<0.;
     let draw=object_draws[st.object]&0x7fffffffu;
-    let hit=field_crossing<CameraGeometry>(draw_table[draw*REG_RAY_SLOT_WORDS+1u],st.object,st.primitive,origin,direction,camera_near_distance(origin,direction),REG_FP32_MAX);
+    let hit=field_crossing<CameraGeometry>(CameraGeometry(draw_table,camera_hit_buffers),draw_table[draw*REG_RAY_SLOT_WORDS+1u],st.object,st.primitive,origin,direction,camera_near_distance(origin,direction),REG_FP32_MAX);
     return hit.found && dot(hit.normal,direction)<0.;
 }
 float ray_plane(float3 origin,float3 direction,SurfaceTriangle st) {return ray_plane(origin,direction,slot_plane(st));}
@@ -1507,7 +1505,7 @@ float3 indirect_connection<V:IVariant,P:IProgram>(EvaluatedSlot e,uint2 pixel,ui
     query.TraceRayInline(ray_scene,RAY_FLAG_FORCE_NON_OPAQUE,REG_RAY_GI_OCCLUDER,ray);
     while(query.Proceed()) {
         let hit=RayIntersection(query.CandidateInstanceIndex(),query.CandidateInstanceID(),query.CandidatePrimitiveIndex(),query.CandidateTriangleBarycentrics());
-        if(diffuse_candidate_accepts<P,ReceiverGeometry>(ray_alpha,hit,query.CandidateTriangleFrontFace(),query.CandidateWorldToObject3x4(),direction,float2(0.))) {query.CommitNonOpaqueTriangleHit();}
+        if(diffuse_candidate_accepts<P,ReceiverGeometry>(ReceiverGeometry(ray_alpha,ray_hit_buffers),ray_alpha,hit,query.CandidateTriangleFrontFace(),query.CandidateWorldToObject3x4(),direction,float2(0.))) {query.CommitNonOpaqueTriangleHit();}
     }
     if(query.CommittedStatus()==COMMITTED_NOTHING) {
         var radiance=world_radiance(direction);
@@ -1518,17 +1516,17 @@ float3 indirect_connection<V:IVariant,P:IProgram>(EvaluatedSlot e,uint2 pixel,ui
         return float3(0.);
     }
     let u=select(P.lobes,float(screen_ray_hash(pixel,index,REG_SAMPLING_STREAM_RAY_GI_LOBE))*REG_RADICAL_INVERSE_SCALE,0.);
-    let h=hit_surface<V,P,ReceiverGeometry>(hit.instance_index,hit.primitive_index,hit.instance_custom_data,query.CommittedWorldToObject3x4(),hit.barycentrics,direction,float2(0.),Lobe(select(P.lobes,LOBE_PICK,0u),u));
+    let h=hit_surface<V,P,ReceiverGeometry>(ReceiverGeometry(ray_alpha,ray_hit_buffers),hit.instance_index,hit.primitive_index,hit.instance_custom_data,query.CommittedWorldToObject3x4(),hit.barycentrics,direction,float2(0.),Lobe(select(P.lobes,LOBE_PICK,0u),u));
     var radiance=finalized_hit_radiance<V,IndirectShadows<P>,P>(h,pixel,index,REG_RAY_DIFFUSE);
     return radiance*direction_weight;
 }
 struct IndirectShadows<P:IProgram> : IShadows {
     static const bool probe_rays=true;
-    static bool probe_visible(float3 world,float3 normal,float3 error,float3 probe) {return probe_connection_visible<P,ReceiverGeometry>(ray_scene,ray_alpha,world,normal,error,probe);}
+    static bool probe_visible(float3 world,float3 normal,float3 error,float3 probe) {return probe_connection_visible<P,ReceiverGeometry>(ReceiverGeometry(ray_alpha,ray_hit_buffers),ray_scene,ray_alpha,world,normal,error,probe);}
     static uint integration_count(uint index,out float3 normalization) {let count=index==0xffffffffu ? sample_count() : 1u;normalization=float3(float(count));return count;}
     static float3 integration_sample(uint tap,inout uint index,inout float3 world) {if(index==0xffffffffu) {index=tap;}return float3(1.);}
     static uint sample_count() {return visibility_samples()*uint(max(frame.temporal.y,1.));}
-    static float3 visibility_direction(float3 world,float3 normal,LightValues record,uint light,float3 direction,float distance,float3 error,uint index,uint count,bool fibre=false) {return hit_shadow_direction<P,ReceiverGeometry>(ray_scene,ray_alpha,light,world,normal,error,direction,distance,index,count);}
+    static float3 visibility_direction(float3 world,float3 normal,LightValues record,uint light,float3 direction,float distance,float3 error,uint index,uint count,bool fibre=false) {return hit_shadow_direction<P,ReceiverGeometry>(ReceiverGeometry(ray_alpha,ray_hit_buffers),ray_scene,ray_alpha,light,world,normal,error,direction,distance,index,count);}
     static const bool subsurface=false;
     static float thickness(uint object,float3 world,float3 direction) {return 0.;}
 };

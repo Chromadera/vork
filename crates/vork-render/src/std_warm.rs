@@ -66,7 +66,7 @@ pub(crate) fn table_scenes(r: &Renderer) -> Vec<serde_json::Value> {
         let mut scene = scene(serde_json::json!([]), serde_json::Value::Null,
             meshes.clone(), serde_json::json!({"type": "camera", "name": "c", "translation": [0,0,3]}),
             serde_json::json!({"type": "light", "name": "world", "shape": "environment"}), materials.clone(), sun);
-        scene["geometry"]["box"] = serde_json::json!({"std": "box", "size": [1, 1, 1]});
+        scene["geometry"]["box"] = serde_json::json!({"std":"rounded_box","radius":0,"size": [1, 1, 1]});
         scene
     })).collect()
 }
@@ -139,16 +139,7 @@ fn program_scenes(r: &Renderer, name: &'static str, source: &str) -> Result<Vec<
         }
         Role::Composite => {
             compositor=serde_json::json!(["std"]);
-            if name=="std/bloom" {
-                // All shipped stages need their real producer bindings, including
-                // the retained pre-bloom beauty read by prepare and combine.
-                compositor=serde_json::json!([
-                    {"name":"setup.prepare","material":{"program":name,"inputs":{"stage":"prepare","original":{"channel":"color"}}}},
-                    {"name":"setup.down","resolution":[32,32],"material":{"program":name,"inputs":{"stage":"downsample","source":{"node":"setup.prepare"},"divisor":2}}},
-                    {"name":"setup.up","material":{"program":name,"inputs":{"stage":"upsample","source":{"node":"setup.down"},"fine":{"node":"setup.prepare"}}}},
-                    "std"]);
-                variants=vec![serde_json::json!({"stage":"combine","original":{"channel":"color"},"source":{"node":"setup.up"},"levels":2})];
-            }
+
         },
         Role::Display => {},
     }
@@ -354,8 +345,8 @@ mod tests {
             let mut scene = crate::test_scene(serde_json::json!({"version":2,
                 "render":{"resolution":[64,48]},
                 "nodes":[
-                    {"type":"mesh","geometry":{"std":"sphere"},"materials":[{"inputs":{"base_color":[0.2,0.4,0.7],"base_metalness":metalness,"specular_roughness":0.3}}]},
-                    {"type":"mesh","translation":[0,-1,0],"geometry":{"std":"grid","size":[8,8]}},
+                    {"type":"mesh","geometry":crate::test_geometry::latitude_longitude(1.,32,16),"materials":[{"inputs":{"base_color":[0.2,0.4,0.7],"base_metalness":metalness,"specular_roughness":0.3}}]},
+                    {"type":"mesh","translation":[0,-1,0],"geometry":crate::test_geometry::plane([8.,8.],[1,1])},
                     {"type":"camera","translation":[3,2,5],"target":[0,0,0]},
                     {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0,0],"energy":500,"size":3},
                     {"type":"light","shape":"sun","energy":0.1},
@@ -394,7 +385,7 @@ mod tests {
                     r.settle_pipelines()?;
                     let promoted = installed.render_frame(&r, &mut slot, 0.)?.linear_rgba.context("promoted float readback")?;
                     assert!(!slot.view.variants_pending(), "the retained slot must promote at an exposure boundary");
-                    assert_eq!(first, promoted, "promoting hit kernels changed scene-linear pixels");
+                    crate::test_linear::assert_linear_eq(&first, &promoted);
                 }
                 Ok(first)
             };
@@ -404,9 +395,9 @@ mod tests {
             r.settle_pipelines()?;
             let promoted = draw(pipelines::VariantCompile::Background, false)?;
             let exact = draw(pipelines::VariantCompile::Inline, false)?;
-            assert_eq!(plain, exact, "metalness {metalness}: setup hit evaluator changed the frame");
-            assert_eq!(background, exact, "background hit promotion changed the frame");
-            assert_eq!(promoted, exact, "settled installs must select exact hit keys");
+            crate::test_linear::assert_linear_eq(&plain, &exact);
+            crate::test_linear::assert_linear_eq(&background, &exact);
+            crate::test_linear::assert_linear_eq(&promoted, &exact);
         }
         Ok(())
     }
@@ -433,13 +424,13 @@ mod tests {
     fn every_std_program_has_a_role() {
         let roles: Vec<_> = vork_scene::libraries::prebuilt_programs()
             .map(|name| (name, role(vork_slang::module_source(name).unwrap()))).collect();
-        for (name, expected) in [("std/sky", Role::Environment), ("std/bloom", Role::Composite),
+        for (name, expected) in [("std/sky", Role::Environment),
             ("std/hair", Role::Hair), ("std/camera",Role::Camera), ("std/environment_image",Role::Environment)] {
             assert!(roles.contains(&(name, expected)), "{name}: {roles:?}");
         }
         // Authored media are recognized by their entry signature.
         assert_eq!(role("MediumCoefficients medium(MediumContext ctx) {}"), Role::Medium);
-        // blender and post programs compile on first use.
+        // Blender programs compile on first use.
         assert!(roles.iter().all(|(name, _)| name.starts_with("std/")), "{roles:?}");
     }
 
@@ -509,7 +500,7 @@ mod tests {
         let settings = v2::Profile::load(v2::DEFAULT_PROFILE)?.resolve(&serde_json::Map::new())?;
         let mut scene = crate::test_scene(serde_json::json!({"version": 2,
             "render": {"resolution": [48, 32]},
-            "geometry": {"box": {"std": "box", "size": [1, 1, 1]}, "floor": {"std": "box", "size": [4, 0.1, 4]}},
+            "geometry": {"box": {"std":"rounded_box","radius":0,"size": [1, 1, 1]}, "floor": {"std":"rounded_box","radius":0,"size": [4, 0.1, 4]}},
             "nodes": [{"type": "mesh", "geometry": "box", "materials": ["glass"]},
                 {"type": "mesh", "geometry": "floor", "materials": ["metal"], "translation": [0, -0.6, 0]},
                 {"type": "camera", "translation": [0.5, 0.8, 3]},

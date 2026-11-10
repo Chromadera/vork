@@ -69,6 +69,35 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Validate scene installation without opening a GPU or rendering.
+    Check {
+        /// Scene JSON path, or - to read stdin (paths relative to the current directory).
+        scene: PathBuf,
+        /// Also generate native portable shaders; CPU-only, but can take minutes.
+        #[arg(long)]
+        shaders: bool,
+        /// Render settings profile; default std/final.
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Export evaluated triangles and optional native animation to glTF 2.0.
+    Export {
+        scene: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        root: Option<String>,
+        #[arg(long)]
+        at: Option<vork_time::Clock>,
+        /// Inclusive source frame range; omitted endpoint uses the scene boundary.
+        #[arg(long, conflicts_with = "at")]
+        frame_start: Option<u32>,
+        #[arg(long, conflicts_with = "at")]
+        frame_end: Option<u32>,
+        /// Acknowledge one named export loss; repeat for multiple issue codes.
+        #[arg(long = "allow-loss")]
+        allow_losses: Vec<String>,
+    },
     /// Render scene JSON to MP4, MOV, PNG/control directories, or multilayer EXR frames.
     Render {
         /// Scene JSON path.
@@ -88,6 +117,9 @@ enum Command {
         /// Blender ImageFormatSettings.exr_codec; default zip.
         #[arg(long, default_value = "zip")]
         exr_codec: vork_render::ExrCodec,
+        /// PNG colour bits per component; default 8.
+        #[arg(long, default_value = "8", value_name = "8|16")]
+        png_depth: vork_render::PngDepth,
         /// Select the still time in seconds; with video, directory/EXR outputs receive one still.
         #[arg(long, conflicts_with_all = ["frame_start", "frame_end"])]
         at: Option<vork_time::Clock>,
@@ -216,11 +248,24 @@ fn run() -> Result<()> {
     if let Command::Std(args) = &command {
         return args.run();
     }
+    if let Command::Check { scene, profile, shaders } = &command {
+        let profile = vork_scene::Profile::load(profile.as_deref().unwrap_or(vork_scene::DEFAULT_PROFILE))
+            .map_err(|error| error.context(vork_render::failure::FailureKind::Usage))?;
+        vork_render::Renderer::check(scene, &profile, *shaders)?;
+        output!("Scene checked successfully");
+        return Ok(());
+    }
+    if let Command::Export { scene, out, root, at, frame_start, frame_end, allow_losses } = &command {
+        let report = vork_render::export::Export {scene:scene.clone(),out:out.clone(),root:root.clone(),at:at.clone(),frame_start:*frame_start,frame_end:*frame_end,allow_losses:allow_losses.clone(),vork_version:env!("VORK_VERSION").to_owned()}.run()?;
+        output!("Exported {} meshes to {}; report: {}", report["counts"]["meshes"], out.display(), out.with_extension("export.json").display());
+        for issue in report["issues"].as_array().into_iter().flatten() {eprintln!("WARNING {} at {}: {}; {}",issue["code"],issue["source"],issue["dropped"],issue["remediation"]);}
+        return Ok(());
+    }
     let progress = progress::Monitor::start("Render: loading scene and opening GPU");
     let diagnostics = matches!(command, Command::Render { diagnostics: true, .. });
     let (rendered, out) = match command {
         Command::Render {
-            scene: scene_path, outputs, out, exr_codec, at, frame_start, frame_end,
+            scene: scene_path, outputs, out, exr_codec, png_depth, at, frame_start, frame_end,
             profile, set, no_write, gpu_only, diagnostics, ..
         } => {
             let stop = interrupt::install()?;
@@ -233,7 +278,7 @@ fn run() -> Result<()> {
                 profile: Some(vork_scene::Profile::load(profile.as_deref().unwrap_or(vork_scene::DEFAULT_PROFILE))
                     .map_err(|error| error.context(vork_render::failure::FailureKind::Usage))?),
                 settings: set.into_iter().collect(),
-                at, frame_start, frame_end, no_write, gpu_only, diagnostics, exr_codec,
+                at, frame_start, frame_end, no_write, gpu_only, diagnostics, exr_codec, png_depth,
                 edit: None,
                 ..Default::default()
             }.render()?;
@@ -267,7 +312,7 @@ fn run() -> Result<()> {
         if exposures.len() == 1 { output!("{line}"); } else { output!("{}: {line}", row["output"].as_str().unwrap_or_default()); }
     }
     if let Some(warnings) = report["warnings"].as_array().filter(|warnings| !warnings.is_empty()) {
-        eprintln!("\nWARNING: {} REQUESTED EFFECT(S) DROPPED: {}. Review the detailed warnings above and in render metadata before accepting this render.",
+        eprintln!("\nWARNING: {} RENDER WARNING(S): {}. Review the detailed warnings above and in render metadata before accepting this render.",
             warnings.len(), warnings.iter().filter_map(|warning| warning["code"].as_str()).collect::<Vec<_>>().join(", "));
     }
     if let Some(line) = interruption_line(report, &out) { eprintln!("{line}"); }
@@ -343,6 +388,9 @@ fn topic_for_line(line: &str) -> Option<&'static str> {
     if name.ends_with(" (light)") || line.starts_with("node [type=\"light\"]:") {
         return Some("lights");
     }
+    if let Some((library, _)) = name.split_once('/') {
+        if let Some(library) = vork_scene::libraries::library(library) { return Some(library.name); }
+    }
     let area = line.split(['.', ':', ' ']).next()?;
     Some(match area {
         "scene" | "names" | "paths" | "structure" | "coordinates" => "contract",
@@ -402,6 +450,18 @@ mod help_tests {
         assert!(Args::try_parse_from(["vork", "setup", "--gpu", "-1"]).is_err());
     }
 
+    #[test]
+    fn export_animation_range_is_separate_from_snapshot_time() {
+        let parse = |flags: &[&str]| {
+            let mut args = vec!["vork", "export", "scene.json", "--out", "walk.glb"];
+            args.extend_from_slice(flags); Args::try_parse_from(args)
+        };
+        let Command::Export { frame_start, frame_end, .. } = parse(&["--frame-start", "12", "--frame-end", "48"]).unwrap().command else { panic!() };
+        assert_eq!((frame_start, frame_end), (Some(12), Some(48)));
+        for flags in [["--at", "1/24", "--frame-start", "0"], ["--at", "0", "--frame-end", "24"]] {
+            assert!(parse(&flags).is_err());
+        }
+    }
     #[test]
     fn removed_render_aliases_fail() {
         for flag in ["--resolution", "--samples"] {
@@ -479,6 +539,10 @@ mod help_tests {
             assert!(constants::HELP_TOPICS.contains(&library.name), "library {} has no help topic", library.name);
         }
         for topic in constants::HELP_TOPICS {
+            if *topic == "blender" {
+                assert!(include_str!("../../../docs/help/programs.md").contains("vork help blender --all"));
+                continue;
+            }
             assert!(
                 root.split(|c: char| !(c.is_alphanumeric() || c == '-'))
                     .any(|token| token == *topic),

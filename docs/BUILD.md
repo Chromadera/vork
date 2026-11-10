@@ -8,7 +8,7 @@ pinned Intel Mac or Linux ARM archive.
 
 ## Prerequisites
 
-The pinned Slang 2026.20 macOS binaries target macOS 26. Older macOS versions
+The pinned Slang 2026.21 macOS binaries target macOS 26. Older macOS versions
 have not been qualified with this toolchain.
 
 On macOS, install Apple's command line tools, then install Homebrew from
@@ -62,8 +62,8 @@ an existing directory. Keep the entire toolchain, including its libraries,
 modules and notices, together.
 
 ```sh
-"$PYTHON" scripts/install-slang "$HOME/.local/share/vork/slang-2026.20"
-export VORK_SLANGC="$HOME/.local/share/vork/slang-2026.20/bin/slangc"
+"$PYTHON" scripts/install-slang "$HOME/.local/share/vork/slang-2026.21"
+export VORK_SLANGC="$HOME/.local/share/vork/slang-2026.21/bin/slangc"
 "$VORK_SLANGC" -version
 cargo +1.96 build --release --workspace --locked
 ./target/release/vork --help
@@ -76,6 +76,8 @@ path; alternatively the build can find the pinned `slangc` on `PATH`. Export
 `VORK_SLANGC` again in each new shell, or add the export to your shell startup
 file. A `cannot start slangc` error means this setup is missing; a version
 mismatch means a different compiler was selected.
+
+The renderer and its `vork-slang-filesystem` companion must stay together when copied or packaged. Building the companion requires a C++17 compiler and the full pinned Slang headers; it loads the matching shared library at runtime.
 
 The binary is `target/release/vork`, or `$CARGO_TARGET_DIR/release/vork` when
 that environment variable is set. These commands do not install it globally.
@@ -159,6 +161,23 @@ Linux and Windows emit SPIR-V. The bundle excludes all driver cache entries
 and is bound to the packaged binary's SHA-256. `scripts/package-release` refuses
 to package without this verified bundle. `vork setup` on the user's real GPU
 then warms its own driver cache from those portable assets.
+
+The shipped generic GI and path entries enable the same existing Slang function
+boundaries as their specialized variants. Without these boundaries, Slang's
+SPIR-V optimization expands the generic lighting/transport graph. The official
+specialization fix reduces duplicate work; these boundaries further bound the
+optimizer's memory use.
+
+On Linux, measure individual compiler invocations with
+`scripts/toolchains/measure-slang-memory.py` as `VORK_SLANGC`, setting
+`VORK_SLANG_MEMORY_COMPILER` to the real pinned compiler and
+`VORK_SLANG_MEMORY_REPORT` to a JSONL file outside the checkout. Use a fresh
+Cargo target directory and `VORK_SHADER_TARGETS=spirv,metal`; disable compiler
+artifact caching (`VORK_VM_SHADER_CACHE=0` on the shared VM) while retaining
+admission guards. Each record contains the target, entry, command, exit status,
+CPU time and peak process RSS in KiB. Wall time includes admission waits and is
+not a compiler speed comparison. Compare both pins on the same renderer sources
+and generated inputs; include failed invocations in the inventory.
 
 `check-release --skip-setup --skip-render` verifies installation, compiler and
 portable assets on GPU-free hosted runners. Installed rendering, video and

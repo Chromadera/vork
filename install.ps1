@@ -10,8 +10,37 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $repo = if ($env:VORK_REPO) { $env:VORK_REPO } else { 'voyager-so/vork' }
 # Default version is generated from Cargo.toml by scripts/sync-version.
-$version = if ($env:VERSION) { $env:VERSION } else { '0.4.0' }
-$prefix = if ($env:PREFIX) { $env:PREFIX } else { Join-Path $env:LOCALAPPDATA 'Programs\vork' }
+$version = if ($env:VERSION) { $env:VERSION } else { '0.5.0' }
+# Contract: PREFIX -> a fully qualified, lexically normalized install directory,
+# without trailing separators, or a refusal before downloads/writes. Relative and
+# drive-relative forms use the PowerShell filesystem location (not process cwd);
+# root-relative forms use that location's drive/share root. No path must exist.
+function Resolve-InstallPrefix([string]$value) {
+    $refusal = 'PREFIX must name an install directory, not an empty path or a drive or share root. Use a folder such as D:\vork. Nothing was downloaded or changed.'
+    if ([string]::IsNullOrWhiteSpace($value) -or $value -match '^[\\/]+$') { throw $refusal }
+    $location = Get-Location
+    if ($location.Provider.Name -ne 'FileSystem') { throw 'PREFIX requires a PowerShell filesystem location. Nothing was downloaded or changed.' }
+    $basePath = $location.ProviderPath
+    if ([IO.Path]::DirectorySeparatorChar -eq '/') {
+        # Keep native paths usable for GPU-free installer tests on Unix.
+        if (-not $value.StartsWith('/')) { $value = Join-Path $basePath $value }
+    } elseif ($value -match '^[A-Za-z]:[\\/]' -or $value -match '^\\\\[^\\/]+[\\/][^\\/]+') {
+        # Drive-absolute and UNC paths already carry their own root.
+    } elseif ($value -match '^[\\/]') {
+        $value = Join-Path ([IO.Path]::GetPathRoot($basePath)) $value.TrimStart('\', '/')
+    } else {
+        # C:vork follows the same explicit location rule as vork; never use the
+        # process's hidden per-drive directory or leave a colon inside a child.
+        $value = Join-Path $basePath ($value -replace '^[A-Za-z]:', '')
+    }
+    $destination = [IO.Path]::GetFullPath($value)
+    $root = [IO.Path]::GetPathRoot($destination)
+    $destination = $destination.TrimEnd('\', '/')
+    if ($destination -eq $root.TrimEnd('\', '/')) { throw $refusal }
+    return $destination
+}
+$prefix = if (Test-Path Env:PREFIX) { $env:PREFIX } else { Join-Path $env:LOCALAPPDATA 'Programs\vork' }
+$prefix = Resolve-InstallPrefix $prefix
 if ($version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid VERSION' }
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne 'AMD64') { throw "Supported platforms: Windows x64, Apple Silicon macOS and Linux x64; found $arch" }
@@ -25,6 +54,7 @@ $quotedBin = Quote-ShellLiteral $bin
 if ($DryRun) {
     "Archive: $base/$archive"
     "Checksums: $base/SHA256SUMS"
+    "Destination: $prefix"
     "Binary: $bin\vork.exe"
     return
 }

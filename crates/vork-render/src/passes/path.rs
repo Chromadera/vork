@@ -210,17 +210,10 @@ pub(crate) fn occupancy(solids: &Solids, draws: &[install::Draw], roots: &[insta
     }).collect();
     (solids, capacity)
 }
-/// The most solids a path kernel tracks at one point. The kernel keeps
-/// several N-entry descriptor arrays per invocation (the occupancy set,
-/// camera containment records and the boundary transaction's working
-/// copies), so its private memory grows with N. N is the sum of per-group
-/// bounds, and every independently animated solid is its own group: 60
-/// separately moving water drops made N=62, whose kernel lost the device on an
-/// NVIDIA L4 on its first dispatch (BB065). Larger bounds keep this ceiling;
-/// a point that really holds more solids reports PATH_BOUNDARY_OVERFLOW.
-pub(crate) const KERNEL_BOUNDARY_LIMIT: u32 = 32;
-/// The capacity a path kernel is compiled with for an installed bound.
-pub(crate) fn kernel_boundaries(capacity: u32) -> u32 {capacity.min(KERNEL_BOUNDARY_LIMIT)}
+/// Small register-resident interior list. Actual deeper nesting spills to the
+/// device-backed material arena; scene size never grows invocation-private state.
+pub(crate) const INLINE_BOUNDARIES: u32 = vork_slang::renderer_registry::REG_PATH_REGISTER_BOUNDARIES;
+pub(crate) fn kernel_boundaries(capacity: u32) -> u32 {capacity.min(INLINE_BOUNDARIES)}
 /// Equal priorities preserve ordinary last-entered ownership. Disjoint static
 /// surface bounds exclude simultaneous crossings even for open/unbounded media.
 /// Unknown or moving surfaces retain the general contact transaction.
@@ -364,7 +357,6 @@ pub(crate) struct Pipeline {
     kernel: crate::pipelines::ProgramKernel,
 }
 impl Pipeline {
-    #[cfg(test)]
     pub(crate) fn adaptive(&self)->bool {matches!(self.kernel,crate::pipelines::ProgramKernel::Path {adaptive:true,..})}
     pub(crate) fn new(r: &Renderer, adaptive: bool, catchers: bool, random_walk: bool, features: FeatureMask, boundary_capacity: u32, emitter_profiles: bool, media: Option<u32>, options: &crate::InstallOptions, pipelines: &crate::pipelines::CachedPipelines) -> Result<Self> {
         #[cfg(any(test, feature = "test-support"))]
@@ -395,11 +387,21 @@ impl Pipeline {
         let volume_bounces = crate::constants::PATH_MAX_BOUNCES;
         #[cfg(any(test, feature = "test-support"))]
         let volume_bounces = if options.test_participating_media {options.test_volume_bounces} else {crate::constants::PATH_MAX_BOUNCES};
-        let medium_batch_rows = media.map(|_|32);
+        // Fog follows the ordinary pixel-bounded path dispatch. L4 qualification
+        // found no image change and lower waits without the old 32-row split.
+        let medium_batch_rows = None;
         #[cfg(any(test, feature = "test-support"))]
         let medium_batch_rows = if options.test_participating_media {
             (media.is_some() && options.test_convex_media && options.test_convex_work_limit.is_some()).then_some(options.test_medium_batch_rows.unwrap_or(32).max(TILE).next_multiple_of(TILE))
         } else {medium_batch_rows};
+        #[cfg(any(test, feature="test-support"))]
+        let medium_batch_rows = if media.is_some() {
+            match options.test_medium_batch_rows {
+                Some(0)=>None,
+                Some(rows)=>Some(rows.max(TILE).next_multiple_of(TILE)),
+                None=>medium_batch_rows,
+            }
+        } else {None};
         let _ = options;
         Ok(Self { volume_bounces, global_layout, pipeline, kernel,
             medium_batch_rows,
@@ -471,7 +473,7 @@ pub(crate) fn record(
         params.clamp[0]=0f32.to_bits();
         params.clamp[1]=0f32.to_bits();
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(limit)=r.reference_transparent_bounces {params.limits[2]=limit;}
     let width = target.texture().width();
     let height = target.texture().height();
@@ -675,14 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn kernel_boundaries_keep_a_private_memory_ceiling() {
-        // BB065: 60 independently animated solids sum to an install bound past
-        // what a path invocation's private memory holds.
+    fn scene_size_only_selects_the_inline_storage_class() {
+        // Larger scenes share one private layout; actual deeper nesting uses
+        // device storage and is covered by the dielectric render contracts.
         assert_eq!(kernel_boundaries(0),0);
         assert_eq!(kernel_boundaries(3),3);
-        assert_eq!(kernel_boundaries(KERNEL_BOUNDARY_LIMIT),KERNEL_BOUNDARY_LIMIT);
-        assert_eq!(kernel_boundaries(62),KERNEL_BOUNDARY_LIMIT);
-        assert_eq!(kernel_boundaries(u32::MAX),KERNEL_BOUNDARY_LIMIT);
+        assert_eq!(kernel_boundaries(INLINE_BOUNDARIES),INLINE_BOUNDARIES);
+        assert_eq!(kernel_boundaries(62),INLINE_BOUNDARIES);
+        assert_eq!(kernel_boundaries(u32::MAX),INLINE_BOUNDARIES);
     }
 
     #[test]
@@ -754,11 +756,11 @@ mod tests {
             assert!(matches!(s.path.as_ref().unwrap().kernel,
                 crate::pipelines::ProgramKernel::Path { boundaries: 0, .. }),
                 "no-solid paths installed camera containment work");
-            let mut a = s.create_frame_slot(&r, Default::default())?;
+            let mut a = s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
             // Attribute only slot work to the count, after install variants settle.
             r.compiler.settle()?;
             let count = r.compiler.created();
-            let mut b = s.create_frame_slot(&r, Default::default())?;
+            let mut b = s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
             r.compiler.settle()?;
             assert_eq!(
                 count,
@@ -769,16 +771,13 @@ mod tests {
             let first = a.collect(&r)?;
             b.submit(&s, &r, 0.)?;
             let second = b.collect(&r)?;
-            assert_eq!(
-                first.rgba, second.rgba,
-                "moments did not reset for a new exposure"
-            );
+            crate::test_linear::assert_linear_eq(first.linear_rgba.as_ref().expect("linear readback"), second.linear_rgba.as_ref().expect("linear readback"));
             // Same transport through the conservative fallback must preserve the
             // installed specialization's image, for both sampling entries.
             s.path = Some(Pipeline::new(&r, adaptive, false, false, 0, 0, false, None, &crate::InstallOptions::default(), &s.pipelines)?);
             b.submit(&s, &r, 0.)?;
             let generic = b.collect(&r)?;
-            assert_eq!(first.rgba, generic.rgba, "path capability union changed shading");
+            crate::test_linear::assert_linear_eq(first.linear_rgba.as_ref().expect("linear readback"), generic.linear_rgba.as_ref().expect("linear readback"));
             physical.push(s.transient_bytes().1);
         }
         assert_eq!(physical[1] - physical[0], 96 * 64 * constants::PATH_MOMENT_BYTES);

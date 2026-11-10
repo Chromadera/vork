@@ -51,7 +51,7 @@ are in [CREDITS](CREDITS); keep that file with renders.
 Poly Haven's CC0 Qwantani Sunset Pure Sky and Grass Bermuda 01 textures are
 downloaded by `prepare_launch.py`, verified against `assets.lock.json`, and kept
 out of Git. The grass glTF omits its published alpha map, so an ordinary material
-binding supplies that separately pinned mask. `std/bloom` softens highlights.
+binding supplies that separately pinned mask. The authored bloom graph softens highlights.
 The water uses OpenPBR's water IOR and low roughness.
 
 ## Simulation and limits

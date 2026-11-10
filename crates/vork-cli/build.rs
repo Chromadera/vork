@@ -11,17 +11,13 @@ fn program_input_help() {
     let compiler = Compiler::discover();
     println!("cargo:rerun-if-env-changed=VORK_SLANGC");
     let mut text = String::new();
-    for program in ["camera", "hair", "sky"] {
-        let filename = format!("../../libraries/std/{program}.slang");
+    for module in vork_scene::libraries::LIBRARIES.iter().flat_map(|library| library.modules).filter(|module| module.material) {
+        let program = module.name;
+        let filename = format!("../../libraries/{program}.slang");
         let path = Path::new(&filename);
         println!("cargo:rerun-if-changed={}", path.display());
-        let source = std::fs::read_to_string(path).expect("bundled program source");
-        let inputs = match program {
-            "camera" => compiler.compile_camera(&abi, &source, path, "helpcamera").expect("reflect camera").inputs,
-            "hair" => compiler.compile_surface(&abi, &source, path, "helphair").expect("reflect hair").inputs,
-            "sky" => compiler.compile_environment(&abi, &source, path, "helpsky").expect("reflect sky").inputs,
-            _ => unreachable!(),
-        };
+        let source = module.source;
+        let inputs = compiler.reflect_inputs(&abi, source, path).expect("reflect bundled program Inputs");
         let declarations = source.split_once("struct Inputs {").unwrap().1.split_once("};").unwrap().0;
         for field in inputs.fields {
             // Read initializers from the bundled source rather than duplicating defaults.
@@ -29,8 +25,13 @@ fn program_input_help() {
                 let (declaration, value) = line.split_once('=')?;
                 (declaration.split_whitespace().last()? == field.name)
                     .then(|| value.split_once(';').expect("bundled input initializer").0.trim())
-            }).expect("bundled input has an initializer");
-            let default = if field.enumeration.is_some() {
+            }).unwrap_or("zero (unbound resource)");
+            let default = if initializer == "zero (unbound resource)" {
+                if vork_scene::libraries::LIBRARIES.iter().flat_map(|library| library.images)
+                    .any(|(name, input, _)| *name == program && *input == field.name) {
+                    "bundled image".to_owned()
+                } else { "unbound".to_owned() }
+            } else if field.enumeration.is_some() {
                 initializer.split("::").last().unwrap().rsplit('.').next().unwrap().to_ascii_lowercase()
             } else if let vork_slang::Type::Vector(n) = field.ty {
                 let value = initializer.split_once('(').expect("vector initializer").1.trim_end_matches(')');
@@ -46,6 +47,8 @@ fn program_input_help() {
                 "ortho_scale" | "clip_start" | "clip_end" | "focus_distance" => "; metres",
                 "aperture_rotation" | "sun_elevation" | "sun_rotation" | "offset" => "; radians",
                 "altitude" => "; metres",
+                "exposure" => "; stops",
+                "temperature" => "; kelvin",
                 _ => "",
             };
             let range = field.range.as_ref().map_or_else(|| "no declared range".to_owned(), |r|
@@ -59,7 +62,7 @@ fn program_input_help() {
                     .join("|");
                 writeln!(
                     text,
-                    "std/{program}.{}: enum {tokens}; {} (JSON tokens); default {default}; {range}.",
+                    "{program}.{}: enum {tokens}; {} (JSON tokens); default {default}; {range}.",
                     field.name, enumeration.ty
                 )
                 .unwrap();
@@ -71,7 +74,7 @@ fn program_input_help() {
                     vork_slang::Type::Vector(n) => format!("vec{n}"),
                     ty => format!("{ty:?}"),
                 };
-                writeln!(text, "std/{program}.{}: {ty}{units}; default {default}; {range}.", field.name).unwrap();
+                writeln!(text, "{program}.{}: {ty}{units}; default {default}; {range}.", field.name).unwrap();
             }
         }
     }

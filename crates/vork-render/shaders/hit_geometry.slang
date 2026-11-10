@@ -15,9 +15,28 @@ import stream;
 public struct RayHitBuffersTable { public StructuredBuffer<uint> buffers[REG_RAY_HIT_BUFFERS]; };
 // The consuming pass's ray table and hit buffer array (rt::hit_buffers_entry).
 public interface IHitGeometry {
-    static uint word(uint index);
-    static uint load(uint buffer, uint index);
+    uint word(uint index);
+    uint load(uint buffer, uint index);
 }
+// Entry-owned immutable geometry snapshot, forwarded through every reader.
+public struct RayGeometry : IHitGeometry {
+    public StructuredBuffer<uint> words;
+#ifdef VORK_METAL
+    public ParameterBlock<RayHitBuffersTable> buffers;
+    public __init(StructuredBuffer<uint> words,ParameterBlock<RayHitBuffersTable> buffers) {this.words=words;this.buffers=buffers;}
+#else
+    public StructuredBuffer<uint> buffers[REG_RAY_HIT_BUFFERS];
+    public __init(StructuredBuffer<uint> words,StructuredBuffer<uint> buffers[REG_RAY_HIT_BUFFERS]) {this.words=words;this.buffers=buffers;}
+#endif
+    public uint word(uint index) {return words[index];}
+    public uint load(uint buffer,uint index) {
+#ifdef VORK_METAL
+        return buffers.buffers[buffer][index];
+#else
+        return buffers[NonUniformResourceIndex(buffer)][index];
+#endif
+    }
+};
 // Named geometry attributes (stream.slang); per-scene hit kernels define the count.
 #ifndef VORK_ATTRIBUTES
 #define VORK_ATTRIBUTES 0
@@ -31,44 +50,64 @@ public struct HitCorner {
 };
 // Object-space corners, the instancing object and its normal transform (the
 // ray query's world-to-object rows).
-public struct HitTriangle { public HitCorner c[3]; public float3 face; public uint object; public float3x3 normal_matrix; };
-float hit_float<G:IHitGeometry>(uint buffer, uint i) {return asfloat(G.load(buffer,i));}
-public float3 hit_vec3<G:IHitGeometry>(uint buffer, uint i) {return float3(hit_float<G>(buffer,i),hit_float<G>(buffer,i+1u),hit_float<G>(buffer,i+2u));}
-float4 hit_vec4<G:IHitGeometry>(uint buffer, uint i) {return float4(hit_vec3<G>(buffer,i),hit_float<G>(buffer,i+3u));}
+public struct HitTriangle { public HitCorner c[3]; public float3 face; public uint object; public uint primitive_offset; public float3x3 normal_matrix; };
+float hit_float<G:IHitGeometry>(G g,uint buffer, uint i) {return asfloat(g.load(buffer,i));}
+public float3 hit_vec3<G:IHitGeometry>(G g,uint buffer, uint i) {return float3(hit_float<G>(g,buffer,i),hit_float<G>(g,buffer,i+1u),hit_float<G>(g,buffer,i+2u));}
+float4 hit_vec4<G:IHitGeometry>(G g,uint buffer, uint i) {return float4(hit_vec3<G>(g,buffer,i),hit_float<G>(g,buffer,i+3u));}
 // An optional attribute: 0xff offsets read the raster default stream's value.
-float2 hit_attribute2<G:IHitGeometry>(uint buffer, uint vertex, uint offset) {
-    return offset==0xffu ? float2(0.) : float2(hit_float<G>(buffer,vertex+offset),hit_float<G>(buffer,vertex+offset+1u));
+float2 hit_attribute2<G:IHitGeometry>(G g,uint buffer, uint vertex, uint offset) {
+    return offset==0xffu ? float2(0.) : float2(hit_float<G>(g,buffer,vertex+offset),hit_float<G>(g,buffer,vertex+offset+1u));
 }
-float4 hit_attribute4<G:IHitGeometry>(uint buffer, uint vertex, uint offset, float4 fallback) {
-    return offset==0xffu ? fallback : hit_vec4<G>(buffer,vertex+offset);
+float4 hit_attribute4<G:IHitGeometry>(G g,uint buffer, uint vertex, uint offset, float4 fallback) {
+    return offset==0xffu ? fallback : hit_vec4<G>(g,buffer,vertex+offset);
 }
-public HitTriangle hit_triangle<G:IHitGeometry>(uint instance, uint primitive, uint object, float3x4 world_to_object) {
-    let r=G.word(instance*REG_RAY_SLOT_WORDS+2u);
-    let positions=G.word(r);let base=G.word(r+1u);let stride=G.word(r+2u);
-    let indices=G.word(r+3u);let first=G.word(r+4u)+primitive*3u;
-    let attributes=G.word(r+5u);let attribute_base=G.word(r+6u);let attribute_stride=G.word(r+7u);
-    let fields=G.word(r+8u);let channels=G.word(r+9u);
+public HitTriangle hit_triangle<G:IHitGeometry>(G g,uint instance, uint primitive, uint object, float3x4 world_to_object) {
+    let r=g.word(instance*REG_RAY_SLOT_WORDS+2u);
+    let positions=g.word(r);let base=g.word(r+1u);let stride=g.word(r+2u);
+    let indices=g.word(r+3u);let first=g.word(r+4u)+primitive*3u;
+    let attributes=g.word(r+5u);let attribute_base=g.word(r+6u);let attribute_stride=g.word(r+7u);
+    let fields=g.word(r+8u);let channels=g.word(r+9u);
     // Deformed draws read normals/tangents from the pose, static ones from attributes.
-    let deformed=(fields>>24u)!=0u;
+    let deformed=(fields&(1u<<24u))!=0u;
     let surface=deformed ? positions : attributes;
-    HitTriangle t;t.object=object;t.normal_matrix=(float3x3)world_to_object;
+    HitTriangle t;t.object=object;
+#ifdef VORK_NO_POINTS
+    t.primitive_offset=0u;t.normal_matrix=(float3x3)world_to_object;
+#else
+    t.primitive_offset=g.word(r+10u);t.normal_matrix=(fields&(1u<<25u))!=0u ? (float3x3)object_normal(object) : (float3x3)world_to_object;
+#endif
     [unroll] for (uint corner=0u;corner<3u;corner++) {
-        let index=G.load(indices,first+corner);
-        let p=base+index*stride;let a=attribute_base+index*attribute_stride;
-        let s=deformed ? p : a;
+        let index=g.load(indices,first+corner);
+        #ifdef VORK_NO_POINTS
+        let compact=false;
+#else
+        let compact=(fields&(1u<<26u))!=0u;
+#endif
+        var p=base+index*stride;var a=attribute_base+index*attribute_stride;
         var c:HitCorner;
-        c.POSITION=hit_vec3<G>(positions,p);
-        c.rest=deformed ? hit_vec3<G>(attributes,a+((fields>>16u)&0xffu)) : c.POSITION;
-        c.NORMAL=hit_vec3<G>(surface,s+(fields&0xffu));
-        c.TANGENT=hit_attribute4<G>(surface,s,(fields>>8u)&0xffu,float4(0.));
-        c.TEXCOORD_0=hit_attribute2<G>(attributes,a,channels&0xffu);
-        c.TEXCOORD_1=hit_attribute2<G>(attributes,a,(channels>>8u)&0xffu);
-        c.COLOR_0=hit_attribute4<G>(attributes,a,(channels>>16u)&0xffu,float4(1.));
+        if(compact) {
+            let count=g.load(positions,base);let shape_count=g.load(positions,base+1u);
+            let row=index/shape_count;let shape=base+2u+count*10u+(index%shape_count)*5u;
+            p=base+2u+row*10u;a=attribute_base+row*attribute_stride;
+            c.NORMAL=hit_vec3<G>(g,positions,shape);c.TANGENT=float4(0.);
+            c.POSITION=hit_vec3<G>(g,positions,p)+c.NORMAL*hit_float<G>(g,positions,p+3u)*0.5;
+            c.rest=hit_vec3<G>(g,attributes,a)+c.NORMAL*hit_float<G>(g,attributes,a+3u)*0.5;
+            c.TEXCOORD_0=hit_attribute2<G>(g,positions,shape,3u);c.TEXCOORD_1=float2(0.);
+        } else {
+            let s=deformed ? p : a;
+            c.POSITION=hit_vec3<G>(g,positions,p);
+            c.rest=deformed ? hit_vec3<G>(g,attributes,a+((fields>>16u)&0xffu)) : c.POSITION;
+            c.NORMAL=hit_vec3<G>(g,surface,s+(fields&0xffu));
+            c.TANGENT=hit_attribute4<G>(g,surface,s,(fields>>8u)&0xffu,float4(0.));
+            c.TEXCOORD_0=hit_attribute2<G>(g,attributes,a,channels&0xffu);
+            c.TEXCOORD_1=hit_attribute2<G>(g,attributes,a,(channels>>8u)&0xffu);
+        }
+        c.COLOR_0=hit_attribute4<G>(g,attributes,a,(channels>>16u)&0xffu,float4(1.));
 #if VORK_ATTRIBUTES > 0
         // Named attributes follow colour, one float4 each (VertexLayout::pack).
         let custom=channels>>24u;
         [unroll] for (uint k=0u;k<VORK_ATTRIBUTES;k++) {
-            c.attributes[k]=custom==0xffu || custom+4u*k+4u>attribute_stride ? float4(0.) : hit_vec4<G>(attributes,a+custom+4u*k);
+            c.attributes[k]=custom==0xffu || custom+4u*k+4u>attribute_stride ? float4(0.) : hit_vec4<G>(g,attributes,a+custom+4u*k);
         }
 #endif
         t.c[corner]=c;
@@ -204,8 +243,8 @@ public float3 hit_face(HitTriangle t) {return finite_unit_normal(mul(t.face,t.no
 
 // Current emitter geometry shares the same transformed/deformed corners as hits.
 public struct HitEmitterGeometry { public float3 point; public float3 face; public float area; };
-public HitEmitterGeometry hit_emitter<G:IHitGeometry>(uint instance, uint primitive, uint object, float3x4 inverse, float2 barycentrics) {
-    let t=hit_triangle<G>(instance,primitive,object,inverse);let m=object_model(object);
+public HitEmitterGeometry hit_emitter<G:IHitGeometry>(G g,uint instance, uint primitive, uint object, float3x4 inverse, float2 barycentrics) {
+    let t=hit_triangle<G>(g,instance,primitive,object,inverse);let m=object_model(object);
     let a=mul(float4(t.c[1].POSITION-t.c[0].POSITION,0.),m).xyz;
     let b=mul(float4(t.c[2].POSITION-t.c[0].POSITION,0.),m).xyz;
     let point=hit_point(t,float3(1.-barycentrics.x-barycentrics.y,barycentrics));
@@ -215,14 +254,14 @@ public HitEmitterGeometry hit_emitter<G:IHitGeometry>(uint instance, uint primit
 // A camera triangle and its world-space corners, shared by retained evaluation
 // and the collector's zero-opacity proof.
 public struct SurfaceTriangle { public HitTriangle t; public uint primitive; public float3 p0; public float3 p1; public float3 p2; };
-public SurfaceTriangle surface_triangle<G:IHitGeometry>(uint draw, uint primitive, uint object) {
+public SurfaceTriangle surface_triangle<G:IHitGeometry>(G g,uint draw, uint primitive, uint object) {
     if(field_primitive(primitive)) {
         SurfaceTriangle st={};st.t.object=object;st.primitive=primitive;
         for(uint i=0u;i<3u;i++) st.t.c[i].COLOR_0=float4(1.);
         return st;
     }
     let normal=object_normal(object);
-    let t=hit_triangle<G>(draw,primitive,object,float3x4(normal[0],normal[1],normal[2]));
+    let t=hit_triangle<G>(g,draw,primitive,object,float3x4(normal[0],normal[1],normal[2]));
     let model=object_model(object);
     return SurfaceTriangle(t,primitive,mul(float4(t.c[0].POSITION,1.),model).xyz,mul(float4(t.c[1].POSITION,1.),model).xyz,mul(float4(t.c[2].POSITION,1.),model).xyz);
 }

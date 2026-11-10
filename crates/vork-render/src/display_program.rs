@@ -267,12 +267,19 @@ fn {sample}(slot:u32,uv:vec2<f32>,dx:vec2<f32>,dy:vec2<f32>)->vec4<f32> {{
     let count=size.x*size.y;let i=gid.y*size.x+gid.x;let base=u32(settings.w);
     let value=vec4(bitcast<f32>(display_pixels[base*count+i]),bitcast<f32>(display_pixels[(base+1u)*count+i]),bitcast<f32>(display_pixels[(base+2u)*count+i]),bitcast<f32>(display_pixels[(base+3u)*count+i]));
     var result:array<vec4<f32>,1>;
-    {entry}(value.rgb,gid.xy,bitcast<u32>(settings.x),0u,&result);
+    {entry}(value.rgb,gid.xy,bitcast<u32>(settings.x),8u,0u,&result);
     var mapped=result[0].rgb;
     if !all(abs(mapped)<=vec3(3.402823466e38)) {{atomicMax(&display_errors[0],REG_DISPLAY_NONFINITE);mapped=vec3(0.);}}
     mapped=clamp(mapped,vec3(0.),vec3(1.));
     if((flags&REG_OUTPUT_GPU_COLOR)!=0u) {{textureStore(display_output,vec2<i32>(gid.xy),vec4(mapped,value.a));}}
     if((flags&REG_OUTPUT_COLOR_PLANE)!=0u) {{display_pixels[i]=pack4x8unorm(vec4(mapped,value.a));}}
+    // 16-bit PNG colour replaces this pixel's consumed staging input in place.
+    if((flags&REG_OUTPUT_COLOR_PLANE16)!=0u) {{
+        {entry}(value.rgb,gid.xy,bitcast<u32>(settings.x),16u,0u,&result);
+        mapped=result[0].rgb;
+        if !all(abs(mapped)<=vec3(3.402823466e38)) {{atomicMax(&display_errors[0],REG_DISPLAY_NONFINITE);mapped=vec3(0.);}}
+        mapped=clamp(mapped,vec3(0.),vec3(1.));
+        display_pixels[base*count+i]=pack2x16unorm(mapped.rg);display_pixels[(base+1u)*count+i]=pack2x16unorm(vec2(mapped.b,value.a));}}
 }}
 "#,
             frame_words = std::mem::size_of::<Uniform>() / 16,

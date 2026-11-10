@@ -47,6 +47,7 @@ fn run() -> Result<()> {
             "--no-write" => shot.no_write = true,
             "--gpu-only" => shot.gpu_only = true,
             "--exr-codec" => shot.exr_codec = args.next().context("codec")?.parse().map_err(anyhow::Error::msg)?,
+            "--png-depth" => shot.png_depth = args.next().context("depth")?.parse().map_err(anyhow::Error::msg)?,
             _ if !flag.starts_with('-') && shot.scene.as_os_str().is_empty() => shot.scene = flag.into(),
             _ => bail!("unknown test driver argument {flag}"),
         }

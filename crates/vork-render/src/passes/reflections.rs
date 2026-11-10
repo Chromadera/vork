@@ -573,7 +573,9 @@ float response(uint test,Closure c,ReflectionBsdf state,float3 view,float3 direc
         let path=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny-reflection-emitter.json");
         let tiny=crate::load_test_fixture(&path, include_str!("../../tests/presets/tiny-reflection-emitter-25918a49.json"))?;
         let mut value:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        value["nodes"][1]["geometry"]["size"]=serde_json::json!([0.2,0.2]);
+        for position in value["nodes"][1]["geometry"]["attributes"]["POSITION"]["data"].as_array_mut().unwrap() {
+            for axis in [0,2] { position[axis]=serde_json::json!(position[axis].as_f64().unwrap().signum()*0.1); }
+        }
         value["materials"]["source"]["inputs"]["emission_luminance"]=serde_json::json!(30);
         let mut broad=crate::test_scene(value.clone(), std::path::Path::new("."))?;
         broad.apply_settings(tiny.render.settings.clone(),"test")?;
@@ -610,7 +612,7 @@ float response(uint test,Closure c,ReflectionBsdf state,float3 view,float3 direc
         installed.reflections=Some(pipeline(&r,&installed.pipelines,full,installed.plan.effects.probes,&crate::pipelines::VariantCompile::Inline)?);
         let mut generic=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
         let generic=installed.render_frame(&r, &mut generic, 0.)?;
-        assert_eq!(specialized.rgba,generic.rgba,"reflection capability union changed visible or unseen hits");
+        crate::test_linear::assert_linear_eq(specialized.linear_rgba.as_ref().expect("linear readback"), generic.linear_rgba.as_ref().expect("linear readback"));
         Ok(())
     }
 
@@ -618,28 +620,34 @@ float response(uint test,Closure c,ReflectionBsdf state,float3 view,float3 direc
     fn transport_controls_keep_nearest_sample_and_exported_depth() -> Result<()> {
         let Some(r)=crate::test_renderer()? else {return Ok(());};
         let d=&r.device;
-        // Shared pass IDs still average exported depth; transport retains the nearest sample.
+        // Shared pass IDs cannot join disconnected primitives at different depths.
         let module=d.create_shader_module(wgpu::ShaderModuleDescriptor {label:None,source:wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(r#"
 struct Out { @builtin(position) p:vec4f };
 @vertex fn vs(@builtin(vertex_index) i:u32)->Out {
     var p=array<vec2f,3>(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.));
     var o:Out;o.p=vec4f(p[i],0.,1.);return o;
 }
-struct Pixel { @location(0) ids:u32,@location(1) normal:vec4f,@builtin(frag_depth) depth:f32 };
+struct Pixel { @location(0) ids:vec4u,@location(1) normal:vec4f,@builtin(frag_depth) depth:f32 };
 @fragment fn fs(@builtin(sample_index) sample:u32,@builtin(position) p:vec4f)->Pixel {
     let near=sample<2u;var o:Pixel;
-    o.ids=7u;
+    o.ids=vec4u(7u,0u,select(1u,0u,near),bitcast<u32>(.02));
     o.normal=select(vec4f(0.,1.,0.,-2.),vec4f(1.,0.,0.,0.),near);
-    o.depth=select(.8,.2,near);return o;
+    o.depth=select(.8,.2+.02*f32(sample),near);
+    if (p.x>1. && p.x<2.) {
+        // Continuous surface: the depth span fits inside its one-pixel slope.
+        o.ids=vec4u(7u,0u,sample,bitcast<u32>(.6));o.depth=.2+.2*f32(sample);
+    }
+    if (p.x>2.) {o.ids.y=select(1u,0u,near);o.ids.w=bitcast<u32>(.6);}
+    return o;
 }
 "#))});
-        let targets=[wgpu::TextureFormat::R32Uint,wgpu::TextureFormat::Rgba16Float].map(|format|Some(wgpu::ColorTargetState {format,blend:None,write_mask:wgpu::ColorWrites::ALL}));
+        let targets=[wgpu::TextureFormat::Rgba32Uint,wgpu::TextureFormat::Rgba16Float].map(|format|Some(wgpu::ColorTargetState {format,blend:None,write_mask:wgpu::ColorWrites::ALL}));
         let pipeline=d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {label:None,layout:None,
             vertex:wgpu::VertexState {module:&module,entry_point:Some("vs"),compilation_options:Default::default(),buffers:&[]},
             fragment:Some(wgpu::FragmentState {module:&module,entry_point:Some("fs"),compilation_options:Default::default(),targets:&targets}),
             primitive:Default::default(),depth_stencil:Some(wgpu::DepthStencilState {format:wgpu::TextureFormat::Depth32Float,depth_write_enabled:Some(true),depth_compare:Some(wgpu::CompareFunction::Always),stencil:Default::default(),bias:Default::default()}),
             multisample:wgpu::MultisampleState {count:4,..Default::default()},multiview_mask:None,cache:None});
-        let images=[wgpu::TextureFormat::R32Uint,wgpu::TextureFormat::Rgba16Float,wgpu::TextureFormat::Depth32Float].map(|format|texture(d,"shared-pass MSAA edge",1,1,4,format,wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::TEXTURE_BINDING).create_view(&Default::default()));
+        let images=[wgpu::TextureFormat::Rgba32Uint,wgpu::TextureFormat::Rgba16Float,wgpu::TextureFormat::Depth32Float].map(|format|texture(d,"shared-pass MSAA edge",3,1,4,format,wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::TEXTURE_BINDING).create_view(&Default::default()));
         let attachments=[0,1].map(|i|Some(wgpu::RenderPassColorAttachment {view:&images[i],depth_slice:None,resolve_target:None,ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store}}));
         let mut encoder=d.create_command_encoder(&Default::default());
         {let mut pass=encoder.begin_render_pass(&wgpu::RenderPassDescriptor {label:None,color_attachments:&attachments,multiview_mask:None,
@@ -653,21 +661,56 @@ import vork_control_sample;
 [[vk::binding(2,0)]] Texture2DMS<float4> normals : register(t2);
 [[vk::binding(3,0)]] RWStructuredBuffer<float4> result : register(u3);
 [shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID) {
-    let c=sample_controls(int2(0),depth,ids,normals,normals,normals,4u);
-    result[0]=c.depth;result[1]=c.normals;
+    let c=sample_controls(int2(id.x,0),depth,ids,normals,normals,normals,4u);
+    result[id.x*2]=c.depth;result[id.x*2+1]=c.normals;
 }
 "#;
         let mut entries=vec![pipelines::texture_entry(0,wgpu::TextureSampleType::Depth,true),pipelines::texture_entry(1,wgpu::TextureSampleType::Uint,true),pipelines::texture_entry(2,wgpu::TextureSampleType::Float {filterable:false},true),pipelines::buffer_entry(3,wgpu::ShaderStages::COMPUTE,wgpu::BufferBindingType::Storage {read_only:false})];
         for e in &mut entries {e.visibility=wgpu::ShaderStages::COMPUTE;}
         let compute=crate::medium::test_pipeline(&r,source,&crate::medium::Native::default(),&entries,(1,1,1))?;
-        let output=crate::init(d,"transport controls result",&[0u8;32],wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
+        let output=crate::init(d,"transport controls result",&[0u8;96],wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
         let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&compute.get_bind_group_layout(0),entries:&[
             entry(0,wgpu::BindingResource::TextureView(&images[2])),entry(1,wgpu::BindingResource::TextureView(&images[0])),entry(2,wgpu::BindingResource::TextureView(&images[1])),entry(3,output.as_entire_binding())]});
-        let actual=compute_vec4_count(&r,&compute,&bind,&output,1,2)?;
-        assert!((actual[0][0]-0.5).abs()<1e-6,"exported depth changed: {:?}",actual[0]);
+        let actual=compute_vec4_count(&r,&compute,&bind,&output,3,6)?;
+        assert!((actual[0][0]-0.21).abs()<1e-6,"exported depth changed: {:?}",actual[0]);
         assert!((actual[0][1]-0.2).abs()<1e-6,"invented transport surface: {:?}",actual[0]);
         assert_eq!(actual[1],[1.,0.,0.,1.],"nearest normal or sample index was lost");
+        assert!((actual[2][0]-0.5).abs()<1e-6,"continuous triangle boundary moved the centroid: {:?}",actual[2]);
+        assert!((actual[4][0]-0.21).abs()<1e-6,"separate objects joined: {:?}",actual[4]);
         r.errors.check()?;Ok(())
+    }
+
+
+    // This reduction retains the camera, vertex positions and pixel coordinates
+    // from BB109. Bounds come from projecting the original triangle vertices
+    // onto the camera's view axis, independently of raster depth reconstruction.
+    #[test]
+    fn folded_mesh_depth_stays_on_near_surface() -> Result<()> {
+        let Some(renderer) = crate::test_renderer()? else { return Ok(()); };
+        let mut json: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/depth-folds.json"))?;
+        json["render"]["settings"] = serde_json::json!({"integrator": "path", "samples": 4, "denoiser": null});
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        // A shared object, separate objects sharing a public pass index, and distinct
+        // public indices must all select the same near fold.
+        for split in 0..3 {
+            let mut scene = json.clone();
+            if split != 0 {
+                let mut rear = scene["nodes"][0].clone();
+                scene["nodes"][0]["geometry"]["indices"]["data"] = serde_json::json!([3,5,4]);
+                rear["geometry"]["indices"]["data"] = serde_json::json!([0,2,1]);
+                rear["name"] = serde_json::json!("rear");
+                if split == 2 { rear["pass_index"] = serde_json::json!(81); }
+                scene["nodes"].as_array_mut().unwrap().push(rear);
+            }
+            let mut installed = renderer.install(vork_scene::v2::from_test_value(scene)?, &base)?;
+            let mut slot = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
+            let output = installed.render_frame(&renderer, &mut slot, 2./7.)?;
+            let at = 108 * 320 + 167;
+            let z = output.depth_f32.as_ref().unwrap()[at];
+            assert_eq!(output.ids[at], 80);
+            assert!((4.56..=4.5966).contains(&z), "split {split}: depth {z} lies off the near fold");
+        }
+        Ok(())
     }
 
 }

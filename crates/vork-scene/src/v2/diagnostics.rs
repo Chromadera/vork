@@ -41,7 +41,6 @@ pub fn unknown<'a>(kind: &str, name: &str, valid: impl IntoIterator<Item = &'a s
         ("value", "Filmic", "render.display with the blender/filmic display program"),
         ("value", "ORTHO", "ortho (lowercase)"),
         ("field", "extension", "wrap_s/wrap_t on the image"),
-        ("token", "bloom", "std/bloom"),
         ("program", "blender/principled", "std/openpbr"),
     ];
     if let Some((_, _, hint)) = BLENDER_HINTS.iter().find(|(k, n, _)| *k == kind && *n == name) {
@@ -425,7 +424,7 @@ mod review_regressions {
     }
     #[test]
     fn std_geometry_is_rejected_by_kernel_diagnostics() {
-        let bytes = br#"{"version":2,"nodes":[{"type":"camera"}],"geometry":{"log":{"std":"cylinder","radius":0.105,"height":1.2,"segments":24}}}"#;
+        let bytes = br#"{"version":2,"nodes":[{"type":"camera"}],"geometry":{"log":{"std":"rounded_box","size":[0.21,1.2,0.21],"radius":0.105,"segments":24}}}"#;
         let error = Scene::from_json(bytes).unwrap_err().to_string();
         assert!(error.contains("std") && error.contains("unknown field"), "{error}");
     }
@@ -640,7 +639,6 @@ mod blender_hints {
             ("value", "Filmic", "AgX", "blender/filmic"),
             ("value", "ORTHO", "ortho", "ortho (lowercase)"),
             ("field", "extension", "wrap_s", "wrap_s/wrap_t"),
-            ("token", "bloom", "fog_glow", "std/bloom"),
         ] {
             let error = unknown(kind, name, [valid]);
             assert!(error.contains(expected), "{error}");

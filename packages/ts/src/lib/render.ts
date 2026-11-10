@@ -38,7 +38,7 @@ export interface RenderWarning {
   dropped: string;
 }
 export interface RenderResult {
-  /** Requested effects omitted or substituted by the renderer. */
+  /** Visible losses and compatibility removal/rewrite notices. */
   warnings: RenderWarning[];
   /** Display-image statistics per output; EXR and control-only outputs have no entry. */
   exposure: { output: string; exposure: ExposureSummary }[];

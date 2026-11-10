@@ -24,7 +24,7 @@ pub(crate) struct Compiled {
 
 /// The shader module for `shader` on this device's backend.
 pub(crate) fn shader_module(device: &wgpu::Device, shader: &Compiled) -> wgpu::ShaderModule {
-    module(device, shader.name, Some(shader.spirv), (!shader.msl.is_empty()).then_some(shader.msl), shader.threads)
+    module(device, shader.name, Some(shader.spirv), Some(shader.msl), shader.threads)
 }
 
 /// Built-in surface capabilities are late constants, independent of the
@@ -89,6 +89,13 @@ pub(crate) fn module(
     msl: Option<&str>,
     threads: (u32, u32, u32),
 ) -> wgpu::ShaderModule {
+    #[cfg(test)]
+    if let (Some(directory), Some(source)) = (std::env::var_os("VORK_INSTALLED_METAL_DIR"), msl) {
+        assert!(!source.trim().is_empty(), "empty installed MSL module: {label}");
+        let name = blake3::hash(source.as_bytes()).to_hex();
+        std::fs::write(std::path::PathBuf::from(directory).join(format!("{name}.metal")), source)
+            .expect("capture installed MSL");
+    }
     // Slang does not annotate vertex positions. Depth-equal prepass/forward
     // pairs need invariance even when their vertex entry points differ.
     #[cfg(target_vendor = "apple")]
@@ -125,6 +132,36 @@ pub(crate) mod tests {
     use super::*;
     use serde_json::Value;
     use wgpu::{BindGroupLayoutEntry, BindingType, ShaderStages};
+
+    #[test]
+    fn installed_metal_capture_rejects_empty_implicit_modules() -> anyhow::Result<()> {
+        const CHILD: &str = "VORK_TEST_EMPTY_IMPLICIT_MSL";
+        if std::env::var_os(CHILD).is_some() {
+            let (device, _) = wgpu::Device::noop(&Default::default());
+            let shader = Compiled {
+                name: "empty implicit witness", entry: "main", spirv: &[], msl: "",
+                threads: (1, 1, 1), stage: "compute",
+                spirv_reflection: "", msl_reflection: "",
+            };
+            let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shader_module(&device, &shader)));
+            let panic = rejected.err().expect("an empty implicit module must fail capture");
+            let message = panic.downcast_ref::<String>().map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied()).unwrap_or("");
+            assert!(message.contains("empty installed MSL module: empty implicit witness"), "{message}");
+            return Ok(());
+        }
+        // Keep the capture environment local to a subprocess: other tests may
+        // deliberately create check-only placeholders with no native code.
+        let directory = std::env::temp_dir().join(format!("vork-empty-msl-{}", std::process::id()));
+        std::fs::create_dir_all(&directory)?;
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "native::tests::installed_metal_capture_rejects_empty_implicit_modules", "--nocapture"])
+            .env(CHILD, "1").env("VORK_INSTALLED_METAL_DIR", &directory).output()?;
+        std::fs::remove_dir_all(directory)?;
+        anyhow::ensure!(result.status.success(), "empty implicit capture: {}{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        Ok(())
+    }
 
     #[test]
     fn late_surface_artifacts_keep_dispatch_sizes_and_accept_capabilities() -> anyhow::Result<()> {
@@ -167,6 +204,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn metal_dielectric_spills_do_not_synchronize_divergent_invocations() -> anyhow::Result<()> {
+        let source=r#"import path_boundary;
+[[vk::binding(0,0)]] RWStructuredBuffer<uint> output;
+[shader("compute")][numthreads(32,1,1)] void entry(uint3 id:SV_DispatchThreadID) {
+    PathOccupancy<8> state={};
+    for(uint i=0u;i<17u+id.x;i++) {var b=path_air();b.object=i;state.cross<EqualBoundaryPriority>(b,true);}
+    output[id.x]=state.count;state.clear();
+}"#;
+        let mut modules=SOURCES.to_vec();modules.push(("spill_fence_test",source));
+        let (_,target,flags)=crate::forward_variant::METAL_TARGET;
+        let registers=crate::binding_abi::material_registers(1);
+        let args:Vec<_>=["-target",target].into_iter().chain(flags.iter().copied()).chain(registers.iter().map(String::as_str)).collect();
+        let code=vork_slang::Compiler::discover().compile_modules(&modules,"spill_fence_test",&[("entry","compute")],&args)?;
+        let metal=String::from_utf8(code)?;
+        assert!(metal.contains("atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)"));
+        assert!(!metal.contains("threadgroup_barrier") && !metal.contains("simdgroup_barrier"),"divergent spill allocation must not synchronize execution");
+        #[cfg(target_os="macos")]
+        {
+            // Hosted Metal CI has no GPU; still compile the actual spill code
+            // with Apple's compiler rather than only checking Slang's text.
+            let directory=std::env::temp_dir().join(format!("vork-spill-metal-{}",std::process::id()));
+            std::fs::create_dir_all(&directory)?;
+            let source=directory.join("spill.metal");
+            std::fs::write(&source,metal.replace("[];","[1];"))?;
+            let result=std::process::Command::new("xcrun").args(["-sdk","macosx","metal","-c","-std=metal3.2"])
+                .arg(&source).arg("-o").arg(directory.join("spill.air")).output()?;
+            std::fs::remove_dir_all(directory)?;
+            anyhow::ensure!(result.status.success(),"Metal spill compilation: {}",String::from_utf8_lossy(&result.stderr));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn metal_callbacks_link_without_unreachable_mutable_library_exports() -> anyhow::Result<()> {
         let modules = [
             ("callbacks", "internal extern uint callback(out uint value); public uint read_callback() {uint v;return callback(v)+v;}"),
@@ -204,10 +274,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// The shipped depth and control stages declare SV_PrimitiveID exactly when
-    /// they evaluate hashed coverage (forward_variant::FEATURE_DITHERED).
+    /// Depth needs primitive IDs for hashed coverage; every control stage needs
+    /// them to keep depth resolve on the nearest primitive.
     #[test]
-    fn only_hashed_coverage_stages_declare_the_primitive() {
+    fn depth_and_control_primitive_interfaces() {
         fn declares(shader: &Compiled) -> bool {
             let found = spirv_decorations(shader.spirv).iter().any(|&(_, d, v)| d == 11 && v == 7); // BuiltIn PrimitiveId
             if !shader.msl.is_empty() {
@@ -222,8 +292,8 @@ pub(crate) mod tests {
             assert_eq!(declares(shader), hashed, "{}", shader.name);
         }
         assert_eq!(CONTROL_GENERICS.iter().filter(|g| g.3).count(), CONTROL_GENERICS.len() / 2);
-        for &(_, _, _, hashed, shader) in CONTROL_GENERICS {
-            assert_eq!(declares(shader), hashed, "{}", shader.name);
+        for &(_, _, _, _, shader) in CONTROL_GENERICS {
+            assert!(declares(shader), "{}", shader.name);
         }
     }
 
@@ -777,7 +847,7 @@ pub(crate) mod tests {
 
     #[test]
     fn every_shader_matches_its_layout() {
-        use crate::pipelines::{global_entries, material_entries};
+        use crate::pipelines::{raster_global_entries, material_entries};
         for samples in [1, crate::constants::RASTER_MSAA_SAMPLES] {
             for denoise in [false, true] {
                 let entries = crate::pipelines::control_resolve_entries(samples, denoise);
@@ -790,7 +860,7 @@ pub(crate) mod tests {
         let reconstruction = crate::denoise::spatial::entries();
         let reconstruction_groups: &[&[BindGroupLayoutEntry]] = &[&reconstruction];
         let mip: &[&[BindGroupLayoutEntry]] = &[&crate::materials::MIP_LAYOUT];
-        let global = global_entries();
+        let global = raster_global_entries();
         // Metal indices depend on visibility, so check both material table layouts.
         let tables = [material_entries(false), material_entries(true)];
         let depth: Vec<Vec<&[BindGroupLayoutEntry]>> =
@@ -803,6 +873,7 @@ pub(crate) mod tests {
         let hits = [crate::rt::hit_buffers_entry(0, ShaderStages::COMPUTE)];
         let path_groups: &[&[BindGroupLayoutEntry]] = &[&path, &tables[1], &[], &hits];
         let mut checked = vec![(&CLUSTERS_CULL, cluster_groups), (&MIP_VS, mip), (&MIP_FS, mip), (&DEFORM_EVALUATE, deform), (&DEFORM_CHAIN_EVALUATE, deform)];
+        checked.push((&PRESENT_FS, mip));
         for shader in [&DENOISE_PACK, &DENOISE_UNPACK] {checked.push((shader,denoise_groups));}
         let indirect_args = crate::passes::decoupled::indirect_arguments_entries();
         let indirect_args_groups: &[&[BindGroupLayoutEntry]] = &[&indirect_args];

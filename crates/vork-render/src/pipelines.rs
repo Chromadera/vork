@@ -33,7 +33,7 @@ pub(crate) fn prewarm_builtin(scene: &Scene, effects: EffectPlan) -> Result<bool
 
 pub(crate) fn control_formats(denoise: bool) -> &'static [Option<wgpu::TextureFormat>] {
     const FORMATS: [Option<wgpu::TextureFormat>;5] = [
-        Some(wgpu::TextureFormat::R32Uint),
+        Some(wgpu::TextureFormat::Rgba32Uint),
         Some(wgpu::TextureFormat::Rgba16Float),Some(wgpu::TextureFormat::Rgba16Float),
         Some(wgpu::TextureFormat::Rgba16Float),Some(wgpu::TextureFormat::Rgba32Float),
     ];
@@ -77,11 +77,6 @@ pub(crate) fn join<T>(job: std::thread::ScopedJoinHandle<'_, T>) -> T {
 /// Join lazy descriptor jobs, returning the first failure.
 fn joined<'scope>(jobs: impl IntoIterator<Item = Option<Job<'scope>>>) -> Result<()> {
     jobs.into_iter().flatten().try_for_each(join)
-}
-
-/// Infallible replay paths only run after the install compiler join.
-pub(crate) fn base<T>(slot: &OnceLock<T>) -> &T {
-    slot.get().expect("base pipelines installed")
 }
 
 /// Owned pipeline-creation handle: background variant workers outlive the install
@@ -738,6 +733,8 @@ impl CachedPipelines {
         if slang.surface_coverage {identity.update(b"surface coverage");}
         if slang.attribute_coverage {identity.update(b"attribute coverage");}
         if slang.no_boundary_transactions {identity.update(b"no boundary transactions");}
+        if slang.no_points {identity.update(b"no points");}
+        if slang.bounded_secondary_compilation {identity.update(b"bounded secondary compilation");}
         if let Some(native)=&slang.medium {
             identity.update(native.point.as_bytes());identity.update(&native.identity);
 
@@ -1173,7 +1170,7 @@ impl CachedPipelines {
             let fixed = [
                 // Implicit path writes controls itself; implicit raster still
                 // schedules Controls, just like graph::Graph's output pruning.
-                compile(scope, &self.control_resolve_pipeline, !features.fuse_controls() && !(features.implicit && features.path) && features.outputs.is_none_or(|o|o.controls() || (!features.path && o.beauty && (features.indirect || features.reflections || features.denoise))), || {
+                compile(scope, &self.control_resolve_pipeline, features.standalone_controls(features.outputs), || {
                 let shader = control_resolve_shader(self.raster_samples, self.denoise);
                 let module = self
                     .control_module
@@ -1243,7 +1240,7 @@ impl CachedPipelines {
         slang: crate::slang_forward::SlangScene,
     ) -> Self {
         let d = &r.device;
-        let globals=global_entries();
+        let globals=raster_global_entries();
         let global_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame + objects"),
             entries: &globals,
@@ -1362,6 +1359,11 @@ impl CachedPipelines {
 /// Group 0 of every geometry pass (shaders/frame.slang): frame, objects, lights,
 /// environment, LTC tables and clusters.
 /// Scene globals (frame.slang), read by raster stages and the compute kernels that shade surfaces.
+pub(crate) fn raster_global_entries()->Vec<wgpu::BindGroupLayoutEntry> {
+    let mut entries=global_entries();
+    entries.push(buffer_entry(10,wgpu::ShaderStages::VERTEX,wgpu::BufferBindingType::Storage {read_only:true}));
+    entries
+}
 pub(crate) fn global_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     let mut entries = vec![
                 buffer_entry(
@@ -1535,7 +1537,7 @@ fn packed_geometry_pipeline(
         .iter()
         .enumerate()
         .map(|(slot, attributes)| wgpu::VertexBufferLayout {
-            array_stride: match slot {
+            array_stride: if packed.points && slot<3 {0} else {match slot {
                 0 => packed.vertex_stride(),
                 1 => packed.vertex_stride() * if packed.deform {2} else {1},
                 2 => {
@@ -1547,7 +1549,7 @@ fn packed_geometry_pipeline(
                 }
                 3 if camera => 4,
                 _ => 0,
-            },
+            }},
             step_mode: if camera && slot==3 {wgpu::VertexStepMode::Instance} else {wgpu::VertexStepMode::Vertex},
             attributes,
         })
@@ -1604,6 +1606,28 @@ fn packed_geometry_pipeline(
         multiview_mask: None,
         cache: c.cache.as_ref(),
     })
+}
+
+#[cfg(test)]
+mod control_resolve_tests {
+    use super::*;
+
+    #[test]
+    fn composited_previs_subsurface_installs_control_resolve() -> Result<()> {
+        let Some(renderer) = crate::test_renderer()? else { return Ok(()); };
+        let features = EffectPlan {
+            compositor: true, subsurface: true,
+            outputs: Some(crate::compositor::Dependencies {
+                color: true, beauty: true, ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pipelines = renderer.cached_pipelines(1);
+        pipelines.ensure_effects(&renderer, features)?;
+        assert!(pipelines.control_resolve_pipeline.get().is_some(),
+            "subsurface composition consumes controls even without GI, reflections or denoising");
+        Ok(())
+    }
 }
 
 #[cfg(all(test, vork_private_tests))]
@@ -1897,6 +1921,8 @@ mod registry_identity_tests {
             crate::slang_forward::SlangScene {aov_count:1,..base.clone()},
             crate::slang_forward::SlangScene {surface_coverage:true,..base.clone()},
             crate::slang_forward::SlangScene {field_controls:true,..base.clone()},
+            crate::slang_forward::SlangScene {bounded_secondary_compilation:true,..base.clone()},
+            crate::slang_forward::SlangScene {no_points:true,..base.clone()},
             crate::slang_forward::SlangScene {no_shadow_containment:true,..base.clone()},
             crate::slang_forward::SlangScene {probes:true,..base.clone()},
         ] {assert_ne!(key(&base),key(&changed));}

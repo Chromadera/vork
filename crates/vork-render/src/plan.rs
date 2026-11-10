@@ -49,6 +49,15 @@ impl EffectPlan {
         !(self.implicit || self.indirect || self.reflections || self.denoise || self.compositor)
     }
 
+    /// Shared admission for the standalone controls pass and its pipeline.
+    /// Graph resource pruning may remove an admitted pass, but must never add
+    /// one whose pipeline was excluded during installation.
+    pub(crate) fn standalone_controls(self, outputs: Option<crate::compositor::Dependencies>) -> bool {
+        !self.fuse_controls()
+            && !(self.implicit && self.path)
+            && outputs.is_none_or(|o| o.controls() || (!self.path && (o.beauty || o.aovs || o.catcher)))
+    }
+
     pub(crate) fn for_scene(scene: &Scene) -> Self {
         let integrator = &scene.render.settings.integrator;
         let indirect = integrator.indirect().is_some();

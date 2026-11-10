@@ -16,11 +16,11 @@ fn surface_queries_match_analytic_fields_in_path_and_raster() -> Result<()> {
         let mut scene=original.clone();
         if coverage {scene["programs"]["show"]["source"]=serde_json::json!(source.replace("return unlit(good ? float3(0.,1.,0.) : float3(1.,0.,0.));","Closure c=unlit(good ? float3(0.,1.,0.) : float3(1.,0.,0.));c.geometry_opacity=good ? 1. : .5;return c;"));}
         vork_scene::v2::replace_integrator(&mut scene,serde_json::json!({"integrator":kind,"samples":1,"denoiser":null}));
-        let render=|scene:serde_json::Value|->Result<Vec<u8>> {
+        let render=|scene:serde_json::Value|->Result<crate::test_linear::LinearImage> {
             let installed=r.install(vork_scene::v2::from_test_value(scene)?,std::path::Path::new("."))?;
-            let mut frame=installed.create_frame_slot(&r,Default::default())?;
+            let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
             frame.submit(&installed,&r,0.)?;
-            Ok(frame.collect(&r)?.rgba)
+            {let output=frame.collect(&r)?;Ok(crate::test_linear::LinearImage {rgba:output.rgba,linear:output.linear_rgba.expect("linear readback")})}
         };
         let queried=render(scene.clone())?;
         scene["programs"]["show"]["source"]=serde_json::json!("struct Inputs {};Closure surface(ShadingContext ctx,Inputs i){return unlit(float3(0.,1.,0.));}");
@@ -55,11 +55,11 @@ fn hair_surface_queries_preserve_complete_camera_routing()->Result<()> {
     let invisible=scene["programs"]["invisible"].clone();scene["programs"]=serde_json::json!({"invisible":invisible,"query_hair":{"source":queried}});
     scene["render"]["resolution"]=serde_json::json!([32,32]);
     vork_scene::v2::replace_integrator(&mut scene,serde_json::json!({"integrator":"raster","samples":1,"denoiser":null}));
-    let render=|scene:serde_json::Value|->Result<Vec<u8>> {
+    let render=|scene:serde_json::Value|->Result<crate::test_linear::LinearImage> {
         let installed=r.install(vork_scene::v2::from_test_value(scene)?,std::path::Path::new("."))?;
         assert!(installed.plan.effects.path,"physical hair must retain complete-camera transport");
-        let mut frame=installed.create_frame_slot(&r,Default::default())?;
-        frame.submit(&installed,&r,0.)?;Ok(frame.collect(&r)?.rgba)
+        let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+        frame.submit(&installed,&r,0.)?;{let output=frame.collect(&r)?;Ok(crate::test_linear::LinearImage {rgba:output.rgba,linear:output.linear_rgba.expect("linear readback")})}
     };
     let actual=render(scene.clone())?;
     scene["programs"]["query_hair"]["source"]=serde_json::json!(hair);

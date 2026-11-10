@@ -16,10 +16,12 @@ void cloth_self_refit(uint lane) {
   DeviceMemoryBarrierWithGroupSync();
  }
 }
-float3 cloth_self_normal(float3 delta,float3 old_delta,float3 face_normal,out float distance) {
+float3 cloth_self_normal(float3 delta,float3 old_delta,float3 face_normal,bool interior,out float distance) {
  distance=length(delta);float nl=length(face_normal);
  float3 n=distance>1e-8?delta/distance:cloth_unit(old_delta);
- if(nl>1e-12) {
+ // A plane crossing is a face contact only in the face interior. Beside
+ // an edge, crossing the infinite supporting plane is not penetration.
+ if(interior&&nl>1e-12) {
   float3 fn=face_normal/nl;
   if(dot(old_delta,fn)*dot(delta,fn)<0){n=dot(old_delta,fn)>0?fn:-fn;distance=dot(delta,n);}
  }
@@ -40,7 +42,7 @@ void cloth_register(uint i,uint kind,uint4 key,uint4 ids,float4 weights,float4 p
   uint slot=i*CONTACT_CAPACITY+k;
   if(uint(contact_kind_load(slot))==kind&&all(uint4(contact_key_load(slot))==key))return;
  }
- if(count>=CONTACT_CAPACITY){contact_count_store(i,float(CONTACT_CAPACITY+1));return;}
+ if(count>=CONTACT_CAPACITY){contact_count_store(i,float(CONTACT_CAPACITY+1));contact_status_atomic_max(0,CONTACT_CAPACITY+1);return;}
  uint slot=i*CONTACT_CAPACITY+count;
  contact_key_store(slot,float4(key));contact_ids_store(slot,float4(ids));contact_weights_store(slot,weights);contact_plane_store(slot,plane);contact_motion_store(slot,motion);contact_tangent_lambda_store(slot,float3(0));contact_kind_store(slot,float(kind));contact_lambda_store(slot,0);
  uint owner=0xffffffffu;for(uint j=0;j<4;j++)if(abs(weights[j])>1e-6&&mass_load(ids[j])>0)owner=min(owner,ids[j]);contact_owner_store(slot,float(owner));
@@ -48,6 +50,20 @@ void cloth_register(uint i,uint kind,uint4 key,uint4 ids,float4 weights,float4 p
 }
 void cloth_contact_add(uint i,uint kind,uint4 ids,float4 weights,float3 normal,float margin) {
  cloth_register(i,kind,ids,ids,weights,float4(normal,margin),float3(0));
+}
+// Rest-close primitives are part of the fabric, not collision partners.
+// Test closest rest points (not current barycentrics) so filtering is invariant
+// under deformation and agrees for every vertex that gathers the contact.
+bool cloth_rest_vertex_face(uint vertex,uint3 face,float margin) {
+ float3 bary;
+ float3 p=rest_position_load(vertex);
+ return length(p-cloth_closest(p,rest_position_load(face.x),rest_position_load(face.y),rest_position_load(face.z),bary))<margin;
+}
+bool cloth_rest_edges(uint4 pair,float margin) {
+ float s,t;
+ float3 a=rest_position_load(pair.x),b=rest_position_load(pair.y),c=rest_position_load(pair.z),d=rest_position_load(pair.w);
+ cloth_segments(a,b,c,d,s,t);
+ return length(lerp(a,b,s)-lerp(c,d,t))<margin;
 }
 bool cloth_self_boxes(float3 lo,float3 hi,float3 other_lo,float3 other_hi,float margin) {return all(hi+margin>=other_lo)&&all(other_hi+margin>=lo);}
 void cloth_self_generate(uint i) {
@@ -69,8 +85,8 @@ void cloth_self_generate(uint i) {
   if(!any(ids==uint3(i))&&cloth_self_boxes(p,p,glo,ghi,2*margin)) {
    float3 near=cloth_closest(p,a,b,c,bary),delta=p-near;float d;
    float3 old_delta=old_load(i)-bary.x*old_load(ids.x)-bary.y*old_load(ids.y)-bary.z*old_load(ids.z);
-   float3 normal=cloth_self_normal(delta,old_delta,cross(b-a,c-a),d);
-   if(d<margin&&length(delta)<2*margin)cloth_contact_add(i,0,uint4(i,ids),float4(1,-bary),normal,margin);
+   float3 normal=cloth_self_normal(delta,old_delta,cross(b-a,c-a),all(bary>float3(0)),d);
+   if(d<margin&&length(delta)<2*margin&&!cloth_rest_vertex_face(i,ids,margin))cloth_contact_add(i,0,uint4(i,ids),float4(1,-bary),normal,margin);
   }
   for(uint j=incident_offsets_load(i);j<incident_offsets_load(i+1);j++) {
    uint f=incidents_load(j);uint3 own=uint3(triangles_load(3*f),triangles_load(3*f+1),triangles_load(3*f+2));
@@ -80,8 +96,8 @@ void cloth_self_generate(uint i) {
     uint v=ids[k];if(any(own==uint3(v)))continue;float3 q=snapshot_load(v),weights;if(!cloth_self_boxes(q,q,flo,fhi,2*margin))continue;
     float3 r=cloth_closest(q,x,y,z,weights),diff=q-r;
     float3 old_diff=old_load(v)-weights.x*old_load(own.x)-weights.y*old_load(own.y)-weights.z*old_load(own.z);
-    float distance;float3 normal=cloth_self_normal(diff,old_diff,cross(y-x,z-x),distance);
-    if(distance<margin&&length(diff)<2*margin)cloth_contact_add(i,0,uint4(v,own),float4(1,-weights),normal,margin);
+    float distance;float3 normal=cloth_self_normal(diff,old_diff,cross(y-x,z-x),all(weights>float3(0)),distance);
+    if(distance<margin&&length(diff)<2*margin&&!cloth_rest_vertex_face(v,own,margin))cloth_contact_add(i,0,uint4(v,own),float4(1,-weights),normal,margin);
    }
   }
   for(uint j=neighbour_offsets_load(i);j<neighbour_offsets_load(i+1);j++) {
@@ -93,7 +109,7 @@ void cloth_self_generate(uint i) {
     if(pair.x>pair.z||(pair.x==pair.z&&pair.y>pair.w))pair=pair.zwxy;
     float s,t;cloth_segments(snapshot_load(pair.x),snapshot_load(pair.y),snapshot_load(pair.z),snapshot_load(pair.w),s,t);
     float3 diff=lerp(snapshot_load(pair.x),snapshot_load(pair.y),s)-lerp(snapshot_load(pair.z),snapshot_load(pair.w),t);float distance=length(diff);
-    if(distance>=margin)continue;
+    if(distance>=margin||cloth_rest_edges(pair,margin))continue;
     float3 old_diff=lerp(old_load(pair.x),old_load(pair.y),s)-lerp(old_load(pair.z),old_load(pair.w),t);
     float3 n=distance>1e-8?diff/distance:cloth_unit(old_diff);
     if(dot(diff,old_diff)<0){n=cloth_unit(old_diff);distance=dot(diff,n);}
@@ -105,7 +121,7 @@ void cloth_self_generate(uint i) {
 void cloth_contacts_gauss_seidel() {
  for(uint i=0;i<CLOTH_VERTICES;i++) {
   uint count=uint(contact_count_load(i));
-  if(count>CONTACT_CAPACITY){for(uint v=0;v<CLOTH_VERTICES;v++)cloth_x[v]=float3(asfloat(0x7fc00000u));return;}
+  if(count>CONTACT_CAPACITY)return;
   for(uint k=0;k<count;k++) {
    uint slot=i*CONTACT_CAPACITY+k;if(uint(contact_owner_load(slot))!=i)continue;
    uint4 ids=uint4(contact_ids_load(slot));float4 w=contact_weights_load(slot),plane=contact_plane_load(slot);

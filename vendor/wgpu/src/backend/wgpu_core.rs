@@ -597,7 +597,7 @@ pub struct CoreCommandEncoder {
 
 impl CoreCommandEncoder {
     pub(crate) fn build_tlas_from_buffer(
-        &self, tlas: &crate::Tlas, buffer: &crate::Buffer, offset: u64, count: u32, blas: &[&crate::Blas],
+        &self, tlas: &crate::Tlas, buffer: &crate::Buffer, offset: u64, count: u32, blas: &[&crate::Blas], force_rebuild: bool,
     ) {
         assert_eq!(self.context, tlas.inner.as_core().context, "TLAS belongs to another instance");
         assert_eq!(self.context, buffer.inner.as_core().context, "buffer belongs to another instance");
@@ -605,7 +605,7 @@ impl CoreCommandEncoder {
         let ids: Vec<_> = blas.iter().map(|b| b.inner.as_core().id).collect();
         // The public native-buffer entry point carries this safety contract.
         if let Err(cause) = unsafe { self.context.0.command_encoder_build_tlas_from_buffer(
-            self.id, tlas.inner.as_core().id, buffer.inner.as_core().id, offset, count, &ids,
+            self.id, tlas.inner.as_core().id, buffer.inner.as_core().id, offset, count, &ids, force_rebuild,
         ) } {
             self.context.handle_error_nolabel(&self.error_sink, cause, "CommandEncoder::build_tlas_from_buffer");
         }

@@ -6,6 +6,12 @@ This directory is a separate GPL-3.0-or-later Blender component; the boundary
 with vork is scene, geometry, shader and image files. The renderer and std do
 not import bpy or this component.
 
+The 0.2/0.3 releases do not support participating media. For those releases,
+use surface-only scenes: disconnect World and material Volume inputs before
+exporting. This removes the volume effect; selecting another profile does not
+restore it. The bridge still emits volume programs those releases cannot use; see
+[fog and volumes](#fog-and-volumes) for the limited 0.4 support and required scene rewrites.
+
 Export a scene headlessly:
 
 ```sh
@@ -62,8 +68,8 @@ Vork 0.4 stage 1 admits finite homogeneous fog in closed convex carriers and
 constant or exponential-height world fog through complete-camera path transport,
 including shadows and independent fog overlapping OpenPBR glass. See
 [`vork help fog`](../../docs/help/fog.md) and the complete
-[`examples/fog.json`](../../examples/fog.json). This is a 0.4 source feature;
-released 0.2/0.3 binaries do not gain it by selecting a different profile.
+[`examples/fog.json`](../../examples/fog.json). This requires 0.4;
+0.2/0.3 binaries do not gain it by selecting a different profile.
 
 The bridge's existing World Volume Scatter lowering still emits the removed
 `std/fog` program. Rewrite that output to an authored `medium` program, with physical
@@ -119,7 +125,9 @@ and Add/Mix Shader, plus Glossy in best effort mode. The writer selects the curr
 Compiler callers can pass `engine="CYCLES"` or `engine="EEVEE"`. It requires no fabricated UVs.
 Source RGB curves are evaluated through Blender's API and resampled until probes
 at knots and interval quarters agree within a 16-bit unit-range channel value;
-unrepresentable curves fail. Height callbacks reevaluate the complete graph at
+unrepresentable curves fail. Compact piecewise-linear segments are stored exactly
+in dense material buffers and selected by binary search, with the same extrapolation
+and lerp arithmetic. One- and two-segment curves remain expressions. Height callbacks reevaluate the complete graph at
 neighbouring pixel offsets. Implicit image vectors use the active render UV. UV graphs read typed attributes
 with gradients and retain Blender UV orientation through Mapping/Bump. Missing
 source UV streams fail installation instead of receiving invented coordinates.
@@ -135,10 +143,11 @@ identical Blender BSDFs. No source datablock is edited.
 
 `display.translate(scene)` writes `render.display` with `std/standard`, `std/agx`
 or `blender/filmic`; exposure, gamma, dither intensity and applicable looks are inputs.
-White balance appends `post/white_balance` to `render.compositor` and affects linear outputs.
-Non-sRGB display devices, other views (including ACES 1.3), custom display curves
+White balance is emitted inside the display wrapper using `blender.white_balance`;
+scene-linear outputs retain their original values.
+Non-sRGB display devices, other views (including ACES 1.3), unsupported display curves
 and mismatched looks raise named errors. This does not translate compositor
-node trees. Wasp Bot's authored custom red display curve remains unsupported.
+node trees. Supported evaluated RGB display curves are emitted into the display wrapper.
 
 
 ## Licence boundary

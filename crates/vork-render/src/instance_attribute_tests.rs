@@ -36,7 +36,7 @@ fn instance_attributes_match_split_meshes_in_surface_and_displacement() -> Resul
     let Some(r)=crate::test_renderer()? else { return Ok(()) };
     let render=|value:Value| -> Result<_> {
         let mut installed=r.install(vork_scene::v2::from_test_value(value)?,Path::new("."))?;
-        let mut slot=installed.create_frame_slot(&r,Default::default())?;
+        let mut slot=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
         installed.render_frame(&r, &mut slot, 0.)
     };
     for stage in ["table", "computed", "typed", "displacement", "path"] {
@@ -70,8 +70,8 @@ fn instance_attributes_match_split_meshes_in_surface_and_displacement() -> Resul
         }
         nodes.push(reference["nodes"][1].clone()); reference["nodes"]=json!(nodes);
         let expected=render(reference)?;
-        assert_eq!(actual.rgba,expected.rgba,"{stage} color");
-        assert_eq!(actual.depth_u16,expected.depth_u16,"{stage} depth");
+        crate::test_linear::assert_linear_eq(actual.linear_rgba.as_ref().expect("linear readback"), expected.linear_rgba.as_ref().expect("linear readback"));
+        crate::test_linear::assert_depth_eq(actual.depth_f32.as_ref().expect("float depth readback"), expected.depth_f32.as_ref().expect("float depth readback"));
         assert!(actual.rgba.chunks_exact(4).any(|p|p[0]>50 && p[0]>p[1]),"left instance visible");
         assert!(actual.rgba.chunks_exact(4).any(|p|p[1]>50 && p[1]>p[0]),"right instance visible");
     }
@@ -101,21 +101,21 @@ fn zero_scale_geometry_is_absent_and_animation_stays_finite() -> Result<()> {
                 value["nodes"][0]=json!({"type":"node","scale":scale,"children":[mesh]});
             } else {value["nodes"][0]["scale"]=json!(scale);}
             let actual=render(value,0.)?;
-            assert_eq!(actual.rgba,absent.rgba,"scale {scale:?}, parent {parent}");
+            crate::test_linear::assert_linear_eq(actual.linear_rgba.as_ref().expect("linear readback"), absent.linear_rgba.as_ref().expect("linear readback"));
             assert_eq!(actual.ids,absent.ids);
-            assert_eq!(actual.depth_f32,absent.depth_f32);
+            crate::test_linear::assert_depth_eq(actual.depth_f32.as_ref().expect("float readback"), absent.depth_f32.as_ref().expect("float readback"));
             assert!(actual.linear_rgba.unwrap().iter().flatten().all(|x|x.is_finite()));
         }
     }
     let mut value=scene();
     value["buffers"]["scale"]=json!({"type":"vec3","data":[[1,1,0],[0,1,1]]});
     value["nodes"][0]["instances"]["attributes"]["SCALE"]=json!("scale");
-    assert_eq!(render(value,0.)?.rgba,absent.rgba);
+    crate::test_linear::assert_linear_eq((render(value,0.)?).linear_rgba.as_ref().expect("linear readback"), (absent).linear_rgba.as_ref().expect("linear readback"));
     let mut mixed=scene();
     mixed["buffers"]["scale"]=json!({"type":"vec3","data":[[1,1,0],[1,1,1]]});
     mixed["nodes"][0]["instances"]["attributes"]["SCALE"]=json!("scale");
     let mut reference=scene();reference["buffers"]["translation"]["data"][0]=json!([5,0,0]);
-    assert_eq!(render(mixed,0.)?.rgba,render(reference,0.)?.rgba);
+    crate::test_linear::assert_linear_eq((render(mixed,0.)?).linear_rgba.as_ref().expect("linear readback"), (render(reference,0.)?).linear_rgba.as_ref().expect("linear readback"));
     let mut aov=scene();
     aov["render"]["aovs"]=json!([{"name":"heat","type":"value"}]);
     aov["programs"]=json!({"heat":{"source":"import vork; struct Inputs {Aov heat;}; Closure surface(ShadingContext ctx,Inputs i) {return unlit(float3(1.));} void aov(ShadingContext ctx,Inputs i,inout AovOutputs o) {write_aov(o,i.heat,1.);}"}});
@@ -126,9 +126,9 @@ fn zero_scale_geometry_is_absent_and_animation_stays_finite() -> Result<()> {
     let mut value=scene();
     value["animation"]=json!([{"tracks":[{"path":["nodes","instances","scale"],"keys":[[0,[0,0,0]],[1,[1,1,1]]]}]}]);
     value["render"]["fps"]=json!(1);
-    assert_eq!(render(value.clone(),0.)?.rgba,absent.rgba);
+    crate::test_linear::assert_linear_eq((render(value.clone(),0.)?).linear_rgba.as_ref().expect("linear readback"), (absent).linear_rgba.as_ref().expect("linear readback"));
     let grown=render(value.clone(),1.)?;
-    assert_eq!(grown.rgba,visible.rgba);
+    crate::test_linear::assert_linear_eq(grown.linear_rgba.as_ref().expect("linear readback"), visible.linear_rgba.as_ref().expect("linear readback"));
     assert!(grown.motion_f32.unwrap().iter().flatten().all(|x|x.abs()<1e-5),"absent previous endpoint uses visible pose");
     value["render"]["motion_blur"]=json!({"shutter":1,"position":"center"});
     value["render"]["settings"]["samples"]=json!(4);
@@ -162,7 +162,7 @@ fn zero_scale_casts_no_shadow_and_lights_ignore_scale() -> Result<()> {
     let Some(r)=crate::test_renderer()? else {return Ok(())};
     let render=|value:Value| -> Result<_> {
         let mut installed=r.install(vork_scene::v2::from_test_value(value)?,Path::new("."))?;
-        let mut slot=installed.create_frame_slot(&r,Default::default())?;
+        let mut slot=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
         installed.render_frame(&r, &mut slot, 0.)
     };
     let mut value=scene();
@@ -180,9 +180,9 @@ fn zero_scale_casts_no_shadow_and_lights_ignore_scale() -> Result<()> {
     value["nodes"][0]["visible_camera"]=json!(false);
     assert_ne!(render(value.clone())?.rgba,expected.rgba,"caster really shadows receiver");
     value["nodes"][0]["scale"]=json!([1,1,0]);
-    assert_eq!(render(value.clone())?.rgba,expected.rgba,"collapsed caster absent");
+    crate::test_linear::assert_linear_eq((render(value.clone())?).linear_rgba.as_ref().expect("linear readback"), (expected).linear_rgba.as_ref().expect("linear readback"));
     value["nodes"][3]["scale"]=json!([0,0,0]);
-    assert_eq!(render(value)?.rgba,expected.rgba,"sun ignores zero scale");
+    crate::test_linear::assert_linear_eq((render(value)?).linear_rgba.as_ref().expect("linear readback"), (expected).linear_rgba.as_ref().expect("linear readback"));
     Ok(())
 }
 
@@ -208,9 +208,9 @@ fn zero_scale_path_geometry_and_emission_are_absent() -> Result<()> {
     let mut instances=value.clone();
     instances["buffers"]["scale"]=json!({"type":"vec3","data":[[1,1,0],[1,1,0]]});
     instances["nodes"][0]["instances"]["attributes"]["SCALE"]=json!("scale");
-    assert_eq!(render(instances)?.rgba,absent.rgba,"collapsed instances emit no light");
+    crate::test_linear::assert_linear_eq((render(instances)?).linear_rgba.as_ref().expect("linear readback"), (absent).linear_rgba.as_ref().expect("linear readback"));
     value["nodes"][0]["scale"]=json!([1,1,0]);
-    assert_eq!(render(value)?.rgba,absent.rgba,"collapsed emitter contributes no light");
+    crate::test_linear::assert_linear_eq((render(value)?).linear_rgba.as_ref().expect("linear readback"), (absent).linear_rgba.as_ref().expect("linear readback"));
     Ok(())
 }
 
@@ -287,7 +287,7 @@ fn simulation_pixels_are_independent_of_seek_slots_and_fps() -> Result<()> {
     let render_fresh=|mut value:Value,fps:f32| -> Result<FrameOutput> {
         value["render"]["fps"]=json!(fps);
         let installed=r.install(vork_scene::v2::from_test_value(value)?,Path::new("."))?;
-        let mut slot=installed.create_frame_slot(&r,Default::default())?;
+        let mut slot=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
         slot.submit(&installed,&r,1.)?; slot.collect(&r)
     };
     let mut shutter_value=value.clone();
@@ -296,15 +296,15 @@ fn simulation_pixels_are_independent_of_seek_slots_and_fps() -> Result<()> {
 
     shutter_value["render"]["settings"]["samples"]=json!(8);
     let expected=render_fresh(value.clone(),24.)?;
-    assert_eq!(expected.rgba,render_fresh(value.clone(),60.)?.rgba);
+    crate::test_linear::assert_linear_eq((expected).linear_rgba.as_ref().expect("linear readback"), (render_fresh(value.clone(),60.)?).linear_rgba.as_ref().expect("linear readback"));
     let installed=r.install(vork_scene::v2::from_test_value(value)?,Path::new("."))?;
-    let mut slots=(0..3).map(|_|installed.create_frame_slot(&r,Default::default())).collect::<Result<Vec<_>>>()?;
+    let mut slots=(0..3).map(|_|installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)).collect::<Result<Vec<_>>>()?;
     // Queue several output frames before collecting; each bridge must snapshot its own state.
     for times in [[1.,0.,1.], [0.5,0.25,1.], [1.01,0.99,1.]] {
         for (slot,time) in slots.iter_mut().zip(times) {slot.submit(&installed,&r,time)?;}
         for (slot,time) in slots.iter_mut().zip(times) {
             let output=slot.collect(&r)?;
-            if time==1. || time==1.01 {assert_eq!(output.rgba,expected.rgba,"time {time}");assert_eq!(output.depth_u16,expected.depth_u16);}
+            if time==1. || time==1.01 {crate::test_linear::assert_linear_eq(output.linear_rgba.as_ref().expect("linear readback"), expected.linear_rgba.as_ref().expect("linear readback"));crate::test_linear::assert_depth_eq(output.depth_f32.as_ref().expect("float depth readback"), expected.depth_f32.as_ref().expect("float depth readback"));}
         }
     }
     for workers in [1,3] {
@@ -312,7 +312,7 @@ fn simulation_pixels_are_independent_of_seek_slots_and_fps() -> Result<()> {
             let jobs:Vec<_>=(0..workers).map(|worker| {
                 let installed=&installed; let r=&r;
                 scope.spawn(move || -> Result<FrameOutput> {
-                    let mut slot=installed.create_frame_slot(r,Default::default())?;
+                    let mut slot=installed.create_frame_slot(r,crate::ReadbackPrecision::Float)?;
                     for time in [worker as f32*0.125,0.75,0.,1.] {
                         slot.submit(installed,r,time)?;
                         let output=slot.collect(r)?;
@@ -323,14 +323,14 @@ fn simulation_pixels_are_independent_of_seek_slots_and_fps() -> Result<()> {
             }).collect();
             jobs.into_iter().map(|job|job.join().unwrap()).collect::<Result<Vec<_>>>()
         })?;
-        for output in outputs {assert_eq!(output.rgba,expected.rgba,"{workers} frame workers");}
+        for output in outputs {crate::test_linear::assert_linear_eq(output.linear_rgba.as_ref().expect("linear readback"), expected.linear_rgba.as_ref().expect("linear readback"));}
     }
     let reference=render_fresh(shutter_value.clone(),1.)?;
     let blurred=r.install(vork_scene::v2::from_test_value(shutter_value)?,Path::new("."))?;
-    let mut slot=blurred.create_frame_slot(&r,Default::default())?;
+    let mut slot=blurred.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
     for time in [1.,0.,1.75,0.5,1.] {
         slot.submit(&blurred,&r,time)?;let output=slot.collect(&r)?;
-        if time==1. {assert_eq!(output.rgba,reference.rgba,"actual shutter strata after seek");}
+        if time==1. {crate::test_linear::assert_linear_eq(output.linear_rgba.as_ref().expect("linear readback"), reference.linear_rgba.as_ref().expect("linear readback"));}
     }
     Ok(())
 }

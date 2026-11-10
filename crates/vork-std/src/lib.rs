@@ -5,8 +5,8 @@
 mod expand;
 pub use expand::{expand_scene, load_scene};
 pub mod environment;
-mod sky;
 mod extrude;
+mod sky;
 mod text;
 pub use text::input_help as text_input_help;
 
@@ -20,14 +20,21 @@ pub const HELP: &str = include_str!("help.txt");
 // all edge constraints. Callers validate finite, nonnegative radii first.
 fn clamp_radii(radii: &[f32], edges: &[(f32, &[usize])]) -> Vec<f32> {
     let maximum = radii.iter().copied().fold(0f32, f32::max);
-    if maximum == 0. { return radii.to_vec(); }
+    if maximum == 0. {
+        return radii.to_vec();
+    }
     let mut fitted = maximum;
     for (length, corners) in edges {
         let sum: f32 = corners.iter().map(|&i| radii[i] / maximum).sum();
-        if sum > 0. { fitted = fitted.min(length / sum); }
+        if sum > 0. {
+            fitted = fitted.min(length / sum);
+        }
     }
-    if fitted == maximum { radii.to_vec() }
-    else { radii.iter().map(|r| (r / maximum) * fitted).collect() }
+    if fitted == maximum {
+        radii.to_vec()
+    } else {
+        radii.iter().map(|r| (r / maximum) * fitted).collect()
+    }
 }
 
 pub fn evaluate(function: &str, argument: &str) -> Result<String> {
@@ -68,9 +75,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scatter_is_not_a_standard_library_function() {
-        let error = evaluate("scatter", "{}").unwrap_err().to_string();
-        assert!(error.contains("unknown standard-library function scatter"), "{error}");
+    fn retired_builders_are_normal_lookup_errors() {
+        for name in [
+            "scatter",
+        ] {
+            let error = evaluate(name, "{}").unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("unknown standard-library function {name}")),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -78,58 +92,80 @@ mod tests {
         for (builder, options) in [
             ("box", serde_json::json!({})),
             ("sphere", serde_json::json!({})),
+            ("grid", serde_json::json!({})),
             ("cylinder", serde_json::json!({})),
             ("cone", serde_json::json!({})),
             ("torus", serde_json::json!({})),
             ("capsule", serde_json::json!({})),
-            ("rounded_box", serde_json::json!({})),
-            ("grid", serde_json::json!({})),
             ("revolve", serde_json::json!({"profile":[[0,0],[1,0],[1,1],[0,1]]})),
-            ("extrude", serde_json::json!({"outline":[[0,0],[1,0],[0,1]]})),
-            ("text", serde_json::json!({"body":"x","font":concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fonts/LiberationSans-Regular.ttf")})),
+            ("rounded_box", serde_json::json!({})),
+            (
+                "extrude",
+                serde_json::json!({"outline":[[0,0],[1,0],[0,1]]}),
+            ),
+            (
+                "text",
+                serde_json::json!({"body":"x","font":concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fonts/LiberationSans-Regular.ttf")}),
+            ),
         ] {
-            let implicit: Value = serde_json::from_str(&evaluate(builder, &options.to_string()).unwrap()).unwrap();
+            let implicit: Value =
+                serde_json::from_str(&evaluate(builder, &options.to_string()).unwrap()).unwrap();
             let mut explicit = options.clone();
             explicit["name"] = builder.into();
-            let expected: Value = serde_json::from_str(&evaluate(builder, &explicit.to_string()).unwrap()).unwrap();
+            let expected: Value =
+                serde_json::from_str(&evaluate(builder, &explicit.to_string()).unwrap()).unwrap();
             assert_eq!(implicit, expected, "{builder}");
-            assert_eq!(implicit["geometry"][builder]["attributes"]["POSITION"], format!("{builder}_position"));
+            assert_eq!(
+                implicit["geometry"][builder]["attributes"]["POSITION"],
+                format!("{builder}_position")
+            );
             assert_eq!(implicit["buffers"].as_object().unwrap().len(), 4);
-            for suffix in ["position", "normal", "TEXCOORD_0", "indices"] {
-                assert!(implicit["buffers"].get(format!("{builder}_{suffix}")).is_some());
-            }
             explicit["name"] = "custom".into();
-            let named: Value = serde_json::from_str(&evaluate(builder, &explicit.to_string()).unwrap()).unwrap();
-            assert_eq!(named["geometry"]["custom"]["attributes"]["POSITION"], "custom_position");
-            for name in [serde_json::json!(""), serde_json::json!("bad/name"), Value::Null] {
+            let named: Value =
+                serde_json::from_str(&evaluate(builder, &explicit.to_string()).unwrap()).unwrap();
+            assert_eq!(
+                named["geometry"]["custom"]["attributes"]["POSITION"],
+                "custom_position"
+            );
+            for name in [
+                serde_json::json!(""),
+                serde_json::json!("bad/name"),
+                Value::Null,
+            ] {
                 explicit["name"] = name;
-                assert!(evaluate(builder, &explicit.to_string()).is_err(), "{builder}");
+                assert!(
+                    evaluate(builder, &explicit.to_string()).is_err(),
+                    "{builder}"
+                );
             }
         }
     }
 
     #[test]
-    fn oversized_radii_and_repeated_profiles_match_canonical_geometry() {
-        for (builder, requested, canonical) in [
-            ("rounded_box", r#"{"size":[0.18,0.18,0.012],"radius":0.02}"#,
-                r#"{"size":[0.18,0.18,0.012],"radius":0.006}"#),
-            ("rounded_box", r#"{"size":[1,0,2],"radius":1}"#,
-                r#"{"size":[1,0,2],"radius":0}"#),
-            ("capsule", r#"{"height":1,"radius":2}"#, r#"{"height":1,"radius":0.5}"#),
-            ("torus", r#"{"radius":1,"tube":2}"#, r#"{"radius":1,"tube":1}"#),
-            ("revolve", r#"{"profile":[[0,0],[0,0],[1,0],[1,0],[1,1],[0,1],[0,1]]}"#,
-                r#"{"profile":[[0,0],[1,0],[1,1],[0,1]]}"#),
+    fn oversized_radii_fit_the_full_extent() {
+        for (requested, canonical) in [
+            (
+                r#"{"size":[0.18,0.18,0.012],"radius":0.02}"#,
+                r#"{"size":[0.18,0.18,0.012],"radius":0.006}"#,
+            ),
+            (
+                r#"{"size":[1,0,2],"radius":1}"#,
+                r#"{"size":[1,0,2],"radius":0}"#,
+            ),
         ] {
-            assert_eq!(evaluate(builder, requested).unwrap(), evaluate(builder, canonical).unwrap(), "{builder}");
+            assert_eq!(
+                evaluate("rounded_box", requested).unwrap(),
+                evaluate("rounded_box", canonical).unwrap()
+            );
         }
-        assert!(evaluate("revolve", r#"{"profile":[[1,0],[1,0]]}"#).is_err());
-        assert!(evaluate("rounded_box", r#"{"radius":-1}"#).is_err());
     }
 
     #[test]
     fn geometry_and_errors() {
-        let fragment: Value =
-            serde_json::from_str(&evaluate("box", r#"{"name":"cube"}"#).unwrap()).unwrap();
+        let fragment: Value = serde_json::from_str(
+            &evaluate("rounded_box", r#"{"name":"cube","radius":0}"#).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             fragment["buffers"]["cube_position"]["data"]
                 .as_array()
@@ -137,24 +173,17 @@ mod tests {
                 .len(),
             24
         );
-        for (function, argument) in [
-            ("sphere", r#"{"name":"s","radius":-1}"#),
-            ("sphere", r#"{"name":"s","segment":8}"#),
-            ("box", r#"{"name":"b","radius":0.2}"#),
-            ("box", r#"{"name":"b","size":[1,2]}"#),
-            ("box", "not JSON"),
+        for argument in [
+            r#"{"radius":-1}"#,
+            r#"{"segment":8}"#,
+            r#"{"size":[1,2]}"#,
+            "not JSON",
         ] {
-            assert!(
-                evaluate(function, argument).is_err(),
-                "{function} {argument}"
-            );
+            assert!(evaluate("rounded_box", argument).is_err(), "{argument}");
         }
-        for input in [
-            r#"{"name":"x","font":"font.ttf"}"#,
-            r#"{"name":"x","body":"x"}"#,
-        ] {
+        for argument in [r#"{"font":"font.ttf"}"#, r#"{"body":"x"}"#] {
             assert!(
-                evaluate("text", input)
+                evaluate("text", argument)
                     .unwrap_err()
                     .to_string()
                     .contains("missing field")

@@ -177,10 +177,9 @@ fn medium_mixed_stages_position_dependence_and_errors() {
 
 #[test]
 #[ignore = "requires pinned Slang toolchain"]
-fn compile_std_and_blender_procedurals() {
+fn compile_blender_procedurals() {
     let source = r#"
 import vork;
-import std.procedurals;
 import blender.procedurals;
 struct Inputs { float mode = 0.; };
 Closure surface(ShadingContext ctx, Inputs inputs) {
@@ -285,10 +284,24 @@ Closure surface(ShadingContext ctx,Inputs inputs) {
 
 #[test]
 #[ignore = "requires pinned Slang toolchain"]
-fn compile_std_vector() {
+fn compile_blender_white_balance_from_authored_module() {
     let source = r#"
 import vork;
-import std.vector;
+import blender.white_balance;
+struct Inputs {};
+Closure surface(ShadingContext ctx, Inputs inputs) {
+    WhiteBalanceInputs white; white.temperature=4300.; white.tint=-12.;
+    Closure result={}; result.base_color=white_balance(float3(.4),white); return result;
+}"#;
+    Compiler::discover().compile_surface(&abi(),source,Path::new("balance.slang"),"balance").unwrap();
+}
+
+#[test]
+#[ignore = "requires pinned Slang toolchain"]
+fn compile_blender_bump() {
+    let source = r#"
+import vork;
+import blender.vector;
 struct Inputs {};
 struct Height:BumpHeight {
     float evaluate(float2 pixel_offset) { return sin(pixel_offset.x)+cos(pixel_offset.y); }
@@ -329,7 +342,7 @@ fn compile_texture_coordinate_bump() {
     let source = r#"
 import vork;
 import blender.texture_coordinate;
-import std.vector;
+import blender.vector;
 struct Inputs {};
 struct Height : BumpHeight {
     ShadingContext context;
@@ -775,4 +788,39 @@ fn exponential_world_proof_refuses_vanished_positive_amplitude() {
     let source="struct Inputs {}; MediumCoefficients medium(MediumContext c,Inputs i) {MediumCoefficients m={};m.absorption=float3(exp(-c.world_position.y-1000.));return m;}";
     let program=compiler.compile_medium(&abi,source,Path::new("thin-world.slang"),"thinworld").unwrap();
     assert!(program.exponential_for_inputs(&abi,&[]).unwrap().is_none());
+}
+
+#[test]
+fn compatibility_imports_keep_resolver_witnesses() -> anyhow::Result<()> {
+    let source = "import vork; import std.procedurals; import std.vector; struct Inputs {}; Closure surface(ShadingContext c, Inputs i) { Closure r={}; r.base_color=float3(noise(c.POSITION)); return r; }";
+    let compiler = Compiler::discover();
+    let prepared = compiler.prepare_bound_program(&abi(), source, Path::new("compatibility.slang"), "")?;
+    let receipt = prepared.receipt();
+    assert!(receipt.compatibility_modules.iter().any(|n| n == "std/procedurals"));
+    assert!(receipt.compatibility_modules.iter().any(|n| n == "std/vector"));
+    compiler.compile_surface(&abi(), source, Path::new("compatibility.slang"), "compat")?;
+    let encoded = serde_json::to_vec(&receipt)?;
+    let restored: vork_slang::InputIdentity = serde_json::from_slice(&encoded)?;
+    assert_eq!(receipt.compatibility_modules, restored.compatibility_modules);
+    Ok(())
+}
+
+#[test]
+fn compatibility_compositors_compile() -> anyhow::Result<()> {
+    let compiler = Compiler::discover();
+    for name in ["std/bloom", "post/white_balance"] {
+        let source = vork_slang::module_source(name).unwrap();
+        compiler.compile_composite(&abi(), source, Path::new(&format!("{name}.slang")), "compat")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn compatibility_particle_math_keeps_loading() -> anyhow::Result<()> {
+    let source = "import vork; import std.particles; struct Inputs {}; Closure surface(ShadingContext c, Inputs i) { Closure r={}; r.base_color=float3(particle_kernel(c.POSITION,float3x3(1,0,0,0,1,0,0,0,1))); return r; }";
+    let compiler = Compiler::discover();
+    let prepared = compiler.prepare_bound_program(&abi(), source, Path::new("compatibility-particles.slang"), "")?;
+    assert_eq!(prepared.receipt().compatibility_modules, ["std/particles"]);
+    compiler.compile_surface(&abi(), source, Path::new("compatibility-particles.slang"), "compatparticles")?;
+    Ok(())
 }

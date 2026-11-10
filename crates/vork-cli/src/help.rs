@@ -9,6 +9,7 @@ const PROGRAM_INPUTS: &str = include_str!(concat!(env!("OUT_DIR"),"/program-inpu
 
 fn document(topic: &str) -> Option<&'static str> {
     Some(match topic {
+        "check" => include_str!("../../../docs/help/check.md"),
         "init" => include_str!("../../../docs/help/init.md"),
         "build" => include_str!("../../../docs/help/build.md"),
         "limits" => include_str!("../../../docs/help/limits.md"),
@@ -29,6 +30,7 @@ fn document(topic: &str) -> Option<&'static str> {
         "compositor" => include_str!("../../../docs/help/compositor.md"),
         "light-paths" => include_str!("../../../docs/help/light-paths.md"),
         "programs" => include_str!("../../../docs/help/programs.md"),
+        "export" => include_str!("../../../docs/help/export.md"),
         "outputs" => include_str!("../../../docs/help/outputs.md"),
         "camera-json" => include_str!("../../../docs/help/camera-json.md"),
         "errors" => include_str!("../../../docs/help/errors.md"),
@@ -61,6 +63,8 @@ fn field_lines(path: &str) -> Vec<&'static str> {
 }
 /// Diagnose only failed help lookups; scene decoding keeps its own suggestions.
 fn unknown_field(path: &str) -> String {
+    let library = path.split('/').next().filter(|name| vork_scene::libraries::library(name).is_some()).unwrap_or("std");
+    let listing = format!("; list fields with `vork help {library} --all` or `vork help TOPIC --all`");
     // Variant annotations describe a field, but are not part of its wire path.
     fn wire_path(name: &str) -> &str { name.split_once(' ').map_or(name, |(path, _)| path) }
     fn leaf(name: &str) -> &str { wire_path(name).rsplit('.').next().unwrap_or(name) }
@@ -80,16 +84,11 @@ fn unknown_field(path: &str) -> String {
         } else { (*name).to_owned() }
     }).take(5).collect();
     if !matches.is_empty() {
-        return format!("unknown field {path:?}; use {}", matches.join(", "));
-    }
-    let library = path.split_once('/').map(|(library, _)| library)
-        .or_else(|| vork_scene::libraries::library(path).map(|_| path));
-    if let Some(library) = library {
-        return format!("{path:?} is a library/program; use `vork help {library}`");
+        return format!("unknown field {path:?}; use {}", matches.join(", ")) + &listing;
     }
     let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
     format!("unknown field {path:?}; did you mean {:?}? Nearest valid names ({} of {}): {shown}",
-        names[0], names.len().min(5), names.len())
+        names[0], names.len().min(5), names.len()) + &listing
 }
 /// Root fields and lookup-only contracts remain addressable without topic duplication.
 fn topic_lines(topic: &str) -> impl Iterator<Item = &'static str> + '_ {
@@ -98,6 +97,15 @@ fn topic_lines(topic: &str) -> impl Iterator<Item = &'static str> + '_ {
             && !vork_scene::v2::lookup_only_field(line))
 }
 pub fn run(topic: Option<&str>, field: Option<&str>, all: bool) -> Result<()> {
+    let words: Vec<_> = topic.unwrap_or_default().split_whitespace().collect();
+    let all = all || words.contains(&"--all");
+    let words: Vec<_> = words.into_iter().filter(|word| *word != "--all").collect();
+    let (topic, field) = match words.as_slice() {
+        [] => (None, field),
+        [topic] => (Some(*topic), field),
+        [topic, path] if field.is_none() => (Some(*topic), Some(*path)),
+        _ => return Err(usage("`vork help` takes TOPIC [PATH] [--all]")),
+    };
     serve(topic, field, all)?;
     std::io::stdout().flush().map_err(crate::output::error)
 }
@@ -108,7 +116,6 @@ fn serve(topic: Option<&str>, field: Option<&str>, all: bool) -> Result<()> {
     if field.is_some() && topic != Some("field") { return Err(usage("extra argument requires `vork help field PATH`")); }
     let topic = match topic {
         Some(program @ ("std/hair" | "std/sky" | "std/text")) => return serve(Some("field"), Some(program), true),
-        Some("std/bloom") => return serve(Some("compositor"), None, true),
         Some("std/camera") => return serve(Some("cameras"), None, true),
         topic => topic,
     };
@@ -128,12 +135,16 @@ fn serve(topic: Option<&str>, field: Option<&str>, all: bool) -> Result<()> {
         if all {
             write!(out, "{}", help_text(details)).map_err(crate::output::error)?;
             for line in topic_lines(topic) { writeln!(out, "{line}").map_err(crate::output::error)?; }
-            if topic == "std" { write!(out, "\n{}{}", PROGRAM_INPUTS, help_text(crate::std_command::HELP)).map_err(crate::output::error)?; }
+            for line in PROGRAM_INPUTS.lines().filter(|line| line.starts_with(&format!("{topic}/"))) {
+                writeln!(out, "{line}").map_err(crate::output::error)?;
+            }
+            if topic == "std" { write!(out, "{}", help_text(crate::std_command::HELP)).map_err(crate::output::error)?; }
         }
         return Ok(());
     }
     let Some(text) = document(topic) else {
-        return Err(usage(vork_scene::diagnostics::unknown("help topic", topic, constants::HELP_TOPICS.iter().copied())));
+        let error = vork_scene::diagnostics::unknown("help topic", topic, constants::HELP_TOPICS.iter().copied());
+        return Err(usage(format!("{error}; use `vork help` for the topic list")));
     };
     // A page's `<!-- all -->` line ends its default part; the rest prints with --all.
     let (summary, details) = text.split_once("<!-- all -->").unwrap_or((text, ""));
@@ -172,8 +183,8 @@ mod tests {
     #[test]
     fn program_recovery_prefers_real_fields() {
         for leaf in ["emission_luminance", "subsurface_radius_scale"] {
-            let message = unknown_field(&format!("std/openpbr.{leaf}"));
-            assert!(message.contains(&format!("material.inputs.{leaf}")), "{message}");
+            let lines = field_lines(&format!("std/openpbr.{leaf}"));
+            assert_eq!(lines.len(), 1);
         }
         assert!(unknown_field("std/hair.not_a_field").contains("vork help std"));
         assert!(unknown_field("std/sky.not_a_field").contains("vork help std"));
@@ -221,10 +232,12 @@ mod tests {
                 assert!(!topic_lines("materials").any(|line| line == lines[0]), "{path}");
                 assert!(lines[0].contains(&format!("default {}", p.default_text)), "{}", lines[0]);
                 if matches!(p.kind, vork_scene::v2::OpenPbrKind::Float | vork_scene::v2::OpenPbrKind::Color3) {
-                    let range = format!("range {}{},{}{} per channel",
+                    let range = format!("range {}{},{}{}",
                         if p.open_min { '(' } else { '[' }, p.min, p.max,
                         if p.open_max { ')' } else { ']' });
-                    assert!(lines[0].contains(&range), "{}", lines[0]);
+                    let suffix = if p.kind == vork_scene::v2::OpenPbrKind::Color3 { " per channel" } else { "" };
+                    assert!(lines[0].contains(&format!("{range}{suffix};")), "{}", lines[0]);
+                    assert_eq!(lines[0].contains("per channel"), p.kind == vork_scene::v2::OpenPbrKind::Color3, "{}", lines[0]);
                 }
                 let unit = match p.unit { "" => "dimensionless", "length" => "metres", unit => unit };
                 assert!(lines[0].contains(&format!("units {unit};")), "{}", lines[0]);

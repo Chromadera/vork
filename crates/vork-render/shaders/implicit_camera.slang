@@ -17,10 +17,10 @@ bool accepted_camera_field<V:IVariant,P:IProgram>(uint descriptor,uint object,
     var minimum=camera_near_distance(origin,direction);
     let maximum=camera_far_distance(origin,direction);
     for(crossing=0u;;crossing++) {
-        hit=field_intersection<FragmentGeometry>(descriptor,object,origin,direction,minimum,maximum);
+        hit=field_intersection<FragmentGeometry>(FragmentGeometry(fragment_draw_table,fragment_hit_buffers),descriptor,object,origin,direction,minimum,maximum);
         if(!hit.found) return false;
         point=field_surface<V,P>(object,hit,direction,float2(2.)/float2(size),Lobe(0u,0.));
-        let clip=mul(float4(point.v.world,1.),frame.vp);
+        let clip=camera_world_clip(point.v.world,frame);
         point.v.position=float4(position.xy,clip.z/clip.w,1./clip.w);
         point.v.primitive=~crossing;
         if(coverage) point.s=raster_coverage(point.v,point.s,index,count);

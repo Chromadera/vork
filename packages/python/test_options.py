@@ -5,13 +5,13 @@ from vork._validate import _check_options
 
 class HelperOptions(unittest.TestCase):
     def test_std_diagnostics(self):
-        for generate in (lambda **options: std('sphere', name='ball', **options),):
+        for generate in (lambda **options: std('rounded_box', name='ball', **options),):
             with self.assertRaisesRegex(RuntimeError, r'unknown option "raduis"; did you mean "radius"\? Valid names:'):
                 generate(raduis=2)
             with self.assertRaises(RuntimeError) as error:
                 generate(zzzzzzzz=2)
             self.assertNotIn('did you mean', str(error.exception))
-            for name in ('radius', 'rings', 'segments', 'Valid names:'):
+            for name in ('radius', 'size', 'segments', 'Valid names:'):
                 self.assertIn(name, str(error.exception))
 
     def test_render_keywords_fail_before_invoking_cli(self):

@@ -7,7 +7,7 @@ use vork_slang::{Compiler, MediumProgram};
 pub(crate) struct Native {
     /// Resource-free point dispatch over the same reflected programs/words.
     pub point: String,
-    /// Internal finite-carrier experiment, absent from dry kernels.
+    /// Certified plane specialization; other closed carriers use the boundary BVH.
     pub convex: bool,
     pub work_limit: Option<u32>,
     pub point_work: u32,
@@ -63,7 +63,7 @@ pub(crate) fn install(
                     ensure!(
                         instances.count.is_none()
                             || !materials.iter().any(|name| stages[name].medium),
-                        "stage 1 fog does not support computed carrier instance counts; bake fixed convex carrier instances or render the volume externally"
+                        "stage 1 fog does not support computed carrier instance counts; bake fixed carrier instances or render the volume externally"
                     );
                 }
                 validate_instances(stages, &node.children)?;

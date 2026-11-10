@@ -20,7 +20,7 @@ impl Args {
         } else {
             self.argument.clone()
         };
-        let result=if self.function=="environment" {
+        let result=(|| -> Result<String> { Ok(if self.function=="environment" {
             let cache=vork_render::disk_cache::Store::host();
             let read=|key|vork_render::disk_cache::read(&cache.path("std-environment",1,key));
             let write=|key,bytes:&[u8]|{let _=vork_render::disk_cache::write(&cache.path("std-environment",1,key),bytes);};
@@ -33,7 +33,11 @@ impl Args {
                 let inputs=source.files().to_vec();
                 vork_std::environment::prepare_frames(&argument,&inputs,&times,|time|source.frame(time,fps,u32::MAX),read,write)?
             } else {vork_std::environment::prepare(&argument,read,write)?}
-        } else {vork_std::evaluate(&self.function,&argument)?};
+        } else {vork_std::evaluate(&self.function,&argument)?}) })().map_err(|error| {
+            if serde_json::from_str::<serde_json::Value>(&argument).is_err() {
+                error.context(format!("vork std {} expects a JSON argument, not a filename; pass JSON directly or read a file with `vork std {} - < scene.json`", self.function, self.function))
+            } else { error }
+        })?;
         output!("{result}");
         Ok(())
     }
@@ -45,9 +49,9 @@ mod tests {
 
     #[test]
     fn geometry_name_is_optional() {
-        assert!(Args { function: "box".into(), argument: "{}".into() }.run().is_ok());
+        assert!(Args { function: "rounded_box".into(), argument: "{}".into() }.run().is_ok());
         assert!(Args {
-            function: "box".into(),
+            function: "rounded_box".into(),
             argument: r#"{"name":"custom"}"#.into(),
         }.run().is_ok());
     }

@@ -12,6 +12,8 @@ fn offline_starter_and_authoring_variants_preserve_user_files() {
         let project = root.join(language);
         let scene: serde_json::Value = serde_json::from_slice(&fs::read(project.join("scene.json")).unwrap()).unwrap();
         assert_eq!(scene["version"], 2);
+        assert_eq!(scene["nodes"][0]["geometry"]["std"], "sphere");
+        assert!(!project.join("starter.json.geometry.bin").exists());
         assert_eq!(scene["$schema"], concat!("https://raw.githubusercontent.com/voyager-so/vork/v", env!("CARGO_PKG_VERSION"), "/packages/ts/scene.schema.json"));
         assert_eq!(scene["nodes"].as_array().unwrap().len(), 6);
         let readme = fs::read_to_string(project.join("README.md")).unwrap();

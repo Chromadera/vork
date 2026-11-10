@@ -77,3 +77,58 @@ import vork_constants;
     eprintln!("connection before/after: old sphere endpoint max error {} -> {}; solar cosine mean {} -> {} (reference {sun_mean})",rows[2][3],rows[2][0],rows[4][3],rows[4][2]);
     Ok(())
 }
+
+/// Lobe exclusion must preserve the cosine response independently of Fresnel,
+/// anisotropy and film, while the enabled lobes remain additive.
+#[test]
+#[ignore = "requires pinned Slang and Vulkan (lavapipe works)"]
+fn direct_brdf_masks_preserve_cosine_and_lobe_additivity() -> Result<()> {
+    let r = Renderer::new()?;
+    let source = r#"
+import bsdf_response;
+import closure;
+import vork_constants;
+[[vk::binding(0,0)]] RWStructuredBuffer<float4> result;
+[shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID) {
+    let mu=(float(id.x%64u)+.5)/64.;
+    let phi=float(id.x/64u)*2.39996323;
+    let view=normalize(float3(.7,.2,1.));
+    let light=float3(sqrt(1.-mu*mu)*cos(phi),sqrt(1.-mu*mu)*sin(phi),mu);
+    Closure c={};c.geometry_normal=float3(0.,0.,1.);c.geometry_tangent=float3(1.,0.,0.);
+    c.base_weight=1.;c.base_color=float3(.7);c.specular_weight=1.;c.specular_color=float3(1.);c.specular_ior=1.5;
+    c.specular_roughness=.02+.97*float((id.x/64u)%8u)/7.;
+    c.base_metalness=float((id.x/512u)%3u)*.5;
+    c.specular_roughness_anisotropy=(id.x&1u)!=0u ? .7 : 0.;
+    c.thin_film_weight=(id.x&2u)!=0u ? 1. : 0.;c.thin_film_thickness=400.;c.thin_film_ior=1.3;
+    let diffuse=float3(.2,.4,.8);let compensation=float3(.1,.2,.3);
+    let d=direct_brdf_prepared(c,view,light,REG_RAY_DIFFUSE,diffuse,compensation);
+    let s=direct_brdf_prepared(c,view,light,REG_RAY_SPECULAR,diffuse,compensation);
+    let both=direct_brdf_prepared(c,view,light,REG_RAY_DIFFUSE|REG_RAY_SPECULAR,diffuse,compensation);
+    let none=direct_brdf_prepared(c,view,light,0u,diffuse,compensation);
+    let error=abs(d-diffuse*mu);let sum_error=abs(both-d-s)/max(abs(both),float3(1.));
+    result[id.x]=float4(max(error.x,max(error.y,error.z)),max(sum_error.x,max(sum_error.y,sum_error.z)),
+        length(none),all(isfinite(d)) && all(isfinite(s)) && all(isfinite(both)) ? 1. : 0.);
+}
+"#;
+    let entries = [pipelines::buffer_entry(0, wgpu::ShaderStages::COMPUTE, wgpu::BufferBindingType::Storage { read_only: false })];
+    let pipeline = medium::test_pipeline(&r, source, &medium::Native::default(), &entries, (1,1,1))?;
+    let size = 4096*16;
+    let buffer = |usage| r.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false });
+    let output = buffer(wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
+    let readback = buffer(wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST);
+    let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &pipeline.get_bind_group_layout(0), entries: &[entry(0,output.as_entire_binding())] });
+    let mut encoder = r.device.create_command_encoder(&Default::default());
+    { let mut pass = encoder.begin_compute_pass(&Default::default()); pass.set_pipeline(&pipeline); pass.set_bind_group(0,&bind,&[]); pass.dispatch_workgroups(4096,1,1); }
+    encoder.copy_buffer_to_buffer(&output,0,&readback,0,size);
+    let submission = r.queue.submit([encoder.finish()]);
+    let (tx,rx) = std::sync::mpsc::channel();
+    readback.map_async(wgpu::MapMode::Read,..,move |v| {let _=tx.send(v);});
+    r.wait(Some(submission))?;rx.recv()??;
+    let mapped = readback.get_mapped_range(..);
+    let rows: &[[f32;4]] = bytemuck::cast_slice(&mapped);
+    for (i,row) in rows.iter().enumerate() {
+        assert!(row[0]<1e-6 && row[1]<1e-6 && row[2]==0. && row[3]==1., "BRDF mask case {i}: {row:?}");
+    }
+    r.errors.check()?;
+    Ok(())
+}

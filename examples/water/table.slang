@@ -2,7 +2,7 @@
 import vork;
 static const float METRES_PER_UNIT=1./6.;
 static const float DOMAIN=3.;
-import std.procedurals;
+import blender.procedurals;
 import std.grid;
 struct Inputs { FloatGrid wetness; };
 Closure surface(ShadingContext c,Inputs i) {

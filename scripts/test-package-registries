@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Package a package-release archive, install locally with npm/pip, and render both starters.
+
+Requires an archive built from this checkout's commit, npm and venv/pip. No registry
+is contacted. Set VORK_GPU=cpu for a Mesa CPU adapter. Evidence stays in --work.
+"""
+import argparse
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--archive', type=Path, required=True)
+p.add_argument('--platform', choices=['linux-x64', 'darwin-arm64', 'windows-x64'], required=True)
+p.add_argument('--work', type=Path, required=True)
+a = p.parse_args()
+a.work = a.work.resolve()
+a.work.mkdir()  # A fresh directory prevents stale packages/frames passing the test.
+tree = a.work / 'tree'
+tree.mkdir()
+if a.archive.suffix == '.zip':
+    with zipfile.ZipFile(a.archive) as archive:
+        archive.extractall(tree)
+else:
+    with tarfile.open(a.archive) as archive:
+        archive.extractall(tree, filter='data')
+env = os.environ.copy()
+for key in ('VORK_BIN', 'VORK_SLANGC', 'VORK_SLANG_FILESYSTEM', 'VORK_OIDN', 'PYTHONPATH'):
+    env.pop(key, None)
+
+def run(args, cwd=ROOT):
+    print('+', *map(str, args), flush=True)
+    subprocess.run(list(map(str, args)), cwd=cwd, env=env, check=True, timeout=900)
+
+dist = a.work / 'dist'
+run([sys.executable, ROOT / 'scripts/package-registries', '--tree', tree,
+     '--platform', a.platform, '--output', dist])
+run([sys.executable, ROOT / 'scripts/check-registry-bytes', '--tree', tree,
+     '--platform', a.platform, '--dist', dist])
+# Missing companion must be rejected, not silently produce unusable packages.
+companion = tree / ('vork-slang-filesystem.exe' if a.platform == 'windows-x64' else 'vork-slang-filesystem')
+companion.rename(companion.with_suffix('.hidden'))
+try:
+    missing = subprocess.run([sys.executable, str(ROOT / 'scripts/package-registries'),
+        '--tree', str(tree), '--platform', a.platform, '--output', str(a.work / 'missing')],
+        env=env, capture_output=True, text=True, timeout=30)
+    assert missing.returncode != 0 and 'incomplete release tree: missing vork-slang-filesystem' in missing.stderr, missing.stderr
+finally:
+    companion.with_suffix('.hidden').rename(companion)
+project = a.work / 'project'
+project.mkdir()
+(project / 'package.json').write_text('{"name":"registry-install-test","version":"1.0.0","private":true}')
+run([shutil.which('npm'), 'install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
+     next(dist.glob('voyager-so-vork-[0-9]*.tgz')),
+     next(dist.glob(f'voyager-so-vork-{a.platform}-*.tgz'))], project)
+run([sys.executable, '-m', 'venv', project / '.venv'])
+python = project / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+run([python, '-m', 'pip', 'install', '--no-index', '--find-links', dist, 'vork'], project)
+run([python, ROOT / 'scripts/test-registry-install', '--starter-render'], project)
+print('PASS: release archive -> npm and wheel -> installed starter renders')

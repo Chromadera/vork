@@ -25,6 +25,27 @@ fn implicit_scene_contract() -> Result<()> {
 }
 
 #[test]
+fn implicit_solver_status_reports_node_and_remedy() -> Result<()> {
+    let Some(renderer)=crate::test_renderer()? else {return Ok(());};
+    let mut document=sphere_document();
+    document["nodes"][0]["name"]="falling drop".into();
+    document["buffers"]["status"]=serde_json::json!({"type":"u32","data":[7]});
+    document["geometry"]["sphere"]["status"]=serde_json::json!({"buffer":"status","message":"fluid reconstruction capacity exceeded; increase surface_grid"});
+    // An invalid field must not obscure its producer's earlier failure.
+    document["programs"]["seed"]["source"]="struct Inputs {}; void compute(ComputeContext c,Inputs i) { field_store(c.id.x,0.); }".into();
+    let installed=renderer.install(crate::test_scene(document,Path::new("."))?,Path::new("."))?;
+    let mut frame=installed.create_frame_slot(&renderer,Default::default())?;
+    let error=frame.submit(&installed,&renderer,0.).and_then(|()|frame.collect(&renderer).map(|_|())).unwrap_err();
+    let message=format!("{error:#}");
+    for part in ["falling drop","fluid reconstruction","increase surface_grid","7"] {ensure!(message.contains(part),"{message}");}
+    ensure!(!message.contains("implicit grid has"),"{message}");
+    ensure!(error.is::<crate::failure::FailureKind>(),"solver failure must remain a scene error");
+    let error=frame.submit(&installed,&renderer,0.).unwrap_err();
+    ensure!(format!("{error:#}").contains("reinstall"),"{error:#}");
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires a real ray-query GPU and pinned Slang"]
 fn implicit_sphere_profiles_and_invalid_publication() -> Result<()> {
     let renderer=Renderer::new()?;
@@ -455,15 +476,44 @@ fn implicit_invalid_publication_is_checked_offscreen_and_retained() -> Result<()
         let mut document=sphere_document();
         document["programs"]["seed"]["source"]=format!("struct Inputs {{}}; void compute(ComputeContext ctx,Inputs i) {{ uint n=ctx.id.x; uint3 c=uint3(n%24,(n/24)%24,n/576); float v=1.; {invalid} field_store(n,v); }}").into();
         document["nodes"][0]["translation"]=serde_json::json!([100,0,0]);
-        let mut scene:Scene=vork_scene::v2::from_test_value(document)?;
-        scene.render.settings=vork_scene::Settings::for_level(level,Default::default());
-        scene.render.settings.samples=2;
-        let installed=renderer.install(scene,Path::new("."))?;
-        let mut frame=installed.create_frame_slot(&renderer,ReadbackPrecision::Float)?;
+        // Fatal publication errors poison the installation, not just its slot
+        // (media.md). Each exposure therefore needs a fresh invalid install.
         for time in [0.,1.] {
+            let mut scene:Scene=vork_scene::v2::from_test_value(document.clone())?;
+            scene.render.settings=vork_scene::Settings::for_level(level,Default::default());
+            scene.render.settings.samples=2;
+            let installed=renderer.install(scene,Path::new("."))?;
+            let mut frame=installed.create_frame_slot(&renderer,ReadbackPrecision::Float)?;
             frame.submit(&installed,&renderer,time)?;
             let error=frame.collect(&renderer).err().context("offscreen invalid publication must fail every exposure")?;
             assert!(error.to_string().contains("implicit grid"),"{error:#}");
+            let require_poison=|error:&anyhow::Error| {
+                let message=format!("{error:#}");
+                assert!(message.contains("reinstall") &&
+                    (message.contains("previously failed") || message.contains("invalidated")),
+                    "expected installation poison diagnostic: {message}");
+            };
+            let error=frame.submit(&installed,&renderer,time+0.25).err()
+                .context("old slot must refuse a poisoned installation")?;
+            require_poison(&error);
+            match installed.create_frame_slot(&renderer,ReadbackPrecision::Float) {
+                Err(error)=>require_poison(&error),
+                Ok(mut other)=> {
+                    let error=other.submit(&installed,&renderer,time+0.25).err()
+                        .context("new slot must refuse the same poisoned installation")?;
+                    require_poison(&error);
+                }
+            }
+            // Poison belongs to the failed install, not the shared Renderer.
+            let mut valid:Scene=vork_scene::v2::from_test_value(sphere_document())?;
+            valid.render.settings=vork_scene::Settings::for_level(level,Default::default());
+            valid.render.settings.samples=2;
+            let recovered=renderer.install(valid,Path::new("."))?;
+            let mut recovery=recovered.create_frame_slot(&renderer,ReadbackPrecision::Float)?;
+            recovery.submit(&recovered,&renderer,time)?;
+            let pixels=recovery.collect(&renderer)?.linear_rgba.context("reinstalled valid sphere must return linear output")?;
+            assert!(pixels.iter().flatten().all(|value|value.is_finite()),"reinstalled output must be finite");
+            assert!(pixels[16*32+16][0]>0.9,"reinstalled sphere must remain visible");
         }
     }}
     Ok(())
@@ -608,11 +658,48 @@ fn implicit_caster_shadows_medium_illumination() -> Result<()> {
 }
 
 fn fluid_fixture(kind:&str,n:u32) -> Result<serde_json::Value> {
+    if let Some(root)=std::env::var_os("VORK_TEST_FLUID_SCENES") {
+        return Ok(serde_json::from_slice(&std::fs::read(Path::new(&root).join(format!("{kind}-{n}.json")))?)?);
+    }
     let output=std::process::Command::new("python3")
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .args(["-m","libraries.fluid.gpu_fixture",kind,&n.to_string()]).output()?;
     ensure!(output.status.success(),"fluid fixture: {}",String::from_utf8_lossy(&output.stderr));
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+#[test]
+fn fluid_impossible_container_reports_its_cause() -> Result<()> {
+    let Some(renderer)=crate::test_renderer()? else {return Ok(());};
+    let document=fluid_fixture("drop_blocked",120)?;
+    let installed=renderer.install(crate::test_scene(document,Path::new("."))?,Path::new("."))?;
+    let mut frame=installed.create_frame_slot(&renderer,Default::default())?;
+    let error=frame.submit(&installed,&renderer,0.).and_then(|()|frame.collect(&renderer).map(|_|())).unwrap_err();
+    let message=format!("{error:#}");
+    for part in ["small liquid drop_blocked","capacity","surface_grid","reported value: 2"] {ensure!(message.contains(part),"{message}");}
+    ensure!(!message.contains("implicit grid has"),"{message}");
+    Ok(())
+}
+
+#[test]
+fn fluid_zero_cell_reports_its_cause() -> Result<()> {
+    let Some(renderer)=crate::test_renderer()? else {return Ok(());};
+    let mut document=fluid_fixture("drop_empty",120)?;
+    // A zero wall over an empty domain publishes identically-zero interior
+    // cells. The library must reject them through its own receipt, even when
+    // the zero rest-volume residual is accepted on the first evaluation.
+    for program in document["programs"].as_object_mut().unwrap().values_mut() {
+        if let Some(source)=program["source"].as_str() {
+            program["source"]=source.replace("return max(-p.y,max(abs(p.x)-.148,abs(p.z)-.048));", "return 0.;").into();
+        }
+    }
+    let installed=renderer.install(crate::test_scene(document,Path::new("."))?,Path::new("."))?;
+    let mut frame=installed.create_frame_slot(&renderer,Default::default())?;
+    let error=frame.submit(&installed,&renderer,0.).and_then(|()|frame.collect(&renderer).map(|_|())).unwrap_err();
+    let message=format!("{error:#}");
+    for part in ["small liquid drop_empty","zero cell","surface_grid","reported value: 5"] {ensure!(message.contains(part),"{message}");}
+    ensure!(!message.contains("implicit grid has"),"{message}");
+    Ok(())
 }
 
 // Independent midpoint XZ quadrature, exact along Y. This reads the final public
@@ -644,10 +731,10 @@ fn fluid_surface_volume(values:&[f32],dims:[u32;3],samples:usize) -> f64 {
 #[ignore = "requires a real GPU and pinned Slang"]
 fn fluid_edge_publication_and_physical_volume() -> Result<()> {
     let renderer=Renderer::new()?;
-    for kind in ["edge","corner","interior","edge_thin","thin","sparse","dam"] {
+    for kind in ["edge","corner","interior","edge_thin","thin","sparse","dam","drop","drop_shift","drop_tiny","drop_pair","drop_thin","drop_empty"] {
         if std::env::var("VORK_TEST_FLUID_KIND").is_ok_and(|v|v!=kind) {continue;}
         let mut errors=Vec::new();
-        for n in if kind=="thin" || kind=="sparse" {vec![32,64]} else if kind=="dam" {vec![128]} else {vec![32]} {
+        for n in if kind=="thin" || kind=="sparse" {vec![32,64]} else if kind=="dam" {vec![128]} else if kind.starts_with("drop") {vec![120]} else {vec![32]} {
             let document=fluid_fixture(kind,n)?;
             let scene=crate::test_scene(document,Path::new("."))?;
             let decoded=buffers::SceneBuffers::decode(&scene,Path::new("."))?;
@@ -669,6 +756,25 @@ fn fluid_edge_publication_and_physical_volume() -> Result<()> {
             let(tx,rx)=std::sync::mpsc::channel();readback.map_async(wgpu::MapMode::Read,..,move|r|{let _=tx.send(r);});
             renderer.wait(Some(submitted))?;rx.recv()??;
             let words=readback.get_mapped_range(..).to_vec();readback.unmap();
+            if kind=="drop" {
+                // Advance through actual solver ticks, then restore/replay the
+                // initial publication. The fallback is retained simulation state.
+                let mut encoder=renderer.device.create_command_encoder(&Default::default());
+                for time in [0.002,0.] {
+                    compute.advance_with(&mut encoder,&mut cursor,time,|encoder| {
+                        let done=std::mem::replace(encoder,renderer.device.create_command_encoder(&Default::default()));
+                        renderer.queue.submit([done.finish()]);
+                    })?;
+                }
+                for span in &binding.spans {
+                    encoder.copy_buffer_to_buffer(&attrs.storage[span.page as usize],u64::from(span.offset)*4,&readback,u64::from(span.first*binding.width)*4,u64::from(span.count*binding.width)*4);
+                }
+                let submitted=renderer.queue.submit([encoder.finish()]);
+                let(tx,rx)=std::sync::mpsc::channel();readback.map_async(wgpu::MapMode::Read,..,move|r|{let _=tx.send(r);});
+                renderer.wait(Some(submitted))?;rx.recv()??;
+                let restored=readback.get_mapped_range(..).to_vec();readback.unmap();
+                ensure!(words==restored,"small-drop field changed after backward seek");
+            }
             let values:&[f32]=bytemuck::cast_slice(&words);
             assert!(values.iter().all(|v|v.is_finite()),"failed volume solve for {kind} n={n}");
             if name=="film_surface" {
@@ -681,14 +787,75 @@ fn fluid_edge_publication_and_physical_volume() -> Result<()> {
                 let index=at%4+4*(1+3*(at/4));
                 assert!((f64::from(values[index])+depth).abs()<depth*0.0001,"wetness centre lost its published depth");
             } else {
-                let volume=fluid_surface_volume(values,scene.buffers["surface"].dims.unwrap(),128)*(if kind=="dam" {4.} else {2.}/n as f64).powi(3);
-                let target=if kind=="dam" {38400.*0.04_f64.powi(3)} else if kind=="sparse" {0.12_f64.powi(3)} else {64.*0.08_f64.powi(3)};
-                let error=(volume/target-1.).abs();errors.push(error);
+                let drop=kind.starts_with("drop");
+                let volume=fluid_surface_volume(values,scene.buffers["surface"].dims.unwrap(),if drop {512} else {128})*(if drop {0.3} else if kind=="dam" {4.} else {2.}/n as f64).powi(3);
+                let target=if drop {
+                    // Independent authored-lattice count, not the GPU ledger.
+                    let nx=if kind=="drop_empty" {0} else if kind=="drop_pair" {20} else {10};
+                    let mut count=0;
+                    for z in 0..10 {for y in 0..10 {for x in 0..nx {
+                        let dx=(x as f64-0.5*(nx-1) as f64)*0.002;
+                        let dy=(y as f64-4.5)*0.002;let dz=(z as f64-4.5)*0.002;
+                        let r2=if kind=="drop_pair" {(dx-0.014).powi(2).min((dx+0.014).powi(2))+dy*dy+dz*dz}
+                            else {dx*dx+(dy/if kind=="drop_thin" {0.4} else {1.}).powi(2)+dz*dz};
+                        if r2<(if kind=="drop_tiny" || kind=="drop_pair" {0.0045_f64} else {0.009_f64}).powi(2) {count+=1;}
+                    }}}
+                    count as f64*0.002_f64.powi(3)
+                } else if kind=="dam" {38400.*0.04_f64.powi(3)} else if kind=="sparse" {0.12_f64.powi(3)} else {64.*0.08_f64.powi(3)};
+                if let Some(root)=std::env::var_os("VORK_TEST_FLUID_OUT") {
+                    std::fs::write(Path::new(&root).join(format!("{kind}-{n}.f32")),&words)?;
+                }
+                let error=if target==0. {volume.abs()} else {(volume/target-1.).abs()};errors.push(error);
                 eprintln!("bulk {kind} n={n}: published={volume}, rest={target}, relative error={error}");
-                assert!(error<0.002,"{kind} independent rendered volume error {error}");
+                assert!(error<if drop {0.0001} else {0.002},"{kind} independent rendered volume error {error}");
             }
         }
         if errors.len()==2 {assert!(errors[1]<=errors[0]+0.0002,"resolution worsened volume: {kind} {errors:?}");}
     }
+    Ok(())
+}
+
+// Frozen fdac96eb9 water authoring contract. External mesh/HDR/ceramic bytes are
+// unchanged in examples/water; preserve the old table module import as well.
+fn water_040_fixture() -> Result<(Scene,PathBuf)> {
+    let mut document:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/water-0.4.0/scene.json"))?;
+    assert!(!document["buffers"].as_object().unwrap().contains_key("fluid_status"));
+    for program in document["programs"].as_object_mut().unwrap().values_mut() {
+        assert!(program["bindings"].get("fluid_status").is_none());
+        if program["file"] == "table.slang" {
+            program.as_object_mut().unwrap().remove("file");
+            program["source"]=include_str!("../tests/fixtures/water-0.4.0/table.slang").into();
+        }
+    }
+    let base=std::env::var_os("VORK_TEST_WATER_ROOT").map(PathBuf::from)
+        .unwrap_or_else(||Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/water"));
+    Ok((crate::test_scene(document,&base)?,base))
+}
+
+#[test]
+#[ignore = "requires pinned Slang and production-size fluid buffers; no GPU"]
+fn water_040_without_status_checks_on_cpu() -> Result<()> {
+    let (scene,base)=water_040_fixture()?;
+    let mut renderer=pollster::block_on(Renderer::create(|_|Ok(true),true))?;
+    renderer.check_only=true;
+    renderer.install(scene,&base)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires real GPU, pinned Slang, and production-size fluid buffers"]
+fn water_040_without_status_loads_and_renders() -> Result<()> {
+    let renderer=Renderer::new()?;
+    let (mut scene,base)=water_040_fixture()?;
+    scene.render.resolution=[160,90];
+    scene.render.settings=vork_scene::Settings::for_level(0,Default::default());
+    scene.render.settings.samples=1;
+    let installed=renderer.install(scene,&base)?;
+    let mut frame=installed.create_frame_slot(&renderer,ReadbackPrecision::Float)?;
+    frame.submit_outputs(&installed,&renderer,0.,ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
+    let pixels=frame.collect(&renderer)?.linear_rgba.context("missing water frame")?;
+    assert_eq!(pixels.len(),160*90);
+    assert!(pixels.iter().flatten().all(|v|v.is_finite()));
+    assert!(pixels.iter().any(|p|p[..3].iter().any(|v|*v>0.01)),"empty water frame");
     Ok(())
 }

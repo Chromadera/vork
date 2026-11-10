@@ -333,6 +333,73 @@ class PowerShellLiteralTests(unittest.TestCase):
                             self.assertEqual(data['added'], [folder, folder] if modifies else [])
                             self.assertEqual(data['path'], folder + ';existing' if modifies else 'existing')
 
+    def test_prefix_form_matrix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            location = root / 'PowerShell location'
+            location.mkdir()
+            script = root / 'prefix-matrix.ps1'
+            script.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                "[Environment]::CurrentDirectory = $env:TEST_PROCESS_DIRECTORY\n"
+                "Set-Location -LiteralPath $env:TEST_LOCATION\n"
+                "if ((Get-Location).ProviderPath -eq [Environment]::CurrentDirectory) { throw 'Test needs distinct directories' }\n"
+                "& $env:TEST_INSTALLER -DryRun\n", encoding='utf-8-sig')
+            shell = shutil.which('pwsh') or 'powershell'
+            cases = [('vork', str(location / 'vork')),
+                     ('./missing/../vork/', str(location / 'vork')),
+                     (str(root / 'absolute') + os.sep, str(root / 'absolute')),
+                     (root.anchor, None),
+                     ('\\', None), ('/', None), ('\\\\', None)]
+            if os.name == 'nt':
+                cases += [('C:\\vork', 'C:\\vork'),
+                          ('.\\vork', str(location / 'vork')),
+                          ('C:vork', str(location / 'vork')),
+                          ('\\vork', str(Path(root.anchor) / 'vork')),
+                          ('/vork', str(Path(root.anchor) / 'vork')),
+                          ('C:\\', None), ('C:/', None),
+                          ('C:\\missing\\..\\', None),
+                          ('\\missing\\..', None),
+                          ('C:\\vork\\', 'C:\\vork'),
+                          ('\\\\server\\share\\vork', '\\\\server\\share\\vork'),
+                          ('\\\\server\\share\\vork\\', '\\\\server\\share\\vork'),
+                          ('\\\\server\\share\\', None),
+                          ('./missing/../', str(location))]
+            for prefix, expected in cases:
+                with self.subTest(prefix=prefix):
+                    result = subprocess.run([shell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                        cwd=root, env={**os.environ, 'PREFIX': prefix,
+                            'TEST_PROCESS_DIRECTORY': str(root), 'TEST_LOCATION': str(location),
+                            'TEST_INSTALLER': str(PS_INSTALLER), 'VERSION': 'test',
+                            'VORK_DOWNLOAD_BASE': 'file:///no-downloads-allowed',
+                            'PROCESSOR_ARCHITECTURE': 'AMD64', 'PROCESSOR_ARCHITEW6432': 'AMD64'},
+                        capture_output=True, text=True, timeout=15)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn('PREFIX must name an install directory', result.stderr)
+                        self.assertNotIn('Archive:', result.stdout)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn('Destination: ' + expected, result.stdout.splitlines())
+                        self.assertIn('Binary: ' + expected + '\\vork.exe', result.stdout.splitlines())
+            self.assertEqual(sorted(p.name for p in root.iterdir()),
+                             ['PowerShell location', 'prefix-matrix.ps1'])
+            self.assertEqual(list(location.iterdir()), [])
+
+    def test_empty_prefix_is_refused(self):
+        # Windows PowerShell 5.1 removes empty environment variables, so exercise
+        # the resolver directly to test its empty-string contract on every host.
+        source = PS_INSTALLER.read_text()
+        resolver = source[source.index('function Resolve-InstallPrefix'):source.index('$prefix = if')]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / 'empty-prefix.ps1'
+            script.write_text("$ErrorActionPreference = 'Stop'\n" + resolver +
+                              "Resolve-InstallPrefix ''\n", encoding='utf-8-sig')
+            result = subprocess.run([shutil.which('pwsh') or 'powershell', '-NoProfile', '-File', str(script)],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('PREFIX must name an install directory', result.stderr)
+
     def test_staged_version_is_silent_and_failures_keep_output(self):
         source = PS_INSTALLER.read_text()
         staged = source[source.index('    try { $stagedVersionOutput'):source.index('    if (Test-Path -LiteralPath $prefix)')]

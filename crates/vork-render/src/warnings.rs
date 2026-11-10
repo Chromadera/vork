@@ -1,4 +1,4 @@
-//! Visible losses are render results, not debug logging. A shot owns its collector;
+//! Visible losses and compatibility notices are render results, not debug logging. A shot owns its collector;
 //! installation workers explicitly inherit it, so concurrent shots stay isolated.
 use std::{cell::RefCell, sync::{Arc, Mutex}};
 use serde::Serialize;
@@ -6,9 +6,9 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RenderWarning {
     pub code: &'static str,
-    /// Authored object, program, binding or value that requested the effect.
+    /// Authored object, program, binding or value; runtime losses name the output frame and counters.
     pub requested: serde_json::Value,
-    /// Exactly what was omitted or substituted, including the retained behaviour.
+    /// Omitted/substituted behaviour, or compatibility removal and rewrite guidance.
     pub dropped: String,
 }
 #[derive(Clone, Default)]
@@ -26,6 +26,9 @@ impl Collector {
     pub(crate) fn snapshot(&self) -> Vec<RenderWarning> { self.0.lock().unwrap().clone() }
 }
 pub(crate) fn dropped(code: &'static str, requested: serde_json::Value, dropped: String) {
+    record(code, requested, dropped);
+}
+fn record(code: &'static str, requested: serde_json::Value, dropped: String) {
     let warning = RenderWarning { code, requested, dropped };
     let fresh = CURRENT.with(|current| {
         let collector = current.borrow();
@@ -35,7 +38,8 @@ pub(crate) fn dropped(code: &'static str, requested: serde_json::Value, dropped:
     });
     if fresh {
         // No ANSI or TTY detection: the same conspicuous record survives logs.
-        eprintln!("\nWARNING: REQUESTED EFFECT DROPPED [{}]\n  requested: {}\n  dropped: {}\n", warning.code, warning.requested, warning.dropped);
+        let title = if code == "compatibility_04" { "0.4 COMPATIBILITY" } else { "REQUESTED EFFECT DROPPED" };
+        eprintln!("\nWARNING: {title} [{}]\n  requested: {}\n  dropped: {}\n", warning.code, warning.requested, warning.dropped);
     }
 }
 
@@ -70,4 +74,10 @@ mod tests {
         assert_eq!(first.snapshot()[0].requested["stage"], "lit");
         assert_eq!(serde_json::to_value(first.snapshot()).unwrap()[0]["code"], "test");
     }
+}
+
+pub(crate) fn compatibility(name: &str, requested: serde_json::Value) {
+    let rewrite = if name == "std/particles" { "an import of fluid.particles" }
+        else { "authored Slang" };
+    record("compatibility_04", requested, format!("{name} is removed in 0.6; rewrite as {rewrite}; see upgrade notes"));
 }

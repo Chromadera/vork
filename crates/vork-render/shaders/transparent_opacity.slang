@@ -22,16 +22,7 @@ import camera_ray;
 [[vk::binding(2,3)]] StructuredBuffer<uint> fragment_object_draws;
 [[vk::binding(3,3)]] StructuredBuffer<uint4> fragment_camera_samples;
 #endif
-struct FragmentGeometry : IHitGeometry {
-    static uint word(uint index) {return fragment_draw_table[index];}
-    static uint load(uint buffer, uint index) {
-#ifdef VORK_METAL
-        return fragment_hit_buffers.buffers[buffer][index];
-#else
-        return fragment_hit_buffers[NonUniformResourceIndex(buffer)][index];
-#endif
-    }
-};
+typedef RayGeometry FragmentGeometry;
 // Solid exit suppression uses same-object front geometry even when a front
 // texel is transparent. Keep that geometry unless the whole material is zero,
 // or constant inputs prove it cannot require a solid exit.
@@ -42,7 +33,7 @@ bool transparent_rejection_safe(uint material, out bool zero_factor) {
         ((material_byte<Unspecialized>(material,MATERIAL_TRANSMISSION)&15u)==0u && material_value(material,MATERIAL_TRANSMISSION_WORD)==0.);
 }
 float transparent_sample_opacity(Varying v, uint primitive, uint2 size, out bool varying) {
-    let st=surface_triangle<FragmentGeometry>(fragment_object_draws[v.object]&0x7fffffffu,primitive,v.object);
+    let st=surface_triangle<FragmentGeometry>(FragmentGeometry(fragment_draw_table,fragment_hit_buffers),fragment_object_draws[v.object]&0x7fffffffu,primitive,v.object);
     varying=material_varying_opacity<Unspecialized>(material_record(v.object),
         float3(st.t.c[0].COLOR_0.a,st.t.c[1].COLOR_0.a,st.t.c[2].COLOR_0.a));
     let offset=asfloat(fragment_camera_samples[v.sample*2u+3u].zw);

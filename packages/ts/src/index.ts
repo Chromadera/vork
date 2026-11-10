@@ -115,9 +115,12 @@ export async function writeScene(value: Scene, path: string, baseDir = process.c
   return destination;
 }
 
-export { box, sphere, cylinder, cone, torus, capsule, roundedBox, grid, revolve } from './lib/shapes.js';
+export { box, sphere, grid, cylinder, cone, torus, capsule, revolve, roundedBox } from './lib/shapes.js';
 export type { GeometryFragment } from './lib/shapes.js';
 export { text, type TextOptions } from './lib/text.js';
 export { extrude, type ExtrudeOptions } from './lib/extrude.js';
 export { render, type RenderOptions, type RenderResult, type RenderWarning, type ExposureSummary } from './lib/render.js';
 export { environmentImage, sky, type EnvironmentImageOptions, type EnvironmentFragment } from './lib/environment.js';
+
+export {exportAsset} from './lib/export.js';
+export type {ExportOptions, ExportReport, ExportIssue} from './lib/export.js';

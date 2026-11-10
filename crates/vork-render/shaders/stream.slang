@@ -13,6 +13,7 @@ import frame;
 
 // Vertex attribute locations match geometry::VertexLayout::attributes().
 struct VertexIn {
+    uint vertex_index : SV_VertexID;
     [[vk::location(15)]] float3 rest : REST;
     [[vk::location(0)]] float3 POSITION : POSITION;
     [[vk::location(1)]] float3 NORMAL : NORMAL;
@@ -99,7 +100,15 @@ struct Varying {
 
 float4 world_position(uint object, float3 p) {return mul(float4(p,1.),object_model(object));}
 float4 clip_position(uint object, float3 p) {
-    var clip=mul(world_position(object,p),frame.vp);
+    var clip:float4;
+    if(camera_needs_relative_clip(frame)) {
+        let model=object_model(object);
+        // Preserve local detail before adding a potentially large world translation.
+        let relative=mul(float4(p,0.),model).xyz+(model[3].xyz-frame.eye.xyz);
+        clip=camera_relative_clip(relative,frame);
+    } else {
+        clip=mul(world_position(object,p),frame.vp);
+    }
     // Preserve projected x/y and w (including eye-plane clipping), but put
     // field carriers on the near plane. Near/far clipping must act on roots,
     // not remove the exit face that launches the root search.

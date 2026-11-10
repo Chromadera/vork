@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["vendor/wgpu", "vendor/wgpu-core", "vendor/wgpu-hal", "vendor/wgpu-types", "vendor/basisu_c_sys", "vendor/exr"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "LicenseRef-vork-Preview"
 publish = false

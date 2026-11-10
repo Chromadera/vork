@@ -42,6 +42,8 @@ pub struct Shot {
     pub diagnostics: bool,
     /// Blender ImageFormatSettings.exr_codec; defaults to lossless ZIP (16 scanlines).
     pub exr_codec: crate::ExrCodec,
+    /// Bits per component of PNG colour (still and directory frames); defaults to 8.
+    pub png_depth: crate::PngDepth,
     /// Rewrites loaded content with resolved settings (and the scene file's directory)
     /// before renderer-support validation and the resolution override.
     pub edit: Option<SceneEdit>,
@@ -106,6 +108,7 @@ impl Default for Shot {
             gpu_only: false,
             diagnostics: false,
             exr_codec: Default::default(),
+            png_depth: Default::default(),
             edit: None,
         }
     }
@@ -244,6 +247,7 @@ impl Shot {
             gpu_only,
             diagnostics,
             exr_codec,
+            png_depth,
             edit,
             stop,
         } = self;
@@ -252,6 +256,10 @@ impl Shot {
             "at least one output destination is required"
         );
 
+        ensure_usage!(png_depth != crate::PngDepth::Sixteen
+            || (!no_write && !gpu_only && out.iter().any(|p| !video_destination(p) && (directory_marked(p) || !p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exr"))))
+                && (outputs.is_empty() || outputs.contains(&Output::Color))),
+            "--png-depth 16 requires PNG colour output");
         if !no_write && !gpu_only {
             for path in &out {
                 if video_destination(path) {
@@ -334,9 +342,7 @@ impl Shot {
         let video_paths: Vec<_> = out.iter().filter(|p| is_video(p)).collect();
         let directory_paths: Vec<_> = out.iter().filter(|p| !is_video(p)).collect();
         let video = !video_paths.is_empty();
-        let count = scene.render.duration.exact() * vork_time::exact::decimal(&fps.to_string())?;
-        let clip_frames: usize = count.ceil().to_integer().try_into().context("output frame count exceeds usize")?;
-        ensure_usage!(clip_frames > 0 && clip_frames <= u32::MAX as usize, "output frame count exceeds u32");
+        let clip_frames = clip_frame_count(&scene.render)?;
         if directory_paths.iter().any(|p|is_exr(p)) {
             i32::try_from(fps.numerator()).context("EXR rate numerator exceeds i32")?;
             u32::try_from(fps.denominator()).context("EXR rate denominator exceeds u32")?;
@@ -453,6 +459,7 @@ impl Shot {
         let readback = outputs.readback(
             directory_paths.iter().any(|p| !is_exr(p)),
             directory_paths.iter().any(|p| is_exr(p)),
+            png_depth,
         );
         // GPU-only frames and directory-less video read nothing back, except a still pass.
         let install_readback = if still_pass || !(gpu_only || (video && directory_paths.is_empty()))
@@ -568,6 +575,18 @@ impl Shot {
                     foreground,
                 ))
             })?;
+        let effective = &installed.render().settings;
+        let adaptive = installed.path.as_ref().is_some_and(|path| path.adaptive());
+        let denoise = effective.integrator.denoiser().is_some();
+        let render_settings = serde_json::json!({
+            "profile": profile_record, "samples": effective.samples,
+            "adaptive": adaptive, "denoise": denoise,
+            "resolution": [w, h], "frames": frames,
+        });
+        eprintln!("render: {}; {}{} samples ({}); denoise {}; {}x{}; {} frames",
+            profile.name, if adaptive { "up to " } else { "" }, effective.samples,
+            if adaptive { "adaptive" } else { "fixed" },
+            if denoise { "on" } else { "off" }, w, h, frames);
         let encoder_readback = video.then(|| encoders.iter().any(|e| e.uses_pixel_readback()));
         let mut slots = (0..in_flight)
             .map(|_| {
@@ -595,6 +614,7 @@ impl Shot {
                         slot.view.float_output,
                         installed.readback,
                         slot.view.aovs.len(),
+                        slot.view.post.display_base,
                     );
                     let previous = std::mem::replace(&mut slot.ring, spare);
                     slot.spare_ring.push_back(previous);
@@ -632,6 +652,7 @@ impl Shot {
                         outputs.clone(),
                         is_exr(path),
                         exr_codec,
+                        png_depth,
                         ring_entries,
                         if still_pass { 0 } else { first_frame },
                         if is_exr(path) {(fps.numerator() as i32,fps.denominator() as u32)} else {(1,1)},
@@ -640,6 +661,12 @@ impl Shot {
                 .collect()
         };
         let png_workers: usize = png_outputs.iter().map(|p| p.worker_count).sum();
+        // Frame slots add required pipelines after install's checkpoint. Save them
+        // while foreground admission still holds optional workers back; after the
+        // first frame their driver work can keep the final idle save from running.
+        if installed.deferred_variants() > 0 {
+            renderer.save_idle_pipelines().map_err(device)?;
+        }
         let mut foreground = Some(foreground);
         let ready_ms = wall.elapsed().as_secs_f64() * 1000.;
         vork_slang::progress::phase("Rendering frames", frames);
@@ -650,6 +677,9 @@ impl Shot {
         let mut still_camera = None;
         let mut still_exposure = None;
         let mut still_dropped_light_samples = 0;
+        let mut still_dropped_path_samples = 0;
+        let mut still_terminated_medium_paths = 0;
+        let mut still_discarded_medium_radiance = 0.;
         let mut frame_exposures = Vec::new();
         let mut first_frame_ms = 0.;
         let mut submit_cpu = vec![None; slots.len()];
@@ -671,7 +701,11 @@ impl Shot {
             let stopping = stop.as_ref().is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed));
             if stopping && frame > 0 && frame == next_submit { break; }
             let attempt = (|| -> Result<_> {
-                while next_submit < frames && next_submit < frame + in_flight {
+                // Deliver the first accepted frame before recording successors:
+                // advancing their simulations can take minutes on the host.
+                // Once output has started, restore the normal overlap window.
+                let submit_limit = frame + if samples.is_empty() { 1 } else { in_flight };
+                while next_submit < frames && next_submit < submit_limit {
                     if stopping && next_submit > 0 { break; }
                     let i = next_submit % slots.len();
                     let slot = &mut slots[i];
@@ -730,6 +764,8 @@ impl Shot {
                 }
             };
             if let Some(started) = redo_started.take() { redo_ms += started.elapsed().as_secs_f64() * 1000.; }
+            path_degradation_warnings(output_index(frame), p.timing.terminated_medium_paths,
+                p.timing.discarded_medium_radiance, p.timing.dropped_path_samples);
             if let Some(warning) = dropped_light_warning(output_index(frame), p.timing.dropped_light_samples) { eprintln!("{warning}"); }
             let i = frame % slots.len();
             let slot = &mut slots[i];
@@ -765,9 +801,9 @@ impl Shot {
                 first_frame_ms = loop_start.elapsed().as_secs_f64() * 1000.;
                 drop(foreground.take());
             }
-            metadata_frames.push(serde_json::json!({"index":output_index(frame),"time":frame_time(frame),"camera":installed.camera_name_at_request(&frame_request(frame))?,"depth_unit_m":p.camera.depth_unit_m,"dropped_light_samples":p.timing.dropped_light_samples,"exposure":p.exposure.map(|e|e.json())}));
+            metadata_frames.push(serde_json::json!({"index":output_index(frame),"time":frame_time(frame),"camera":installed.camera_name_at_request(&frame_request(frame))?,"depth_unit_m":p.camera.depth_unit_m,"terminated_medium_paths":p.timing.terminated_medium_paths,"discarded_medium_radiance":p.timing.discarded_medium_radiance,"dropped_path_samples":p.timing.dropped_path_samples,"dropped_light_samples":p.timing.dropped_light_samples,"exposure":p.exposure.map(|e|e.json())}));
             if let Some(e) = p.exposure { frame_exposures.push((index(frame), e)); }
-            samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"timing_source":diagnostics.then_some(p.timing.timing_source),"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"dropped_light_samples":p.timing.dropped_light_samples,"sample_count":p.timing.sample_count}));
+            samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"timing_source":diagnostics.then_some(p.timing.timing_source),"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"terminated_medium_paths":p.timing.terminated_medium_paths,"discarded_medium_radiance":p.timing.discarded_medium_radiance,"dropped_path_samples":p.timing.dropped_path_samples,"dropped_light_samples":p.timing.dropped_light_samples,"sample_count":p.timing.sample_count}));
             if !still_pass {
                 for writer in &png_outputs { writer.push(index(frame), p.clone())?; }
             }
@@ -804,6 +840,11 @@ impl Shot {
             };
             vork_slang::progress::completed(1);
             still_dropped_light_samples = pixels.timing.dropped_light_samples;
+            still_dropped_path_samples = pixels.timing.dropped_path_samples;
+            still_terminated_medium_paths = pixels.timing.terminated_medium_paths;
+            still_discarded_medium_radiance = pixels.timing.discarded_medium_radiance;
+            path_degradation_warnings(still_index.unwrap(), still_terminated_medium_paths,
+                still_discarded_medium_radiance, still_dropped_path_samples);
             if let Some(warning) = dropped_light_warning(still_index.unwrap(), still_dropped_light_samples) { eprintln!("{warning}"); }
             still_exposure = pixels.exposure;
             still_camera = Some(pixels.camera);
@@ -872,6 +913,7 @@ impl Shot {
         }
         let mut report = serde_json::json!({"version":3,"device":renderer.adapter_info.name,"backend":format!("{:?}",renderer.adapter_info.backend),"pipeline_cache_supported":renderer.pipeline_cache_supported(),"pipeline_cache_status":renderer.pipeline_cache_status,"pipeline_cache_input_bytes":renderer.pipeline_cache_input_bytes,"pipeline_cache_rejection":renderer.pipeline_cache_rejection,"frames":frames,"frame_start":at.is_none().then_some(first_frame),"still_time":at,"resolution":[w,h],"png_write":!no_write && !gpu_only && !directory_paths.is_empty(),"video_write":video,"output":out,"renderer_pixel_readback":readback.any() && (!gpu_only && !directory_paths.is_empty()),"encoder_pixel_readback":encoder_readback,"encoder_open_ms":encoder_prepare_ms+encoder_attach_ms,"encoder_prepare_ms":encoder_prepare_ms,"encoder_attach_ms":encoder_attach_ms,"encoder_finish_ms":encoder_finish_ms,"scene_parse_ms":scene_parse_ms,"pipeline_ms":installed.pipeline_ms,"pipeline_creation_ms":renderer.pipeline_timings(),"environment_install_ms":installed.environment_install_ms,"material_bind_ms":installed.material_bind_ms,"asset_decode_ms":installed.asset_decode_ms,"texture_upload_ms":installed.texture_upload_ms,"texture_cache_hits":installed.texture_cache_hits,"first_frame_ms":first_frame_ms,"device_ms":renderer.startup.as_secs_f64()*1000.,"device_stages_ms":renderer.startup_stages_ms,"geometry_vertex_bytes":installed.geometry_vertex_bytes,"install_ms":installed.install_time.as_secs_f64()*1000.,"ready_ms":ready_ms,"loop_wall_ms":loop_start.elapsed().as_secs_f64()*1000.,"wall_ms":wall.elapsed().as_secs_f64()*1000.,"frames_in_flight":in_flight,"transient_bytes":installed.transient_bytes(),"gpu_timing_readback":true,"png_workers":png_workers,"samples":samples});
         // Background feature variants that initially drew with a superset fallback.
+        report["render_settings"] = render_settings.clone();
         report["shader_creation"] = serde_json::to_value(crate::timing::creations(&renderer.device))?;
         report["frame_redos"] = redos.into();
         report["frame_redo_ms"] = redo_ms.into();
@@ -879,6 +921,10 @@ impl Shot {
         if diagnostics {
             report["memory_frames"] = memory_frames.into();
             report["retained_gpu_bytes"] = renderer.residency.retained_bytes().into();
+            report["camera_memory_bytes"] = renderer.camera_memory.into();
+            report["camera_record_budget_bytes"] =
+                (renderer.camera_memory / constants::CAMERA_RECORD_MEMORY_SHARE).into();
+            report["camera_memory_override_lowered"] = renderer.camera_memory_override_lowered.into();
             report["probe_field"] = installed.probes.as_ref().map(|p| p.diagnostics()).into();
             report["compiled_pipeline_count"] = renderer.pipeline_timings().len().into();
             report["program_pipeline_count"] = renderer.program_pipelines.lock().unwrap().len().into();
@@ -891,6 +937,7 @@ impl Shot {
             "object_ids": &*installed.object_ids,
             "warnings": warnings.snapshot(),
             "profile": profile_record, "settings": installed.render().settings,
+            "render_settings": render_settings,
             "denoiser": installed.render().settings.integrator.denoiser().and_then(|_| crate::denoise::device_kind(&renderer)),
         });
         let mut exposures = Vec::new();
@@ -902,7 +949,7 @@ impl Shot {
             };
             let mut frames = if !is_video(path) && still_pass {
                 vec![serde_json::json!({"index":still_index.unwrap(),"time":at.unwrap(),"camera":installed.camera_name_at_request(&still_request())?,
-                    "depth_unit_m":still_camera.as_ref().unwrap().depth_unit_m,"dropped_light_samples":still_dropped_light_samples,"exposure":still_exposure.map(|e: crate::Exposure|e.json())})]
+                    "depth_unit_m":still_camera.as_ref().unwrap().depth_unit_m,"terminated_medium_paths":still_terminated_medium_paths,"discarded_medium_radiance":still_discarded_medium_radiance,"dropped_path_samples":still_dropped_path_samples,"dropped_light_samples":still_dropped_light_samples,"exposure":still_exposure.map(|e: crate::Exposure|e.json())})]
             } else { metadata_frames.clone() };
             let still_rows: Vec<_> = still_exposure.map(|e| (0, e)).into_iter().collect();
             let mut rows = if !is_video(path) && still_pass { &still_rows[..] } else { &frame_exposures[..] };
@@ -942,6 +989,22 @@ impl Shot {
     }
 }
 
+// Called only after successful collection, so retries and refused frames cannot
+// publish degradation warnings for an image that was never delivered.
+fn path_degradation_warnings(frame: u32, terminated_medium_paths: u64, discarded_medium_radiance: f64, dropped_path_samples: u64) {
+    if terminated_medium_paths > 0 {
+        crate::warnings::dropped("fog_watchdog", serde_json::json!({
+            "frame": frame, "terminated_medium_paths": terminated_medium_paths,
+            "discarded_medium_radiance": discarded_medium_radiance,
+        }), format!("frame {frame} ended {terminated_medium_paths} fog paths at the watchdog; discarded accumulated absolute-luminance sum {discarded_medium_radiance}; untraced continuation energy is unknown. Object, pixel and operation attribution is unavailable. Simplify or remove fog in this frame and rerender; verify terminated_medium_paths is zero before accepting the result."));
+    }
+    if dropped_path_samples > 0 {
+        crate::warnings::dropped("nonfinite_path_samples", serde_json::json!({
+            "frame": frame, "dropped_path_samples": dropped_path_samples,
+        }), format!("frame {frame} dropped {dropped_path_samples} non-finite path samples; zero samples remain in the average without renormalization. Object, pixel and operation attribution is unavailable; missing energy is unknown. Check scene inputs and programs for non-finite values and rerender; verify dropped_path_samples is zero before accepting the result."));
+    }
+}
+
 fn dropped_light_warning(frame: u32, count: u64) -> Option<String> {
     (count != 0).then(|| format!("warning: frame {frame}: {count} non-finite light sample{} dropped", if count == 1 { "" } else { "s" }))
 }
@@ -974,6 +1037,32 @@ mod sidecar_tests {
     use super::*;
 
     #[test]
+    fn path_degradation_warnings_preserve_frame_witnesses_and_ignore_clean_frames() {
+        let warnings = crate::warnings::Collector::default();
+        let _scope = warnings.enter();
+        path_degradation_warnings(794, 0, 0., 0);
+        assert!(warnings.snapshot().is_empty());
+        path_degradation_warnings(795, 2, 1.25, 4294967299);
+        path_degradation_warnings(795, 2, 1.25, 4294967299);
+        path_degradation_warnings(796, 2, 1.25, 0);
+        let records = serde_json::to_value(warnings.snapshot()).unwrap();
+        let records = records.as_array().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["code"], "fog_watchdog");
+        assert_eq!(records[0]["requested"], serde_json::json!({
+            "frame":795, "terminated_medium_paths":2, "discarded_medium_radiance":1.25
+        }));
+        assert_eq!(records[1]["code"], "nonfinite_path_samples");
+        assert_eq!(records[1]["requested"]["dropped_path_samples"], 4294967299_u64);
+        assert_eq!(records[2]["requested"]["frame"], 796);
+        for record in records {
+            let explanation = record["dropped"].as_str().unwrap();
+            assert!(explanation.contains("attribution is unavailable"));
+            assert!(explanation.contains("rerender"));
+        }
+    }
+
+    #[test]
     #[ignore = "requires a supported GPU, pinned Slang and ffmpeg; scheduled explicitly in main CI"]
     fn cancellation_closes_a_partial_sequence_and_records_only_saved_frames() -> Result<()> {
         if crate::test_renderer()?.is_none() { return Ok(()); }
@@ -993,6 +1082,14 @@ mod sidecar_tests {
         assert_eq!(rendered.report["frames"], 1);
         let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(destination.join("meta.json"))?)?;
         assert_eq!(metadata["frames"].as_array().unwrap().len(), 1);
+        assert_eq!(metadata["render_settings"], rendered.report["render_settings"]);
+        let settings = &rendered.report["render_settings"];
+        assert_eq!(settings["samples"], 1);
+        assert_eq!(settings["denoise"], false);
+        assert_eq!(settings["resolution"], serde_json::json!([32,24]));
+        assert_eq!(settings["frames"], 4); // Requested budget, including on interruption.
+        assert_eq!(settings["profile"], metadata["profile"]);
+
         let probe = std::process::Command::new("ffprobe").args([
             "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames",
             "-of", "default=noprint_wrappers=1:nokey=1",
@@ -1122,4 +1219,17 @@ fn validate_clock_requests(scene:&InstalledScene,requests:impl Iterator<Item=vor
         }
     }
     Ok(())
+}
+
+/// Check every nominal frame and its shutter endpoints using render's clock admission.
+pub(crate) fn check_timeline(scene: &InstalledScene) -> Result<()> {
+    let frames = clip_frame_count(&scene.render)?;
+    validate_clock_requests(scene, (0..frames).map(|index| vork_time::Request::Frame(index as u32, scene.render.fps)))
+}
+
+fn clip_frame_count(render: &vork_scene::Render) -> Result<usize> {
+    let count = render.duration.exact() * vork_time::exact::decimal(&render.fps.to_string())?;
+    let frames: usize = count.ceil().to_integer().try_into().context("output frame count exceeds usize")?;
+    ensure_usage!(frames > 0 && frames <= u32::MAX as usize, "output frame count exceeds u32");
+    Ok(frames)
 }

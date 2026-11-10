@@ -9,19 +9,81 @@ pub(crate) fn ray_pipeline(r: &Renderer, cached: &std::sync::Arc<crate::pipeline
 
 #[cfg(test)]
 thread_local! {
+    static TEST_GI_BUDGET: std::cell::Cell<Option<u32>> = const {std::cell::Cell::new(None)};
     static TEST_GI_LIMIT: std::cell::Cell<Option<u64>> = const {std::cell::Cell::new(None)};
     static TEST_GI_BYTES: std::cell::Cell<u64> = const {std::cell::Cell::new(0)};
 }
 
 // Retain complete rows, reusing their records only after every ray batch finishes.
-fn accumulation_band(limits: &wgpu::Limits, width: u32, height: u32) -> Result<(u32, u64)> {
+fn accumulation_band(limits: &wgpu::Limits, width: u32, height: u32, budget: u32) -> Result<(u32, u64)> {
     let row = u64::from(width) * constants::GI_QUERY_BYTES;
     gpu_memory::storage_binding(limits, "GI prepared queries: one row", row)?;
     let rows = (limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / row)
-        .min(u64::from(height)) as u32;
+        .min(u64::from(height)).min(u64::from((budget / width).max(1))) as u32;
     let bytes = row * u64::from(rows);
     gpu_memory::storage_binding(limits, "GI prepared queries and accumulation", bytes)?;
     Ok((rows, bytes))
+}
+
+// Internal execution control: never changes scene sampling or estimator budgets.
+// Metal needs smaller command buffers; retain ordinary grouping elsewhere
+// unless the operator explicitly enables the same work limit.
+fn default_query_budget(backend: wgpu::Backend) -> Option<u32> {
+    (backend == wgpu::Backend::Metal).then_some(8192)
+}
+
+fn query_budget(backend: wgpu::Backend) -> Result<Option<u32>> {
+    #[cfg(test)]
+    if let Some(budget) = TEST_GI_BUDGET.with(|cap|cap.get()) { return Ok(Some(budget)); }
+    let budget = match std::env::var("VORK_GI_QUERIES_PER_SUBMISSION") {
+        Ok(value) => value.parse::<u32>().context("VORK_GI_QUERIES_PER_SUBMISSION must be a positive integer")?,
+        Err(std::env::VarError::NotPresent) => return Ok(default_query_budget(backend)),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(budget > 0, "VORK_GI_QUERIES_PER_SUBMISSION must be positive");
+    Ok(Some(budget))
+}
+
+fn query_tiles(width: u32, height: u32, budget: u32) -> Vec<[u32; 4]> {
+    let tile_width = width.min(budget);
+    let tile_height = (budget / tile_width).min(height);
+    let mut tiles = Vec::new();
+    for y in (0..height).step_by(tile_height as usize) {
+        for x in (0..width).step_by(tile_width as usize) {
+            tiles.push([x, y, tile_width.min(width-x), tile_height.min(height-y)]);
+        }
+    }
+    tiles
+}
+
+// Each tile owns a disjoint output rectangle. Stage inputs remain immutable
+// until every tile finishes; ray accumulation keeps its original band indices.
+fn tiled_dispatches(
+    d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, label: &'static str,
+    entries: &[wgpu::BindGroupEntry<'_>], binding: u32, prefix: &[u32],
+    extent: [u32; 2], budget: u32,
+) -> Vec<crate::graph::Dispatch> {
+    let tiles = query_tiles(extent[0], extent[1], budget);
+    let mut words = vec![0u32; tiles.len()*64];
+    for (i,tile) in tiles.iter().enumerate() {
+        words[i*64..i*64+prefix.len()].copy_from_slice(prefix);
+        words[i*64+prefix.len()..i*64+prefix.len()+4].copy_from_slice(tile);
+    }
+    let parameters = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label), contents: bytemuck::cast_slice(&words), usage: wgpu::BufferUsages::UNIFORM,
+    });
+    tiles.iter().enumerate().map(|(i,tile)| {
+        let mut entries = entries.to_vec();
+        entries.iter_mut().find(|entry|entry.binding==binding).unwrap().resource =
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &parameters, offset: i as u64*256,
+                size: std::num::NonZeroU64::new((prefix.len() as u64+4)*4),
+            });
+        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label), layout: &pipeline.get_bind_group_layout(0), entries: &entries,
+        });
+        crate::graph::Dispatch::new(pipeline, bind, [tile[2].div_ceil(8),tile[3].div_ceil(8),1])
+    }).collect()
 }
 
 pub(crate) struct Resources {
@@ -50,6 +112,8 @@ impl Resources {
         recorder: &mut crate::graph::Recorder,
     ) -> Result<Self> {
         let [w, h] = extent;
+        let configured_budget = query_budget(d.adapter_info().backend)?;
+        let budget = configured_budget.unwrap_or(u32::MAX);
         let divisor = constants::GI_RESOLUTION_DIVISOR;
         let (iw, ih) = if enabled && s.plan.effects.indirect {
             (w.div_ceil(divisor), h.div_ceil(divisor))
@@ -80,20 +144,16 @@ impl Resources {
             let ao_view = image("AO filtered visibility depth normal", aw, ah, wgpu::TextureFormat::Rgba32Float);
             let incident_horizontal = incident_image("hemisphere incident radiance");
             let (receivers, post_normals) = guides.context("AO needs retained slot receivers")?;
-            let groups = [
-                w.div_ceil(divisor).div_ceil(8),
-                h.div_ceil(divisor).div_ceil(8),
-                1,
-            ];
             let demand = [
                 image("GI demand a", aw, ah, wgpu::TextureFormat::R32Uint),
                 image("GI demand b", aw, ah, wgpu::TextureFormat::R32Uint),
             ];
             let (demand_work, demand_ping) = demand_dispatches(
                 d, s.pipelines.gi_demand_pipeline.get().context("GI demand pipeline")?,
-                uniform, receivers, ambient, diffuse_response, &demand, extent, groups,
+                uniform, receivers, ambient, diffuse_response, &demand, extent, budget,
             );
             recorder.compute(crate::graph::Pass::Ao,"GI exact consumer demand","gi demand",false,demand_work);
+            if configured_budget.is_some() {recorder.separate_last_every(1);}
             let frame_rays = rays.context("diffuse GI needs the scene TLAS")?;
             let batch=vork_slang::registry::GI_RAY_BATCH;
             let batches=(visibility_samples.max(1)*constants::GI_RAYS_PER_SAMPLE).div_ceil(batch);
@@ -104,7 +164,7 @@ impl Resources {
                 if let Some(bytes)=cap.get() {limits.max_storage_buffer_binding_size=bytes;}
                 limits
             });
-            let (band_rows, accumulation_bytes) = accumulation_band(&limits, aw, ah)?;
+            let (band_rows, accumulation_bytes) = accumulation_band(&limits, aw, ah, budget)?;
             let bands = ah.div_ceil(band_rows);
             let guide_bytes=u64::from(aw)*u64::from(ah)*32;
             gpu_memory::storage_binding(&d.limits(),"GI independent pilot guide",guide_bytes)?;
@@ -211,13 +271,17 @@ impl Resources {
                     entries.iter_mut().find(|e|e.binding==17).unwrap().resource=wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&sources,offset:u64::from(if pilot {bands*batches+band} else {band*batches+batch})*256,size:std::num::NonZeroU64::new(32)});
                 }
                 let pipeline = pipeline.context("incomplete installed AO plan")?;
-                let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &entries,
-                });
-                let dispatch_groups = if material.is_some() {[groups[0],(ah-band*band_rows).min(band_rows).div_ceil(8),1]} else {groups};
-                let mut dispatch = crate::graph::Dispatch::new(pipeline, bind, dispatch_groups);
+                let (binding, prefix, tile_extent) = if material.is_some() {
+                    let at = (if pilot {bands*batches+band} else {band*batches+batch}) as usize*64;
+                    (17, &source_words[at..at+8], [aw,(ah-band*band_rows).min(band_rows)])
+                } else {
+                    let offset = match entries.iter().find(|e|e.binding==7).unwrap().resource {
+                        wgpu::BindingResource::Buffer(ref b) => b.offset as usize / 4,
+                        _ => unreachable!(),
+                    };
+                    (7, &scale_words[offset..offset+4], [aw,ah])
+                };
+                for mut dispatch in tiled_dispatches(d,pipeline,label,&entries,binding,prefix,tile_extent,budget) {
                 if material.is_some() {
                     // Ray GI hits read the irradiance volume for further bounces.
                     let probes = (s.plan.effects.ray_indirect).then(|| s.probes.as_ref().map(|p| p.read_bind(d))).flatten();
@@ -227,10 +291,12 @@ impl Resources {
                     Some(material) => dispatch.with_material(material),
                     None => dispatch,
                 });
+                }
               }
               }
               let span=if pilot {"gi pilots"} else if material.is_some() {"gi beauty"} else {"gi reconstruction"};
               recorder.compute(crate::graph::Pass::Ao,label,span,false,std::mem::take(&mut dispatches));
+              if configured_budget.is_some() {recorder.separate_last_every(1);}
             }
         }
         Ok(Self {
@@ -264,7 +330,7 @@ fn demand_steps([w,h]: [u32;2]) -> Vec<[u32;4]> {
 fn demand_dispatches(
     d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, uniform: &wgpu::Buffer,
     receivers: &wgpu::TextureView, ambient: &wgpu::TextureView, response: &wgpu::Buffer,
-    masks: &[wgpu::TextureView;2], extent: [u32;2], groups: [u32;3],
+    masks: &[wgpu::TextureView;2], extent: [u32;2], budget: u32,
 ) -> (Vec<crate::graph::Dispatch>, usize) {
     let steps=demand_steps(extent);
     let mut words=vec![0u32;steps.len()*64];
@@ -275,9 +341,7 @@ fn demand_dispatches(
     let mut dispatches=Vec::new();let mut ping=0;
     for (i,_) in steps.iter().enumerate() {
         let next=1-ping;
-        let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:Some("GI exact consumer demand"),layout:&pipeline.get_bind_group_layout(0),
-            entries:&[
+        let entries = [
                 entry(0,uniform.as_entire_binding()),
                 entry(1,wgpu::BindingResource::TextureView(receivers)),
                 entry(2,wgpu::BindingResource::TextureView(ambient)),
@@ -287,9 +351,10 @@ fn demand_dispatches(
                 entry(6,wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer:&parameters,offset:i as u64*256,size:std::num::NonZeroU64::new(16),
                 })),
-            ],
-        });
-        dispatches.push(crate::graph::Dispatch::new(pipeline,bind,groups));ping=next;
+            ];
+        dispatches.extend(tiled_dispatches(d,pipeline,"GI exact consumer demand",&entries,6,&steps[i],
+            [extent[0].div_ceil(constants::GI_RESOLUTION_DIVISOR),extent[1].div_ceil(constants::GI_RESOLUTION_DIVISOR)],budget));
+        ping=next;
     }
     (dispatches,ping)
 }
@@ -348,6 +413,25 @@ pub(crate) fn slang_layout(d: &wgpu::Device) -> wgpu::PipelineLayout {
 mod accumulation_tests {
     use super::*;
     #[test]
+    fn gi_work_budget_defaults_to_metal_only() {
+        assert_eq!(default_query_budget(wgpu::Backend::Metal), Some(8192));
+        assert_eq!(default_query_budget(wgpu::Backend::Vulkan), None);
+        assert_eq!(default_query_budget(wgpu::Backend::Noop), None);
+    }
+
+    #[test]
+    fn gi_submission_tiles_cover_odd_and_wide_images_once() {
+        for (width,height,budget) in [(1,1,1),(33,25,7),(33,25,37),(960,540,8192),(16384,3,8192)] {
+            let mut visits=vec![0u8;(width*height) as usize];
+            for [x,y,w,h] in query_tiles(width,height,budget) {
+                assert!(w*h<=budget && w>0 && h>0);
+                for row in y..y+h { for col in x..x+w {visits[(row*width+col) as usize]+=1;} }
+            }
+            assert!(visits.iter().all(|count|*count==1));
+        }
+    }
+
+    #[test]
     fn gi_bands_preserve_float_output_with_independent_storage_limit() -> Result<()> {
         // Adapter-free runners skip with test_renderer's diagnostic; renderer
         // failures and every pixel/allocation assertion still fail on a GPU.
@@ -355,22 +439,23 @@ mod accumulation_tests {
         let mut scene=crate::test_scene(serde_json::json!({"version":2,
             "render":{"resolution":[66,50]},
             "nodes":[
-                {"type":"mesh","geometry":{"std":"sphere"},"materials":[{"inputs":{"base_color":[0.2,0.4,0.7]}}]},
-                {"type":"mesh","translation":[0,-1,0],"geometry":{"std":"grid","size":[8,8]}},
+                {"type":"mesh","geometry":crate::test_geometry::latitude_longitude(1.,32,16),"materials":[{"inputs":{"base_color":[0.2,0.4,0.7]}}]},
+                {"type":"mesh","translation":[0,-1,0],"geometry":crate::test_geometry::plane([8.,8.],[1,1])},
                 {"type":"camera","translation":[3,2,5],"target":[0,0,0]},
                 {"type":"light","shape":"environment","color":[0.4,0.6,0.8]},
                 {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0,0],"energy":500,"size":3}
             ]}),Path::new("."))?;
         scene.render.settings=vork_scene::v2::Profile::load(vork_scene::v2::DEFAULT_PROFILE)?.resolve(
             &serde_json::from_value(serde_json::json!({"denoise":false}))?)?;
-        let draw=|limit| -> Result<Vec<[f32;4]>> {
+        let draw=|limit, budget| -> Result<Vec<[f32;4]>> {
+            TEST_GI_BUDGET.with(|cap|cap.set(budget));
             // Only GI sees this limit: reflection and visibility admission use
             // the actual device limits. Seven-row bands include partial groups
             // and a partial final band; every band retains all sample batches.
             TEST_GI_LIMIT.with(|cap|cap.set(limit));
             TEST_GI_BYTES.with(|bytes|bytes.set(0));
             struct Reset;
-            impl Drop for Reset {fn drop(&mut self) {TEST_GI_LIMIT.with(|cap|cap.set(None));}}
+            impl Drop for Reset {fn drop(&mut self) {TEST_GI_LIMIT.with(|cap|cap.set(None));TEST_GI_BUDGET.with(|cap|cap.set(None));}}
             let _reset=Reset;
             let mut installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {
                 variants:crate::pipelines::VariantCompile::Inline,..Default::default()})?;
@@ -383,10 +468,14 @@ mod accumulation_tests {
             }
             image.linear_rgba.context("float readback")
         };
-        let whole=draw(None)?;
-        let banded=draw(Some(33*7*constants::GI_QUERY_BYTES))?;
+        let whole=draw(None,None)?;
+        let banded=draw(Some(33*7*constants::GI_QUERY_BYTES),None)?;
+        for budget in [7,37,8192] {
+            let tiled=draw(None,Some(budget))?;
+            assert_eq!(bytemuck::cast_slice::<_,u32>(&whole),bytemuck::cast_slice::<_,u32>(&tiled),"budget {budget}");
+        }
         assert!(whole.iter().any(|p|p[0]>0.01 && p[1]>0.01));
-        assert_eq!(whole,banded,"GI partition changed scene-linear pixels");
+        crate::test_linear::assert_linear_eq(&whole,&banded);
         Ok(())
     }
 
@@ -441,7 +530,7 @@ mod accumulation_tests {
             let mut encoder=d.create_command_encoder(&Default::default());let mut ping=0;
             for step in demand_steps([w,h]) {
                 let next=1-ping;
-                let parameter=init(d,"exact demand interval",bytemuck::cast_slice(&step),wgpu::BufferUsages::UNIFORM);
+                let parameter=init(d,"exact demand interval",bytemuck::cast_slice(&[step[0],step[1],step[2],step[3],0,0,cw,ch]),wgpu::BufferUsages::UNIFORM);
                 let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {
                     label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
                         entry(0,uniform.as_entire_binding()),entry(1,wgpu::BindingResource::TextureView(&rv)),
@@ -563,7 +652,7 @@ export float3 ray_eye() {return float3(0.);}
         let av=ao.each_ref().map(|t|t.create_view(&Default::default()));let iv=incident.each_ref().map(|t|t.create_view(&Default::default()));
         let rv=receivers.create_view(&Default::default());let mut encoder=d.create_command_encoder(&Default::default());let mut ping=0;
         for step in [1u32,2,4,8,16] {
-            let scale=init(d,"conservation scale",bytemuck::cast_slice(&[step,0,0,0]),wgpu::BufferUsages::UNIFORM);
+            let scale=init(d,"conservation scale",bytemuck::cast_slice(&[step,0,0,0,0,0,w,h]),wgpu::BufferUsages::UNIFORM);
             for pipeline in &pipelines {
                 let next=1-ping;
                 let bind=d.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
@@ -601,7 +690,7 @@ export float3 ray_eye() {return float3(0.);}
         for (binding, allocation) in [(128<<20, 1<<30), (1<<30,128<<20), (1<<30,1<<30)] {
             limits.max_storage_buffer_binding_size=binding;
             limits.max_buffer_size=allocation;
-            let (rows,bytes)=accumulation_band(&limits,1920,1080)?;
+            let (rows,bytes)=accumulation_band(&limits,1920,1080,u32::MAX)?;
             assert_eq!(bytes,u64::from(rows)*1920*constants::GI_QUERY_BYTES);
             assert!(bytes<=binding.min(allocation));
             assert_eq!(rows,(binding.min(allocation)/(1920*constants::GI_QUERY_BYTES)).min(1080) as u32);
@@ -609,7 +698,7 @@ export float3 ray_eye() {return float3(0.);}
             assert_eq!((0..1080u32.div_ceil(rows)).map(|b|(1080-b*rows).min(rows)).sum::<u32>(),1080);
         }
         limits.max_buffer_size=1920*constants::GI_QUERY_BYTES-1;
-        assert!(accumulation_band(&limits,1920,1080).unwrap_err().to_string().contains("GI prepared queries"));
+        assert!(accumulation_band(&limits,1920,1080,u32::MAX).unwrap_err().to_string().contains("GI prepared queries"));
         Ok(())
     }
 }

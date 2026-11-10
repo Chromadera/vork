@@ -1,4 +1,6 @@
 PROGRAMS
+For standard geometry use std box, sphere, grid, cylinder, cone, torus, capsule
+and revolve builders; options and units: vork help std --all.
 Use std/openpbr data inputs first (vork help materials). Data materials share
 the shipped evaluator; custom surfaces can add code to the scene kernel and
 increase first-render compilation time. Use programs for custom logic.
@@ -6,9 +8,9 @@ Custom Slang programs provide surface shading,
 displacement, media, environments, cameras, sensors, compositing and compute.
 Medium coefficient units, bounds and admission: vork help fog.
 Use vork help programs --all for the advanced reference and stage declarations.
-Procedural textures: import std.procedurals; signatures: vork help std --all.
 <!-- all -->
 PROGRAM REFERENCE
+Imported Blender node semantics: vork help blender --all.
 Slang modules: `import vork;`, one `struct Inputs {...}` whose initializers are
 defaults; surface meshes require surface (lit/displace supplement surface);
 medium-only carriers require medium instead (vork help fog):
@@ -43,6 +45,10 @@ ShadingContext and T directly for DisplacementContext; names and types must matc
 every bound geometry or instance column.
 ShadingContext: time (s), instance_index (authored row), primitive_id, front_facing,
 tangent_sign; wavelength (nm; 0 in RGB) is available in surface.
+ShadingContext.POSITION is world-space metres; NORMAL, true_normal, TANGENT and
+incoming are world-space vectors. world_to_object converts a world position to
+the shaded object's local coordinates.
+world_normal_to_object normalizes after transforming to object space.
 DisplacementContext has only undisplaced object-local POSITION, NORMAL and time (s).
 Per-instance displacement values use bound Attribute<T> inputs.
 For topology:"points", displace evaluates once per undisplaced object-local point centre and translates the whole sphere without changing its width; NORMAL and generated surface UV/tangent inputs are unavailable.
@@ -68,19 +74,20 @@ geometry queries are not yet qualified. Raster installs ray resources when queri
 need them. Real-time queries require
 a separately qualified profile and frame budget.
 
-Noise primitives: import std.procedurals; compose noise/ramps for wood, marble or stone.
-Wave and brick patterns: import blender.procedurals; vork help blender --all.
-signatures and case-sensitive enums: vork help std --all.
-
 SIMULATION
 Use scene.simulation with t0, positive dt, seed, state buffer names, and ordered init/steps
 program names. Each named program uses schedule:"simulation" and ordinary bindings/dispatch.
 S0 is initialized at t0; before t0 hold S0. Render subframes hold the preceding fixed tick.
 Tick inputs sample the left endpoint using ordinary numeric animation tracks. Passes have
-GPU barriers; use separate generations for neighbour reads/writes. u32 bindings also expose
-_atomic_min(index,value), returning the previous value; out-of-bounds returns UINT_MAX.
+GPU barriers; use separate generations for neighbour reads/writes. u32 bindings expose
+_atomic_add/sub/min/max/and/or/xor/exchange(index,value) and
+_atomic_compare_exchange(index,expected,desired). f32 bindings expose
+_atomic_add(index,value). All return the previous value. Out-of-bounds does nothing
+and returns zero (UINT_MAX for u32 min).
 Seeking replays from initialization or a compatible bounded shared-cache checkpoint.
-Keep kernels race-free for reproducible seeking on the same backend. Use computed
+Floating atomic accumulation replays within float noise on the same backend.
+Integer commutative reductions replay exactly with stable operands; exchange/CAS
+and use of returned prior values depend on invocation order. Keep other accesses race-free. Use computed
 placement for opaque, unskinned geometry. Computed instance material attributes
 follow GPU updates; displacement cannot read them. Author transparent placements.
 

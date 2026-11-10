@@ -920,11 +920,16 @@ if(x>{number(hi)}) return {number(table[-1][channel])}+(x-({number(hi)}))*{numbe
 return {name}_lookup(x,inputs,ctx).{suffix};
 }}''')
             return name
+        # Exact segment data uses the existing immutable material-word buffer.
+        # All channels share this calling convention, including constant/linear
+        # channels whose direct expressions can still fold at compile time.
+        self.curve_lookup_names.add(name)
         # Keep the validated table/grid, but project before emitting control flow.
         # A caller needs one channel at each x; a float4 return forces drivers to
         # compile/carry all four channels through every nested branch and callback.
         for channel, suffix in enumerate('xyzw'):
             value=lambda v:number(v[channel])
+            segments = []
             def segment(first, last):
                 # The existing probe error and this deviation add to at most
                 # the established curve export bound. Piecewise-linear error
@@ -936,12 +941,22 @@ return {name}_lookup(x,inputs,ctx).{suffix};
                                 for i in range(first,last+1))
                 if last-first == 1 or deviation <= budget:
                     a=lo+(hi-lo)*first/intervals
-                    return f'return lerp({value(table[first])},{value(table[last])},(x-({number(a)}))*{number(intervals/((hi-lo)*(last-first)))});'
+                    inverse=number(intervals/((hi-lo)*(last-first)))
+                    # Parse the same emitted literals, rather than rounding the
+                    # original Blender doubles along a different path.
+                    segments.append([float(v) for v in (number(a), inverse, value(table[first]), value(table[last]))])
+                    return f'return lerp({value(table[first])},{value(table[last])},(x-({number(a)}))*{inverse});'
                 middle=(first+last)//2
                 boundary=lo+(hi-lo)*middle/intervals
                 return f'if(x<{number(boundary)}) {{{segment(first,middle)}}} else {{{segment(middle,last)}}}'
             interior = segment(0,intervals)
-            self.functions.append(f"""float {name}_{suffix}(float x) {{
+            if len(segments) >= 3:
+                field = f'{name}_{suffix}_segments'
+                self.field_types[field] = 'FloatGrid'
+                self.inputs[field] = {'grid': {'type': 'f32', 'dims': [4, len(segments), 1],
+                                              'data': [v for row in segments for v in row]}}
+                interior = f'return curve_segments(inputs.{field},x);'
+            self.functions.append(f"""float {name}_{suffix}(float x,Inputs inputs,ShadingContext ctx) {{
     if(x<{number(lo)}) return {value(table[0])}+(x-({number(lo)}))*{number(left[channel])};
     if(x>{number(hi)}) return {value(table[-1])}+(x-({number(hi)}))*{number(right[channel])};
     {interior}
@@ -1009,6 +1024,6 @@ return {name}_lookup(x,inputs,ctx).{suffix};
     def module_source(self):
         fields = ''.join(f'{self.field_types.get(field) or ("Attribute<float2>" if field.startswith("uv_") else "Image")} {field};'
                          for field in self.inputs)
-        source = 'import vork;import std.color;import std.vector;import blender.texture_coordinate;import blender.color;import blender.nodes;\n'
+        source = 'import vork;import std.color;import blender.vector;import blender.texture_coordinate;import blender.color;import blender.nodes;\n'
         source += f'struct Inputs {{{fields}}};\n' + PRELUDE + '\n'.join(self.functions)
         return source

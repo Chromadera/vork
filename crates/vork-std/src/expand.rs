@@ -5,22 +5,46 @@ use std::{collections::BTreeMap, path::Path};
 
 pub fn expand_scene(document: &mut Value, base: &Path) -> Result<()> {
     fn expand(value: &mut Value, base: &Path, built: &mut BTreeMap<String, Value>) -> Result<()> {
-        let Some(shape) = value.get("std") else { return Ok(()) };
-        let shape = shape.as_str().context("std must name a geometry builder")?.to_owned();
+        let Some(shape) = value.get("std") else {
+            return Ok(());
+        };
+        let shape = shape
+            .as_str()
+            .context("std must name a geometry builder")?
+            .to_owned();
         let key = value.to_string();
-        if let Some(result) = built.get(&key) { *value = result.clone(); return Ok(()) }
+        if let Some(result) = built.get(&key) {
+            *value = result.clone();
+            return Ok(());
+        }
         let mut options = value.as_object().context("std geometry object")?.clone();
         options.remove("std");
-        ensure!(!options.contains_key("name"), "std geometry uses its table key or inline position, not name");
+        ensure!(
+            !options.contains_key("name"),
+            "std geometry uses its table key or inline position, not name"
+        );
         options.insert("name".into(), "shape".into());
         if shape == "text" {
             if let Some(font) = options.get("font").and_then(Value::as_str) {
-                options.insert("font".into(), base.join(font).to_string_lossy().into_owned().into());
+                options.insert(
+                    "font".into(),
+                    base.join(font).to_string_lossy().into_owned().into(),
+                );
             }
         }
-        let fragment: Value = serde_json::from_str(&super::evaluate(&shape, &Value::Object(options).to_string())?)?;
-        let mut geometry = fragment.pointer("/geometry/shape").context("std builder must return geometry")?.clone();
-        for attribute in geometry["attributes"].as_object_mut().context("std geometry attributes")?.values_mut() {
+        let fragment: Value = serde_json::from_str(&super::evaluate(
+            &shape,
+            &Value::Object(options).to_string(),
+        )?)?;
+        let mut geometry = fragment
+            .pointer("/geometry/shape")
+            .context("std builder must return geometry")?
+            .clone();
+        for attribute in geometry["attributes"]
+            .as_object_mut()
+            .context("std geometry attributes")?
+            .values_mut()
+        {
             let name = attribute.as_str().context("std attribute buffer name")?;
             *attribute = fragment["buffers"][name].clone();
         }
@@ -37,7 +61,9 @@ pub fn expand_scene(document: &mut Value, base: &Path) -> Result<()> {
             if let Some(geometry) = node.get_mut("geometry") {
                 expand(geometry, base, built).context("inline node geometry")?;
             }
-            if let Some(children) = node.get_mut("children") { nodes(children, base, built)?; }
+            if let Some(children) = node.get_mut("children") {
+                nodes(children, base, built)?;
+            }
         }
         Ok(())
     }
@@ -47,13 +73,16 @@ pub fn expand_scene(document: &mut Value, base: &Path) -> Result<()> {
             expand(geometry, base, &mut built).with_context(|| format!("geometry {name}"))?;
         }
     }
-    if let Some(value) = document.get_mut("nodes") { nodes(value, base, &mut built)?; }
+    if let Some(value) = document.get_mut("nodes") {
+        nodes(value, base, &mut built)?;
+    }
     Ok(())
 }
 
 pub fn load_scene(path: &Path) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path)?;
-    let mut document = serde_json::from_slice(bytes.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(&bytes))?;
+    let mut document =
+        serde_json::from_slice(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))?;
     expand_scene(&mut document, path.parent().unwrap_or(Path::new(".")))?;
     Ok(serde_json::to_vec(&document)?)
 }
@@ -65,11 +94,12 @@ mod tests {
 
     #[test]
     fn expansion_owns_identity_and_preserves_unvalidated_content() -> Result<()> {
-        let definition = json!({"std":"box"});
+        let definition = json!({"std":"rounded_box","radius":0});
         let mut document = json!({"version":"invalid", "programs":{"broken":{"unknown":true}},
             "geometry":{"custom":definition},
             "nodes":[{"children":[{"geometry":definition}]}]});
-        let expanded: Value = serde_json::from_str(&super::super::evaluate("expand", &document.to_string())?)?;
+        let expanded: Value =
+            serde_json::from_str(&super::super::evaluate("expand", &document.to_string())?)?;
         let table = &expanded["geometry"]["custom"];
         assert_eq!(table, &expanded["nodes"][0]["children"][0]["geometry"]);
         assert!(table.get("std").is_none());
@@ -79,9 +109,17 @@ mod tests {
         assert_eq!(expanded["programs"], document["programs"]);
         for pointer in ["/geometry/custom", "/nodes/0/children/0/geometry"] {
             document.pointer_mut(pointer).unwrap()["name"] = "forbidden".into();
-            let error = format!("{:#}", expand_scene(&mut document, Path::new(".")).unwrap_err());
+            let error = format!(
+                "{:#}",
+                expand_scene(&mut document, Path::new(".")).unwrap_err()
+            );
             assert!(error.contains("table key or inline position"), "{error}");
-            document.pointer_mut(pointer).unwrap().as_object_mut().unwrap().remove("name");
+            document
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("name");
         }
         Ok(())
     }

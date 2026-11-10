@@ -30,13 +30,13 @@ public FieldHit camera_field(uint object,uint sample,float4 position,bool front,
     let size=uint2(fragments[3],fragments[4]);
     let offset=asfloat(fragment_camera_samples[sample*2u+3u].zw);
     camera_ray(sample_position(uint2(position.xy),offset),size,camera_sample_lens(fragment_camera_samples,sample),origin,direction);
-    let hit=field_intersection<FragmentGeometry>(field_descriptor(object),object,origin,direction,camera_near_distance(origin,direction),camera_far_distance(origin,direction));
+    let hit=field_intersection<FragmentGeometry>(FragmentGeometry(fragment_draw_table,fragment_hit_buffers),field_descriptor(object),object,origin,direction,camera_near_distance(origin,direction),camera_far_distance(origin,direction));
     if(!hit.found) discard;
     return hit;
 }
 public float field_depth(uint object,FieldHit hit) {
     let world=mul(float4(hit.local,1.),object_model(object));
-    let clip=mul(world,frame.vp);
+    let clip=camera_world_clip(world.xyz,frame);
     let depth=clip.z/clip.w;
     if(depth<0. || depth>1.) discard;
     return depth;

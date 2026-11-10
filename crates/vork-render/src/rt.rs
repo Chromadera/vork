@@ -3,7 +3,7 @@
 //! each frame slot owns its TLAS and the BLAS of its deformed streams. The
 //! change tracker's object and skin uploads decide when they rebuild. Visibility
 //! queries share opaque static hierarchies; identity consumers retain primitives.
-//! This path uses full TLAS/BLAS builds; true update/refit remains separate.
+//! Fixed-topology evaluated BLASes prefer validated native refits after their first build.
 use crate::*;
 
 const BUILD_FLAGS: wgpu::AccelerationStructureFlags =
@@ -186,7 +186,7 @@ fn hit_record(
         }
     };
     let indices = slot(HitBuffer::Static(draw.indices.clone()));
-    let attributes = slot(if draw.computed { HitBuffer::Attributes(leader.expect("computed leader")) } else { HitBuffer::Static(draw.attributes.clone()) });
+    let attributes = slot(if draw.computed || layout.points { HitBuffer::Attributes(leader.expect("evaluated attribute leader")) } else { HitBuffer::Static(draw.attributes.clone()) });
     const NONE: u32 = 0xff;
     // Float offsets within a vertex: deformed normals/tangents follow the pose.
     let (normal, tangent, rest, surface) = if deformed {
@@ -208,10 +208,11 @@ fn hit_record(
         indices,
         (draw.index_offset / 4) as u32,
         attributes,
-        (draw.attribute_offset() / 4) as u32,
+        if layout.points {0} else {(draw.attribute_offset() / 4) as u32},
         (layout.attribute_stride() / 4) as u32,
-        normal | tangent << 8 | rest << 16 | u32::from(deformed) << 24,
+        normal | tangent << 8 | rest << 16 | u32::from(deformed) << 24 | u32::from(layout.points) << 26,
         uv(0) | uv(1) << 8 | (if layout.color { color } else { NONE }) << 16 | (if layout.custom > 0 { custom } else { NONE }) << 24,
+        0, // Primitive offset within the authored draw.
     ]
 }
 /// One element of the hit buffer array: an installed raster buffer, or a
@@ -654,6 +655,8 @@ pub(crate) struct Rays {
     /// Per draw; None for deformed draws, whose BLAS are frame-private.
     blas: Vec<Option<wgpu::Blas>>,
     visibility_groups: Vec<VisibilityGroup>,
+    points: Vec<Option<PointShape>>,
+    point_rows: Vec<Option<u32>>,
     /// Dense TLAS slots represented by shared opaque visibility hierarchies.
     #[cfg(test)]
     grouped_instances: Vec<bool>,
@@ -679,7 +682,7 @@ pub(crate) struct ComputeSnapshot {
 }
 impl ComputeSnapshot {
     pub(crate) fn new(r:&Renderer,filters:&[vork_slang::QueryFilter],source:&vork_scene::v2::Scene,nodes:&[install::EvalNode],roots:&[install::MeshRoot],draws:&[install::Draw],objects:&[Object],materials:&[Material],integrator:&vork_scene::Integrator)->Result<Self> {
-        let mut selected=Vec::new();let mut masks=Vec::new();
+        let mut selected=Vec::new();
         let solids=crate::passes::path::solids(draws,roots,materials)?;
         let absorbing:std::collections::BTreeSet<_>=draws.iter().filter(|d|d.implicit.is_none() && materials[d.material].solid_absorption)
             .flat_map(|d|d.instances.clone()).filter_map(|object|solids.owners.get(object as usize).copied().filter(|&id|id!=u32::MAX)).collect();
@@ -702,22 +705,23 @@ impl ComputeSnapshot {
                 if !materials[draw.material].transparent && mask&constants::RAY_DIFFUSE!=0 {mask|=constants::RAY_GI_OCCLUDER;}
                 if solids.owners.get(object as usize).is_some_and(|id|absorbing.contains(id)) && mask&constants::RAY_SHADOW!=0 {mask|=constants::RAY_SHADOW_SOLID;}
                 if filters.iter().any(|f|f.mask as u32&mask!=0 && f.object.is_none_or(|id|id==public)) {
-                    selected.push((draw_id,object));masks.push(mask as u8);
+                    selected.push((draw_id,object));
                 }
             }
         }
         let rays=Rays::new(r,draws,&selected,objects,&[],true,materials,integrator,&[],&[],&[],&[],false)?;
         let packed=gpu_objects(objects);
         let object_buffer=init(&r.device,"compute query objects",bytemuck::cast_slice(&packed),wgpu::BufferUsages::STORAGE);
-        let mut tlas=r.device.create_tlas(&wgpu::CreateTlasDescriptor {label:Some("compute query snapshot"),max_instances:selected.len().max(1) as u32,flags:BUILD_FLAGS,update_mode:wgpu::AccelerationStructureUpdateMode::Build});
-        for (slot,&(draw,object)) in selected.iter().enumerate() {
-            let record=&objects[object as usize];
-            let matrix=record.model.transpose().to_cols_array();
-            let transform=matrix[..12].try_into().unwrap();
-            tlas[slot]=Some(wgpu::TlasInstance::new(rays.blas[draw].as_ref().expect("static query BLAS"),transform,object,masks[slot]));
-        }
+        let tlas=r.device.create_tlas(&wgpu::CreateTlasDescriptor {label:Some("compute query snapshot"),max_instances:rays.instances.len().max(1) as u32,flags:BUILD_FLAGS,update_mode:wgpu::AccelerationStructureUpdateMode::Build});
         let mut encoder=r.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label:Some("compute query snapshot build")});
-        encoder.build_acceleration_structures(std::iter::empty(),std::iter::once(&tlas));
+        if rays.instances.is_empty() {
+            encoder.build_acceleration_structures(std::iter::empty(),std::iter::once(&tlas));
+        } else {
+            let instances:Vec<_>=rays.instances.iter().enumerate().map(|(slot,&(draw,object))|(object,!materials[draws[draw].material].transparent,true,rays.shadow_solids[slot],rays.blas[draw].as_ref().expect("static query BLAS").clone())).collect();
+            let poses:Vec<_>=rays.instances.iter().zip(&rays.point_rows).map(|(&(draw,_),row)|row.map(|row|(rays.points[draw].as_ref().unwrap().rest_poses.clone(),row*8+4))).collect();
+            let placement=crate::gpu_tlas::Placement::with_points(r,&object_buffer,&instances,&rays.placement_pipeline,&poses)?;
+            placement.encode(&mut encoder,&tlas, false);
+        }
         crate::command_finish::Segments::submit(&r.queue,encoder);
         Ok(Self {objects:object_buffer,rays,tlas})
     }
@@ -727,6 +731,51 @@ impl ComputeSnapshot {
 /// attributes. Static instances with identical transforms, masks, groups and material sidedness can
 /// share one triangle hierarchy without changing the rays' intersection space.
 struct VisibilityGroup { slot: usize, blas: wgpu::Blas }
+
+/// Shared immutable shape for compact computed point placements. The ray hit
+/// record retains the original draw/point identity independently of TLAS slots.
+struct PointShape {
+    blas: wgpu::Blas,
+    count: u32,
+    indices: u32,
+    rest_poses: wgpu::Buffer,
+}
+fn point_shapes(r: &Renderer, draws: &[install::Draw]) -> Result<Vec<Option<PointShape>>> {
+    let mut shared=std::collections::HashMap::new();
+    draws.iter().map(|draw| {
+        let Some(mesh)=draw.exit_geometry.as_ref().filter(|mesh|!mesh.point_centers.is_empty()) else {return Ok(None)};
+        let count=mesh.point_centers.len();
+        ensure!(mesh.vertices.len()%count==0 && mesh.indices.len()%count==0,"invalid repeated point topology");
+        let vertices=mesh.vertices.len()/count;
+        let indices=mesh.indices.len()/count;
+        let positions:Vec<_>=mesh.vertices[..vertices].iter().map(|v|v.NORMAL).collect();
+        let connectivity=&mesh.indices[..indices];
+        let mut hash=blake3::Hasher::new();hash.update(bytemuck::cast_slice(&positions));hash.update(bytemuck::cast_slice(connectivity));hash.update(&[u8::from(draw.ray_corners.is_some())]);
+        let key=hash.finalize();
+        let built=if let Some(built)=shared.get(&key) {wgpu::Blas::clone(built)} else {
+            let size=triangles(draw.ray_corners.is_some(),vertices.try_into()?,indices.try_into()?);
+            let built=blas(&r.device,"shared point shape BLAS",&size);
+            let usage=wgpu::BufferUsages::BLAS_INPUT;
+            let positions=init(&r.device,"shared point shape positions",bytemuck::cast_slice(&positions),usage);
+            let connectivity=init(&r.device,"shared point shape indices",bytemuck::cast_slice(connectivity),usage);
+            let mut encoder=r.device.create_command_encoder(&Default::default());
+            encoder.build_acceleration_structures([&wgpu::BlasBuildEntry {blas:&built,geometry:geometry(&size,&positions,0,12,&connectivity,0)}],std::iter::empty());
+            crate::command_finish::Segments::submit(&r.queue,encoder);
+            shared.insert(key,built.clone());built
+        };
+        ensure!(mesh.point_widths.len()==count,"point widths lost during shape installation");
+        let poses:Vec<_>=mesh.point_centers.iter().zip(&mesh.point_widths).flat_map(|(center,width)|[[center[0],center[1],center[2],*width];2]).collect();
+        let rest_poses=init(&r.device,"authored point endpoints",bytemuck::cast_slice(&poses),wgpu::BufferUsages::STORAGE);
+        Ok(Some(PointShape {blas:built,count:count.try_into()?,indices:indices.try_into()?,rest_poses}))
+    }).collect()
+}
+
+
+fn checked_placement_count(counts:impl IntoIterator<Item=u32>,limit:u32)->Result<u32> {
+    let mut total=0u32;
+    for count in counts {total=total.checked_add(count).filter(|&n|n<=limit).context("point placements exceed TLAS instance capacity")?;}
+    Ok(total)
+}
 
 /// Material bindings are final only after geometry reuse and primitive groups.
 /// Retain UV/alpha corners here so an opaque first binding cannot make later
@@ -799,6 +848,8 @@ fn alpha_table(
     draws: &[install::Draw],
     instances: &[(usize, u32)],
     hits: bool,
+    point_rows: &[Option<u32>],
+    points: &[Option<PointShape>],
     path: bool,
     buffers: &mut Vec<HitBuffer>,
     emitters: &[u32],
@@ -828,15 +879,22 @@ fn alpha_table(
         if start == words.len() as u32 {
             words.extend(corners.iter().flatten().map(|v| v.to_bits()));
         }
-        words[slot_words * slot] = start;
+        words[slot_words * slot] = start + point_rows[slot].map_or(0,|row|row*points[draw].as_ref().unwrap().indices*5);
     }
     // Hit records, one per draw: aliases of a deformation share its leader's pose.
     let mut records = std::collections::HashMap::new();
     for (slot, &(draw, _)) in instances.iter().enumerate().filter(|_| hits) {
-        let start = *records.entry(draw).or_insert_with(|| {
+        let start = *records.entry((draw,point_rows[slot])).or_insert_with(|| {
             let start = words.len() as u32;
             let leader = draws[draw].evaluation_leader().or_else(||draws[draw].computed.then_some(draw));
-            words.extend(hit_record(&draws[draw], buffers, leader, displaced[draw]));
+            let mut record=hit_record(&draws[draw], buffers, leader, displaced[draw]);
+            if let Some(row)=point_rows[slot] {
+                let first=row*points[draw].as_ref().unwrap().indices;
+                record[4]+=first;
+                record[8]|=1<<25;
+                record[10]=first/3;
+            }
+            words.extend(record);
             start
         });
         words[slot_words * slot + 2] = start;
@@ -962,6 +1020,7 @@ impl Rays {
             "{} object instances exceed the 24-bit ray instance index", objects.len()
         );
         let d = &r.device;
+        let points=point_shapes(r,draws)?;
         let mut pending: Vec<(Vec<(usize,wgpu::BlasTriangleGeometrySizeDescriptor)>,wgpu::Blas)> = Vec::new();
         let mut unique = std::collections::HashMap::new();
         let mut visibility_groups = Vec::new();
@@ -971,7 +1030,7 @@ impl Rays {
             let mut groups = std::collections::BTreeMap::new();
             for (slot,&(draw,object)) in instances.iter().enumerate() {
                 let source=&draws[draw];
-                if !eligible.contains(&(draw,object)) || source.evaluated() || source.ray_corners.is_some() {continue;}
+                if !eligible.contains(&(draw,object)) || source.evaluated() || source.ray_corners.is_some() || points[draw].is_some() {continue;}
                 let value=&objects[object as usize];
                 let mask=if collapsed(value.model) {0} else {value.metadata[1]};
                 let key=(value.model.to_cols_array().map(f32::to_bits),value.metadata[0],mask,!materials[source.material].transparent,materials[source.material].double_sided);
@@ -1006,6 +1065,7 @@ impl Rays {
         let mut primitive_needed=vec![false;draws.len()];
         for (slot,&(draw,_)) in instances.iter().enumerate() {primitive_needed[draw]|=!grouped_instances[slot];}
         let blas = draws.iter().enumerate().map(|(index,draw)| {
+            if let Some(shape)=&points[index] {return Some(shape.blas.clone());}
             if draw.evaluated() || !primitive_needed[index] {return None;}
             let key=vec![geometry_key(draw)];
             Some(unique.entry(key).or_insert_with(|| {
@@ -1054,20 +1114,26 @@ impl Rays {
         // CandidateInstanceIndex addresses this dense TLAS order, not the
         // original raster instance list. Keep alpha headers in the same order.
         let mut leaders:std::collections::BTreeMap<_,_>=visibility_groups.iter().enumerate().map(|(i,g)|(g.slot,i)).collect();
-        let mut ray_instances=Vec::new();let mut ray_grouped=Vec::new();
+        let placement_count=checked_placement_count(instances.iter().enumerate().filter(|(slot,_)|!grouped_instances[*slot] || leaders.contains_key(slot))
+            .map(|(_, &(draw,_))|points[draw].as_ref().map_or(1,|p|p.count)),d.limits().max_tlas_instance_count)? as usize;
+        let mut ray_instances=Vec::with_capacity(placement_count);let mut ray_grouped=Vec::with_capacity(placement_count);let mut point_rows=Vec::with_capacity(placement_count);
         for (slot,&instance) in instances.iter().enumerate() {
             if let Some(group)=leaders.remove(&slot) {
                 visibility_groups[group].slot=ray_instances.len();
             } else if grouped_instances[slot] {continue;}
-            ray_instances.push(instance);ray_grouped.push(grouped_instances[slot]);
+            if let Some(shape)=&points[instance.0] {
+                for row in 0..shape.count {ray_instances.push(instance);ray_grouped.push(false);point_rows.push(Some(row));}
+            } else {ray_instances.push(instance);ray_grouped.push(grouped_instances[slot]);point_rows.push(None);}
+
         }
+        debug_assert_eq!(ray_instances.len(),placement_count);
         let mut hit_buffers = Vec::new();
         let probe_emitters = integrator.probe_volume().is_some()
             && crate::emitters::has_sources(draws,instances,materials,true);
         let gi_emitters=integrator.raster().is_some_and(|r|r.fast_gi.as_ref().is_some_and(|g|g.method==vork_scene::FastGiMethod::Ray))
             && crate::emitters::has_sources(draws,instances,materials,true);
         let topology = if path || probe_emitters || gi_emitters || medium_sources || integrator.reflections()==Some(vork_scene::Reflections::Ray) {
-            crate::emitters::emitter_topology(draws, &ray_instances, materials, !path)?
+            crate::emitters::emitter_topology_counts(draws, &ray_instances, materials, !path, |slot,draw|points[draw].as_ref().filter(|_|point_rows[slot].is_some()).map_or(draws[draw].count,|p|p.indices)/3)?
         } else { vec![0, 0, 0] };
         let absorbing=ray_instances.iter().filter_map(|&(draw,object)| {
             let solid=solid_owners.get(object as usize).copied().unwrap_or(NO_ALPHA);
@@ -1077,9 +1143,11 @@ impl Rays {
         // discovery, including clear and opaque material groups of that solid.
         let shadow_solids=ray_instances.iter().map(|&(_,object)|absorbing.contains(&solid_owners.get(object as usize).copied().unwrap_or(NO_ALPHA))).collect::<Vec<_>>();
         let mut shadow_bounds=crate::shadow_containment::Plan::new(r,solids,&absorbing,objects,draws,solid_owners)?;
-        let (alpha, emitters, boundaries, subsurface, occupancy_solids, film_filter, object_boundaries, implicit) = alpha_table(r, draws, &ray_instances, hits, path, &mut hit_buffers, &topology, &crate::emitters::implicit_sources(draws,&ray_instances,materials), boundary_ids, subsurface_ids, solids, &shadow_solids, solid_owners, shadow_bounds.as_mut())?;
+        let (alpha, emitters, boundaries, subsurface, occupancy_solids, film_filter, object_boundaries, implicit) = alpha_table(r, draws, &ray_instances, hits, &point_rows, &points, path, &mut hit_buffers, &topology, &crate::emitters::implicit_sources(draws,&ray_instances,materials), boundary_ids, subsurface_ids, solids, &shadow_solids, solid_owners, shadow_bounds.as_mut())?;
         Ok(Self {
             shadow_solids,
+            points,
+            point_rows,
             shadow_bounds,
             opaque: draws.iter().all(|draw| draw.ray_corners.is_none()),
             emitters,
@@ -1111,6 +1179,8 @@ pub(crate) struct FrameRays {
     pub(crate) tlas: wgpu::Tlas,
     placement: Option<crate::gpu_tlas::Placement>,
     placement_revision: u64,
+    /// Changed object bytes since this slot's last full hierarchy build.
+    motion_bytes: u64,
     #[cfg(test)]
     pub(crate) builds: u32,
     /// This slot's hit buffer array (Rays::hit_buffers with deformed ranges
@@ -1143,7 +1213,7 @@ impl FrameRays {
         hit_bindings(&self.hit_buffers)
     }
 
-    pub(crate) fn new(s: &InstalledScene, r: &Renderer, objects: &wgpu::Buffer) -> Result<Option<Self>> {
+    pub(crate) fn new(s: &InstalledScene, r: &Renderer, objects: &wgpu::Buffer, deforms: &[Option<EvaluatedGeometry>]) -> Result<Option<Self>> {
         let d=&r.device;
         let Some(installed) = s.rays.as_ref() else {return Ok(None);};
         // Evaluated positions can be shared by draws with different index ranges.
@@ -1155,9 +1225,12 @@ impl FrameRays {
             .zip(&installed.alpha_tested)
             .enumerate()
             .map(|(i, (draw, &alpha_tested))| {
-                if !draw.evaluated() || owners[i] != i {return None;}
+                if !draw.evaluated() || owners[i] != i || installed.points[i].is_some() {return None;}
                 let size = triangles(alpha_tested, draw.vertex_count, draw.count);
-                let built = blas(d, "deformed primitive BLAS", &size);
+                let built = d.create_blas(&wgpu::CreateBlasDescriptor {
+                    label: Some("deformed primitive BLAS"), flags: BUILD_FLAGS,
+                    update_mode: if draw.refit_indices.is_some() {wgpu::AccelerationStructureUpdateMode::PreferUpdate} else {wgpu::AccelerationStructureUpdateMode::Build},
+                }, wgpu::BlasGeometrySizeDescriptors::Triangles {descriptors: vec![size.clone()]});
                 Some((size, built))
             })
             .collect();
@@ -1165,20 +1238,24 @@ impl FrameRays {
             label: Some("scene TLAS"),
             max_instances: installed.instances.len().max(1) as u32,
             flags: BUILD_FLAGS,
-            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            update_mode: wgpu::AccelerationStructureUpdateMode::PreferUpdate,
         });
         let placement=(!installed.instances.is_empty()).then(|| {
                 let visibility_blas:std::collections::HashMap<_,_>=installed.visibility_groups.iter().map(|group|(group.slot,&group.blas)).collect();
                 let instances:Vec<_>=installed.instances.iter().enumerate().map(|(slot,&(draw,object))| {
-                    let blas=visibility_blas.get(&slot).copied()
+                    let blas=installed.points[draw].as_ref().map(|p|&p.blas).or_else(||visibility_blas.get(&slot).copied())
                         .or(installed.blas[draw].as_ref())
                         .or_else(||deformed[owners[draw]].as_ref().map(|(_,b)|b)).expect("ray instance BLAS");
                     (object,!s.materials[s.draws[draw].material].transparent,s.draws[draw].implicit.is_none(),installed.shadow_solids[slot],blas.clone())
                 }).collect();
-                crate::gpu_tlas::Placement::new(r,objects,&instances,&installed.placement_pipeline)
+                let point_poses:Vec<_>=installed.instances.iter().zip(&installed.point_rows).map(|(&(draw,_),row)|row.map(|row| {
+                    if let Some(g)=deforms[draw].as_ref().filter(|g|g.point_domain.is_some()) {(g.output.buffer.clone(),(g.output.offset/4) as u32+2+row*10)}
+                    else {(deforms[draw].as_ref().and_then(|g|g.point_poses.as_ref()).unwrap_or(&installed.points[draw].as_ref().unwrap().rest_poses).clone(),row*8+4)}
+                })).collect();
+                crate::gpu_tlas::Placement::with_points(r,objects,&instances,&installed.placement_pipeline,&point_poses)
             }).transpose()?;
         let shadow_bounds=installed.shadow_bounds.as_ref().map(|plan|crate::shadow_containment::Slot::new(r,plan,objects)).transpose()?;
-        Ok(Some(Self { shadow_bounds, tlas, placement, placement_revision:0, #[cfg(test)] builds:0, hit_buffers: Vec::new(), deformed, emitter_weights:installed.emitter_weights.as_ref().map(|p|crate::emitter_weights::Slot::new(p,d)) }))
+        Ok(Some(Self { shadow_bounds, tlas, placement, placement_revision:0, motion_bytes:0, #[cfg(test)] builds:0, hit_buffers: Vec::new(), deformed, emitter_weights:installed.emitter_weights.as_ref().map(|p|crate::emitter_weights::Slot::new(p,d)) }))
     }
 }
 
@@ -1199,7 +1276,8 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
         let i = draw.displacement_leader.unwrap_or(i);
         first || f.geometry_chain.spatial_dirty(i,&f.changes)
     }).collect();
-    let deform_changed = rays.deformed.iter().zip(&dirty_geometry).any(|(blas, dirty)| blas.is_some() && *dirty);
+    let deform_changed = rays.deformed.iter().zip(&dirty_geometry).any(|(blas, dirty)| blas.is_some() && *dirty)
+        || installed.points.iter().enumerate().any(|(i,p)|p.is_some() && (first || f.geometry_chain.spatial_dirty(i,&f.changes)));
     let placement_changed = if rays.placement.is_some() {
         let changed=rays.placement_revision != f.changes.placement_revision;
         rays.placement_revision=f.changes.placement_revision;
@@ -1219,6 +1297,15 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
     if !deform_changed && !objects_changed {
         return;
     }
+    // Uploads contain only changed records. Accumulate across refits so repeated
+    // small changes cannot indefinitely retain the original tree topology.
+    // GPU publications have no CPU motion magnitudes: conservatively rebuild,
+    // without synchronizing to read back the million-instance placement buffer.
+    let changed_bytes = f.changes.uploads.iter()
+        .filter(|(buffer, ..)| buffer == &f.objects)
+        .map(|(_, _, _, bytes)| *bytes).sum::<u64>();
+    let force_rebuild = rebuild_tlas(&mut rays.motion_bytes, changed_bytes,
+        f.objects.size(), first || deform_changed || placement_changed);
     let entries: Vec<_> = rays
         .deformed
         .iter()
@@ -1234,7 +1321,7 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
                     &f.deforms[index].as_ref()?.output.buffer,
                     f.deforms[index].as_ref()?.output.first_vertex(),
                     std::mem::size_of::<DeformedVertex>() as u64,
-                    &draw.indices,
+                    draw.refit_indices.as_ref().unwrap_or(&draw.indices),
                     (draw.index_offset / 4) as u32,
                 ),
             })
@@ -1243,17 +1330,35 @@ pub(crate) fn encode(encoder: &mut wgpu::CommandEncoder, s: &InstalledScene, f: 
     #[cfg(test)] {rays.builds+=1;}
     if let Some(placement)=&rays.placement {
         encoder.build_acceleration_structures(entries.iter(), std::iter::empty());
-        placement.encode(encoder,&rays.tlas);
+        placement.encode(encoder,&rays.tlas, force_rebuild);
     } else {
         encoder.build_acceleration_structures(entries.iter(), std::iter::once(&rays.tlas));
     }
 }
 
+fn rebuild_tlas(motion_bytes: &mut u64, changed_bytes: u64, total_bytes: u64, spatial_publication: bool) -> bool {
+    *motion_bytes = motion_bytes.saturating_add(changed_bytes);
+    let rebuild = spatial_publication || *motion_bytes >= total_bytes.div_ceil(4).max(1);
+    if rebuild { *motion_bytes = 0; }
+    rebuild
+}
+
 #[cfg(all(test, vork_private_tests))]
 include!("rt_tests_private.rs");
 #[cfg(test)]
+#[path = "rt_refit_tests.rs"]
+mod refit_tests;
+#[cfg(test)]
 mod default_shadow_tests {
     use super::*;
+    #[test]
+    fn repeated_shape_capacity_is_admitted_before_allocation() {
+        assert_eq!(checked_placement_count([96,96,1],193).unwrap(),193);
+        assert!(checked_placement_count([96,96,1],192).is_err());
+        assert!(checked_placement_count([u32::MAX,1],u32::MAX).is_err());
+        assert_eq!(checked_placement_count([],0).unwrap(),0);
+    }
+
     #[test]
     fn ray_profile_reserves_queries_for_imported_and_extracted_lights() {
         let scene: Scene = vork_scene::v2::from_test_value(serde_json::json!({

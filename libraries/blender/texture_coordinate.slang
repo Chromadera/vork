@@ -2,7 +2,7 @@ import vork;
 
 // Blender Texture Coordinate outputs. Offsets are in raster pixels and use the
 // kernel's local footprint, so a BumpHeight callback can reevaluate its complete
-// expression at the finite-difference offsets passed by std.vector.bump.
+// expression at the finite-difference offsets passed by blender.vector.bump.
 public struct TextureCoordinate {
     public float3 Generated;
     public float3 Normal;

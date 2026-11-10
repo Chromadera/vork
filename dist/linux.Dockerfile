@@ -25,6 +25,7 @@ COPY --from=build /target/release/vork /usr/local/bin/vork
 RUN vork --version
 FROM scratch AS artifact
 COPY --from=smoke /usr/local/bin/vork /vork
+COPY --from=build /target/release/vork-slang-filesystem /vork-slang-filesystem
 COPY --from=build /src/crates/vork-render/src/ltc/LICENSE.ltc /licenses/LICENSE.ltc
 COPY --from=build /src/crates/vork-render/src/ltc/LICENSE.three /licenses/LICENSE.three
 COPY --from=build /src/crates/vork-render/src/ltc/README.md /licenses/LTC.md

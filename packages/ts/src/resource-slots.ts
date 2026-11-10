@@ -51,6 +51,13 @@ export const resourceSlots = {
               "file": true
             }
           }
+        },
+        {
+          "properties": {
+            "file": {
+              "file": true
+            }
+          }
         }
       ]
     },
@@ -120,6 +127,13 @@ export const resourceSlots = {
                 "ref": "Morph"
               }
             },
+            "status": {
+              "branches": [
+                {
+                  "ref": "GeometryStatus"
+                }
+              ]
+            },
             "widths": {
               "branches": [
                 {
@@ -130,6 +144,13 @@ export const resourceSlots = {
           }
         }
       ]
+    },
+    "GeometryStatus": {
+      "properties": {
+        "buffer": {
+          "ref": "NameOr3"
+        }
+      }
     },
     "GridBinding": {
       "properties": {

@@ -1,5 +1,5 @@
 import vork;
-import std.procedurals;
+import blender.procedurals;
 import blender.texture_coordinate;
 struct Inputs {
  float3 base_a=float3(.8),base_b=float3(.8);float roughness=.5,metalness=0.,ior=1.45,specular_weight=1.,transmission=0.;

@@ -2241,6 +2241,7 @@ pub struct Blas {
     pub(crate) flags: wgt::AccelerationStructureFlags,
     pub(crate) update_mode: wgt::AccelerationStructureUpdateMode,
     pub(crate) built_index: RwLock<Option<NonZeroU64>>,
+    pub(crate) submitted_refit: RwLock<Option<crate::ray_tracing::SubmittedBlasRefit>>,
     pub(crate) handle: u64,
     /// The `label` from the descriptor used to create the resource.
     pub(crate) label: String,
@@ -2392,6 +2393,7 @@ pub struct Tlas {
     pub(crate) flags: wgt::AccelerationStructureFlags,
     pub(crate) update_mode: wgt::AccelerationStructureUpdateMode,
     pub(crate) built_index: RwLock<Option<NonZeroU64>>,
+    pub(crate) submitted_refit: RwLock<Option<(NonZeroU64, u32)>>,
     pub(crate) dependencies: RwLock<Vec<Arc<Blas>>>,
     pub(crate) instance_buffer: ManuallyDrop<Box<dyn hal::DynBuffer>>,
     /// The `label` from the descriptor used to create the resource.

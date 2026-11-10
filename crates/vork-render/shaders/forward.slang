@@ -29,7 +29,7 @@ struct Output {
 #ifdef VORK_IMPLICIT_CONTROLS
     float depth : SV_Depth;
 #endif
-    uint id : SV_Target0; float4 normal : SV_Target1; float4 ambient : SV_Target2; float4 motion : SV_Target3;
+    uint4 id : SV_Target0; float4 normal : SV_Target1; float4 ambient : SV_Target2; float4 motion : SV_Target3;
 #ifdef VORK_DENOISE
     float4 albedo : SV_Target4;
 #endif
@@ -42,7 +42,7 @@ struct RasterShadows<V:IVariant> : IShadows {
     static const bool probe_rays=true;
     static bool probe_visible(float3 world,float3 normal,float3 position_error,float3 probe) {
 #if defined(VORK_PROBES) && defined(VORK_RAY_BINDINGS)
-        return ray_probe_visible(world,normal,position_error,probe);
+        return ray_probe_visible(ray_scene,ReceiverGeometry(ray_alpha,ray_hit_buffers),world,normal,position_error,probe);
 #else
         return true;
 #endif
@@ -53,12 +53,12 @@ struct RasterShadows<V:IVariant> : IShadows {
     static uint sample_count() {return uint(frame.temporal.y)*max(frame.sampling.w,1u);}
     static float3 visibility_direction(float3 world,float3 normal,LightValues record,uint light,float3 direction,float distance,float3 position_error,uint index,uint count,bool fibre=false) {
 #ifdef VORK_RAY_BINDINGS
-        if(V.ray_shadows && V.has_shadow_rays) {return ray_visibility_direction(world,normal,light,direction,distance,position_error,index,count,fibre);}
+        if(V.ray_shadows && V.has_shadow_rays) {return ray_visibility_direction(ray_scene,ReceiverGeometry(ray_alpha,ray_hit_buffers),world,normal,light,direction,distance,position_error,index,count,fibre);}
 #endif
         return float3(1.);
     }
     static float thickness(uint object,float3 world,float3 direction) {
-        if (V.subsurface) {return ray_subsurface_exit(object,world,direction);}
+        if (V.subsurface) {return ray_subsurface_exit(ray_scene,object,world,direction);}
         return -1.;
     }
 };
@@ -93,7 +93,9 @@ Output pack_response(Varying v, Response r) {
 #ifdef VORK_IMPLICIT_CONTROLS
     o.depth=v.position.z;
 #endif
-    o.id=uint(objects[v.object].opacity.y);o.normal=float4(r.normal,surface_encode_visibility(0.,objects[v.object].metadata.y));o.ambient=float4(r.baseline.diffuse,payload.y);
+    // A device-depth slope over one pixel distinguishes continuous creases
+    // from separated surfaces without a distance-dependent metre threshold.
+    o.id=uint4(uint(objects[v.object].opacity.y),v.object,v.primitive,asuint(abs(ddx(v.position.z))+abs(ddy(v.position.z))));o.normal=float4(r.normal,surface_encode_visibility(0.,objects[v.object].metadata.y));o.ambient=float4(r.baseline.diffuse,payload.y);
     if (motion_required()) {
         let current_clip=mul(float4(v.world,1.),frame.vp);
         o.motion.xy=(current_clip.xy/current_clip.w-v.previous_clip.xy/v.previous_clip.w)*float2(.5,-.5);

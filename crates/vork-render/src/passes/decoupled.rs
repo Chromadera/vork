@@ -97,7 +97,7 @@ pub(crate) fn check_view(limits: &wgpu::Limits, extent: [u32; 2], samples: u32, 
 }
 
 pub(crate) fn packet_eligible(shape:ViewShape,samples:u32)->bool {
-    samples>1 && shape.table_only && !shape.transparent && !shape.diffusion
+    samples>1 && !shape.transparent && !shape.diffusion
         && !shape.screen_refraction && shape.boundaries==0
 }
 /// Admission checks the smallest reusable packet and the retained whole-frame
@@ -116,22 +116,28 @@ pub(crate) fn check_packet_minimum(limits:&wgpu::Limits,extent:[u32;2],samples:u
 /// Reserve at most a quarter of available device memory for camera records,
 /// leaving headroom for retained images, geometry and downstream passes. Frames
 /// whose existing layout fits use the existing dispatch path without packets.
-fn camera_packet_rows(limits:&wgpu::Limits,shape:ViewShape,[w,h]:[u32;2],samples:u32,words:u32,memory:u64)->Result<Option<u32>> {
-    let budget=memory/4;
+fn camera_packet_rows(limits:&wgpu::Limits,shape:ViewShape,[w,h]:[u32;2],samples:u32,words:u32,memory:u64,materials:u32,indirect_words:u32)->Result<Option<u32>> {
+    let budget=memory/constants::CAMERA_RECORD_MEMORY_SHARE;
+    let header=u64::from(vork_slang::registry::CAMERA_INDIRECT_HEADER_WORDS)*4;
+    let binding=limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+    let work_limit=if indirect_words==0 {u64::MAX} else {binding.saturating_sub(header)/(u64::from(indirect_words)*4)};
     let full=view_bindings(limits,shape,[w,h],samples);
     let root_bytes=|sizes:[(&str,u64);5],evaluations:u64| {
         sizes[0].1+sizes[1].1+sizes[2].1+sizes[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)
-            +evaluations*(u64::from(words)*16+16)
+            +u64::from(materials)*24+header
+            +evaluations*(u64::from(words)*16+16+u64::from(indirect_words)*4)
     };
     let fits_bindings=|sizes:[(&str,u64);5]|sizes.iter().all(|(_,b)|*b<=limits.max_storage_buffer_binding_size.min(limits.max_buffer_size))
         && sizes[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size;
-    let evaluations=(u64::from(w)*u64::from(h)*u64::from(VISIBILITY_SLOTS)).min(evaluation_budget(limits,memory,words));
+    let records=if shape.table_only {u64::from(w)*u64::from(h)*u64::from(VISIBILITY_SLOTS)+visibility_pool(limits,shape,[w,h],samples)}
+        else {u64::from(w)*u64::from(h)*u64::from(samples)};
+    let evaluations=records.min(evaluation_budget(limits,memory,words)).min(work_limit);
     if fits_bindings(full) && root_bytes(full,evaluations)<=budget {return Ok(None);}
     let fits=|rows:u32| {
         let pixels=u64::from(w)*u64::from(rows);
         let pool=pixels*u64::from(samples.saturating_sub(VISIBILITY_SLOTS));
         let sizes=view_bindings_with_pool(shape,[w,rows],samples,pool);
-        fits_bindings(sizes) && pixels*u64::from(samples)<=evaluation_limit(limits,2,words)
+        fits_bindings(sizes) && pixels*u64::from(samples)<=evaluation_limit(limits,materials,words).min(work_limit)
             && root_bytes(sizes,pixels*u64::from(samples))<=budget
     };
     let minimum=h.min(TILE);
@@ -140,7 +146,13 @@ fn camera_packet_rows(limits:&wgpu::Limits,shape:ViewShape,[w,h]:[u32;2],samples
     if !fits(minimum) {return Ok(Some(minimum));}
     let mut lo=1;let mut hi=h.div_ceil(TILE);
     while lo<hi {let mid=(lo+hi+1)/2;if fits((mid*TILE).min(h)) {lo=mid;} else {hi=mid-1;}}
-    Ok(Some((lo*TILE).min(h)))
+    let maximum=(lo*TILE).min(h);
+    // Once the pass count is fixed, balance the packets. Keeping a maximum-size
+    // backing for four full packets and a tiny fifth retains memory for no
+    // scheduling benefit. Round in tile units so the sample/workgroup mapping
+    // remains unchanged and the balanced size cannot exceed the fitted size.
+    let packets=h.div_ceil(maximum);
+    Ok(Some((h.div_ceil(TILE).div_ceil(packets)*TILE).min(h)))
 }
 
 /// One key per pixel: (object + 1, primitive).
@@ -826,7 +838,9 @@ impl View {
             table_only: installed.materials == 2, reserved: s.reservations.visibility_pool};
         let eligible=packet_eligible(shape,samples) && !s.has_media;
         let memory=r.camera_memory;
-        let packet_rows=if eligible {camera_packet_rows(&limits,shape,extent,samples,installed.evaluation_words,memory)?} else {None};
+        let work_stride=if installed.composition_flags&vork_slang::registry::CAMERA_PROBE_LIT!=0 {24} else if s.plan.effects.subsurface {16} else {8};
+        let packet_rows=if eligible {camera_packet_rows(&limits,shape,extent,samples,installed.evaluation_words,memory,installed.materials,
+            if s.plan.effects.probes {work_stride} else {0})?} else {None};
         let packets=packet_rows.is_some();
         let packet_rows=packet_rows.unwrap_or(h);
         let storage_extent=[w,packet_rows];
@@ -944,7 +958,7 @@ impl View {
         // budget; the bands reuse one evaluation store. Replay reserves the
         // reported demand (the frame's, estimated from its largest band's) and
         // adds bands until every band fits.
-        let work_stride=if installed.composition_flags&vork_slang::registry::CAMERA_PROBE_LIT!=0 {24} else if s.plan.effects.subsurface {16} else {8};
+        let work_stride=u64::from(work_stride);
         let header=u64::from(vork_slang::registry::CAMERA_INDIRECT_HEADER_WORDS);
         let work_limit=if s.plan.effects.probes {
             limits.max_storage_buffer_binding_size.min(limits.max_buffer_size).saturating_sub(header*4)/(work_stride*4)
@@ -1457,13 +1471,65 @@ mod tests {
     fn camera_packets_follow_memory_and_native_limits() -> Result<()> {
         let limits=wgpu::Limits {max_storage_buffer_binding_size:2<<30,max_buffer_size:16<<30,..Default::default()};
         let shape=ViewShape {transparent:false,diffusion:false,reflections:true,screen_refraction:false,table_only:true,boundaries:0,reserved:0};
-        assert_eq!(camera_packet_rows(&limits,shape,[1920,1080],8,8,23<<30)?,None);
-        let rows=camera_packet_rows(&limits,shape,[3840,2160],8,8,23<<30)?.unwrap();
+        assert_eq!(camera_packet_rows(&limits,shape,[1920,1080],8,8,23<<30,2,0)?,None);
+        let rows=camera_packet_rows(&limits,shape,[3840,2160],8,8,23<<30,2,0)?.unwrap();
         assert!(rows<2160 && rows%TILE==0,"{rows}");
-        assert!(camera_packet_rows(&limits,shape,[1920,1080],8,8,4<<30)?.unwrap()<1080);
-        assert_eq!(camera_packet_rows(&limits,shape,[3840,64],64,8,23<<30)?,None);
+        assert!(camera_packet_rows(&limits,shape,[1920,1080],8,8,4<<30,2,0)?.unwrap()<1080);
+        assert_eq!(camera_packet_rows(&limits,shape,[3840,64],64,8,23<<30,2,0)?,None);
         let reserved=ViewShape {reserved:u32::MAX,..shape};
-        assert_eq!(camera_packet_rows(&limits,reserved,[96,64],8,19,128<<20)?,Some(64),"a proven full-height packet supersedes another view's pool high-water");
+        assert_eq!(camera_packet_rows(&limits,reserved,[96,64],8,19,128<<20,2,0)?,Some(64),"a proven full-height packet supersedes another view's pool high-water");
+        Ok(())
+    }
+
+    #[test]
+    fn packet_budget_includes_indirect_work_and_balances_the_tail() -> Result<()> {
+        let limits=wgpu::Limits {max_storage_buffer_binding_size:2<<30,max_buffer_size:16<<30,..Default::default()};
+        let shape=ViewShape {transparent:false,diffusion:false,reflections:true,screen_refraction:false,table_only:false,boundaries:0,reserved:0};
+        assert!(packet_eligible(shape,8));
+        let rows=camera_packet_rows(&limits,shape,[1080,1920],8,19,8<<30,3,24)?.unwrap();
+        let pixels=1080*u64::from(rows);
+        let fields=view_bindings_with_pool(shape,[1080,rows],8,pixels*4);
+        let bytes=fields[0].1+fields[1].1+fields[2].1+fields[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)
+            +pixels*8*(304+16+96)+3*24+u64::from(vork_slang::registry::CAMERA_INDIRECT_HEADER_WORDS)*4;
+        assert!(bytes<=2<<30,"camera packet owns {bytes} bytes");
+        let packets=1920u32.div_ceil(rows);
+        assert_eq!(rows,1920u32.div_ceil(TILE).div_ceil(packets)*TILE);
+        assert!(!packet_eligible(ViewShape {transparent:true,..shape},8));
+        assert!(!packet_eligible(ViewShape {diffusion:true,..shape},8));
+        assert!(!packet_eligible(ViewShape {screen_refraction:true,..shape},8));
+        Ok(())
+    }
+
+    #[test]
+    fn opaque_program_packets_preserve_absolute_samples_and_last_partial_row() -> Result<()> {
+        let Some(mut r)=crate::test_renderer()? else {return Ok(());};
+        let scene:Scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,
+            "render":{"resolution":[96,73],"settings":{"integrator":"raster","samples":8,"reflections":"ray","denoiser":null,"fast_gi":null},"display":{"program":"std/standard","inputs":{"dither_intensity":0.}}},
+            "buffers":{"p":{"type":"vec3","data":[[-1,-1,0],[1,-1,0],[1,1,0],[-1,1,0]]},"i":{"type":"u32","data":[0,1,2,0,2,3]}},
+            "geometry":{"quad":{"attributes":{"POSITION":"p"},"indices":"i"}},
+            "programs":{"rings":{"source":"struct Inputs {}; Closure surface(ShadingContext ctx,Inputs inputs) { Closure c={}; c.base_color=float3(frac(length(ctx.POSITION.xy)*8.),0.3,0.7); c.specular_roughness=0.3; return c; }"}},
+            "materials":{"rings":{"program":"rings"}},
+            "nodes":[{"type":"camera","translation":[0,0,4],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2.5}}},
+                {"type":"mesh","geometry":"quad","materials":["rings"]},
+                {"type":"light","shape":"sun","energy":3},
+                {"type":"light","shape":"environment","color":[0.2,0.3,0.4],"energy":1}]}))?;
+        let render=|r:&Renderer,packets:bool|->Result<Vec<[f32;4]>> {
+            let mut installed=r.install(scene.clone(),std::path::Path::new("."))?;
+            assert!(installed.decoupled.as_ref().unwrap().materials>2);
+            let mut frame=installed.create_frame_slot(r,crate::ReadbackPrecision::Float)?;
+            let view=frame.view.decoupled.as_ref().unwrap();
+            assert_eq!(view.packets,packets);
+            if packets {assert!(view.bands>1);assert_ne!(73%view.band_rows,0);}
+            let first=installed.render_frame(r,&mut frame,0.)?.linear_rgba.unwrap();
+            let warm=installed.render_frame(r,&mut frame,0.)?.linear_rgba.unwrap();
+            assert_eq!(bytemuck::cast_slice::<_,u32>(&first),bytemuck::cast_slice::<_,u32>(&warm));
+            Ok(first)
+        };
+        r.camera_memory=u64::MAX;
+        let expected=render(&r,false)?;
+        r.camera_memory=8<<20;
+        let actual=render(&r,true)?;
+        assert_eq!(bytemuck::cast_slice::<_,u32>(&expected),bytemuck::cast_slice::<_,u32>(&actual));
         Ok(())
     }
 
@@ -1478,17 +1544,17 @@ mod tests {
             "nodes":[{"type":"camera","translation":[0,0,5],"material":{"program":"std/camera","inputs":{"projection":"ortho","fit":"horizontal","ortho_scale":2.}}},{"type":"mesh","geometry":"quad","materials":["glow"]}],
             "render":{"resolution":[96,64],"settings":{"integrator":"raster","samples":8,"reflections":"ray","denoiser":null,"fast_gi":null},"display":{"program":"std/standard","inputs":{"dither_intensity":0.}}}
         }))?;
-        let render=|reserved:u32|->Result<Vec<u8>> {
+        let render=|reserved:u32|->Result<Vec<[f32;4]>> {
             let options=crate::InstallOptions {reservations:crate::Reservations {visibility_pool:reserved,..Default::default()},..Default::default()};
             let mut installed=r.install_with_options(scene.clone(),std::path::Path::new("."),options)?;
-            let mut frame=installed.create_frame_slot(&r,Default::default())?;
+            let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
             let view=frame.view.decoupled.as_ref().unwrap();
             assert_eq!(view.packets,reserved!=0);assert_eq!(view.bands,1);
-            let first=installed.render_frame(&r,&mut frame,0.)?.rgba;
-            assert_eq!(first,installed.render_frame(&r,&mut frame,0.)?.rgba);
+            let first=installed.render_frame(&r,&mut frame,0.)?.linear_rgba.unwrap();
+            crate::test_linear::assert_linear_eq(&first,&installed.render_frame(&r,&mut frame,0.)?.linear_rgba.unwrap());
             Ok(first)
         };
-        assert_eq!(render(0)?,render(u32::MAX)?);
+        crate::test_linear::assert_linear_eq(&render(0)?,&render(u32::MAX)?);
         Ok(())
     }
 
@@ -1602,10 +1668,10 @@ mod tests {
             "nodes":[{"type":"camera","translation":[0,0,3],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2}}},
                 {"type":"mesh","geometry":"quad","materials":["rear"]},
                 {"type":"mesh","geometry":"quad","materials":["front"],"translation":[0,0,0.1]}]});
-        let render=|value:serde_json::Value| -> Result<Vec<u8>> {
+        let render=|value:serde_json::Value| -> Result<Vec<[f32;4]>> {
             let mut installed=r.install(vork_scene::v2::from_test_value(value)?,&temp)?;
-            let mut frame=installed.create_frame_slot(&r,Default::default())?;
-            Ok(installed.render_frame(&r,&mut frame,0.)?.rgba)
+            let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            Ok(installed.render_frame(&r,&mut frame,0.)?.linear_rgba.unwrap())
         };
         // A rejected rear must not change the foreground's texture footprint
         // or switch it from centroid filtering to sample shading.
@@ -1615,7 +1681,7 @@ mod tests {
         behind["nodes"][2]["translation"]=serde_json::json!([0,0,-0.1]);
         let with_invisible_rear=render(behind.clone())?;
         behind["nodes"].as_array_mut().unwrap().pop();
-        assert_eq!(with_invisible_rear,render(behind)?,"invisible rear changed foreground shading");
+        crate::test_linear::assert_linear_eq(&with_invisible_rear,&render(behind)?);
         for zero_first in [false,true] {
             let mut coplanar=value.clone();
             coplanar["nodes"][2]["translation"]=serde_json::json!([0,0,0]);
@@ -1629,7 +1695,7 @@ mod tests {
                 // discarded coplanar front, while preserving 0.5 coverage.
                 coplanar["materials"]["rear"]["inputs"]["alpha"]=serde_json::json!({"image":"one"});
             }
-            assert_eq!(actual,render(coplanar)?,"coplanar zero_first={zero_first}");
+            crate::test_linear::assert_linear_eq(&actual,&render(coplanar)?);
         }
         let rejected=render(value.clone())?;
         // An alpha-one textured rear independently forces the same per-sample
@@ -1639,7 +1705,7 @@ mod tests {
         value["materials"]["rear"]["inputs"]["alpha"]=serde_json::json!({"image":"one"});
         let reference=render(value)?;
         std::fs::remove_dir_all(&temp)?;
-        assert_eq!(rejected,reference);
+        crate::test_linear::assert_linear_eq(&rejected,&reference);
         Ok(())
     }
     #[test]
@@ -1827,17 +1893,17 @@ mod tests {
             {"type":"mesh","geometry":"shape_box","materials":["glass"]},
             {"type":"light","shape":"environment","color":[1,1,1],"energy":1}]);
         let scene:Scene=vork_scene::v2::from_test_value(input)?;
-        let render=|r:&Renderer|->Result<(u32,Vec<u8>)> {
+        let render=|r:&Renderer|->Result<(u32,Vec<[f32;4]>)> {
             let mut installed=r.install(scene.clone(),&root)?;
-            let mut frame=installed.create_frame_slot(r,Default::default())?;
+            let mut frame=installed.create_frame_slot(r,crate::ReadbackPrecision::Float)?;
             let output=installed.render_frame(r,&mut frame,0.)?;
-            Ok((frame.view.decoupled.as_ref().unwrap().bands,output.rgba))
+            Ok((frame.view.decoupled.as_ref().unwrap().bands,output.linear_rgba.unwrap()))
         };
         let (one,expected)=render(&r)?;assert_eq!(one,1);
-        assert!(expected.chunks_exact(4).all(|p|p[0]>0 && p[0]<p[1] && p[1]<p[2]),"camera containment must tint every row");
+        assert!(expected.iter().all(|p|p[0]>0. && p[0]<p[1] && p[1]<p[2]),"camera containment must tint every row");
         r.evaluation_memory=Some(occupancy_row_bytes(24,4,1)*u64::from(TILE)*EVALUATION_MEMORY_SHARE);
         let (bands,actual)=render(&r)?;
-        assert_eq!(bands,4);assert_eq!(actual,expected,"containment bands changed camera transport");
+        assert_eq!(bands,4);crate::test_linear::assert_linear_eq(&actual,&expected);
         Ok(())
     }
     #[cfg(all(test, vork_private_tests))]
@@ -1851,17 +1917,17 @@ mod tests {
         Ok((scene,root))
     }
     /// Per-sample program and blended shading split into bands reproduces the
-    /// one-band image exactly: each band classifies, evaluates and composes its rows.
+    /// one-band linear image within float noise: each band classifies, evaluates and composes its rows.
     #[test]
     #[cfg(vork_private_tests)]
     fn shading_bands_reproduce_the_single_band_image() -> Result<()> {
         let Some(mut r) = crate::test_renderer()? else {return Ok(());};
         let (scene,root)=program_transparency()?;
-        let render=|r:&Renderer| -> Result<(u32,Vec<u8>)> {
+        let render=|r:&Renderer| -> Result<(u32,Vec<[f32;4]>)> {
             let mut installed=r.install(scene.clone(),&root)?;
-            let mut frame=installed.create_frame_slot(r,Default::default())?;
+            let mut frame=installed.create_frame_slot(r,crate::ReadbackPrecision::Float)?;
             let output=installed.render_frame(r,&mut frame,0.5)?;
-            Ok((frame.view.decoupled.as_ref().unwrap().bands,output.rgba))
+            Ok((frame.view.decoupled.as_ref().unwrap().bands,output.linear_rgba.unwrap()))
         };
         let (one,expected)=render(&r)?;
         assert_eq!(one,1);
@@ -1869,7 +1935,7 @@ mod tests {
         r.evaluation_memory=Some(96*64*8/4*128*EVALUATION_MEMORY_SHARE);
         let (bands,banded)=render(&r)?;
         assert!(bands>=3,"{bands} bands");
-        assert!(expected==banded,"{bands} bands changed pixels");
+        crate::test_linear::assert_linear_eq(&expected,&banded);
         Ok(())
     }
     /// Constant table glass has visibility-dependent per-sample work even when
@@ -1887,22 +1953,22 @@ mod tests {
                 {"type":"mesh","geometry":"triangle","materials":["glass"]},
                 {"type":"mesh","geometry":"triangle","translation":[0,0,-1],"scale":[2,2,1]},
                 {"type":"light","shape":"sun","energy":3}]}))?;
-        let render=|r:&Renderer|->Result<(u32,Vec<u8>)> {
+        let render=|r:&Renderer|->Result<(u32,Vec<[f32;4]>)> {
             let installed=r.install(scene.clone(),std::path::Path::new("."))?;
             assert_eq!(installed.decoupled.as_ref().unwrap().materials,2,"table materials only");
             assert!(installed.decoupled.as_ref().unwrap().per_sample);
-            let mut frame=installed.create_frame_slot(r,Default::default())?;
+            let mut frame=installed.create_frame_slot(r,crate::ReadbackPrecision::Float)?;
             let view=frame.view.decoupled.as_ref().unwrap();
             let bands=view.bands;
             frame.submit(&installed,r,0.)?;
-            Ok((bands,frame.collect(r)?.rgba))
+            Ok((bands,frame.collect(r)?.linear_rgba.unwrap()))
         };
         let (one,expected)=render(&r)?;
         assert_eq!(one,1);
         r.evaluation_memory=Some(96*64*32/4*128*EVALUATION_MEMORY_SHARE);
         let (bands,actual)=render(&r)?;
         assert!(bands>1,"sample capacity must split table glass into bands");
-        assert_eq!(expected,actual,"banding changed table glass");
+        crate::test_linear::assert_linear_eq(&expected,&actual);
         Ok(())
     }
     /// A frame whose evaluations overflow the view's estimate redoes with the
@@ -1914,14 +1980,14 @@ mod tests {
         let (scene,root)=program_transparency()?;
         let expected={
             let mut installed=r.install(scene.clone(),&root)?;
-            let mut frame=installed.create_frame_slot(&r,Default::default())?;
-            installed.render_frame(&r,&mut frame,0.5)?.rgba
+            let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            installed.render_frame(&r,&mut frame,0.5)?.linear_rgba.unwrap()
         };
         // An estimate of one evaluation reserves only the slots; the per-sample
         // evaluations of 8 samples overflow them.
         r.evaluation_estimate=Some(1);
         let mut installed=r.install(scene,&root)?;
-        let mut frame=installed.create_frame_slot(&r,Default::default())?;
+        let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
         let error=frame.submit(&installed,&r,0.5).and_then(|()|frame.collect(&r)).err().context("the estimate must overflow")?;
         let demand=error.downcast_ref::<crate::FrameRedo>().context("an overflow redoes the frame")?.0;
         assert!(demand.shading_evaluations>0);
@@ -1933,7 +1999,7 @@ mod tests {
         r.queue.submit([]);
         assert!(pollster::block_on(scope.pop()).is_some(),"the replaced material bins are still allocated");
         let output=installed.render_frame(&r,&mut frame,0.5)?;
-        assert!(output.rgba==expected,"the redone frame changed pixels");
+        crate::test_linear::assert_linear_eq(output.linear_rgba.as_ref().unwrap(),&expected);
         Ok(())
     }
     /// Recovery preserves an accepted successor's pixels and GPU-only fence,
@@ -1944,9 +2010,9 @@ mod tests {
         let Some(mut r) = crate::test_renderer()? else { return Ok(()); };
         let (scene, root) = program_transparency()?;
         let mut installed = r.install(scene, &root)?;
-        let good = installed.create_frame_slot(&r, Default::default())?;
+        let good = installed.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         r.evaluation_estimate = Some(1);
-        let bad = installed.create_frame_slot(&r, Default::default())?;
+        let bad = installed.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         let mut slots = [bad, good];
         slots[0].submit(&installed, &r, 0.5)?;
         slots[1].submit(&installed, &r, 0.75)?;
@@ -1963,8 +2029,8 @@ mod tests {
         let retained = slots[1].collect(&r)?;
         assert!(slots[1].completed.is_none());
         let expected = installed.render_frame(&r, &mut slots[1], 0.75)?;
-        assert_eq!(retained.rgba, expected.rgba);
-        assert_eq!(retained.depth_u16, expected.depth_u16);
+        crate::test_linear::assert_linear_eq((retained).linear_rgba.as_ref().expect("linear readback"), (expected).linear_rgba.as_ref().expect("linear readback"));
+        crate::test_linear::assert_depth_eq(retained.depth_f32.as_ref().expect("float depth readback"), expected.depth_f32.as_ref().expect("float depth readback"));
         assert!(!first.rgba.is_empty());
         // A different request must release the saved lease and render normally.
         slots[1].submit(&installed, &r, 0.75)?;
@@ -2000,7 +2066,7 @@ mod tests {
                 {"type":"mesh","name":"quad","geometry":"quad","materials":["rings"]},
                 {"type":"light","name":"sun","shape":"sun","energy":3}]}))?;
         let mut installed=r.install(scene,std::path::Path::new("."))?;
-        let mut frame=installed.create_frame_slot(&r,Default::default())?;
+        let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
         let output=installed.render_frame(&r,&mut frame,0.)?;
         let v=frame.view.decoupled.as_ref().unwrap();
         assert!(u64::from(side)*u64::from(side)*u64::from(samples)>records);
@@ -2036,13 +2102,13 @@ mod tests {
         let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
         let mut scene=crate::load_test_fixture(&root.join("jitter-aa.json"), include_str!("../../tests/presets/jitter-aa-f8d98a5b.json"))?;
         scene.render.resolution=[64,64];scene.render.settings.samples=1;
-        let render=|scene:Scene,direct:bool| -> Result<Vec<u8>> {
+        let render=|scene:Scene,direct:bool| -> Result<Vec<[f32;4]>> {
             let mut installed=r.install(scene,&root)?;
-            let mut frame=installed.create_frame_slot(&r,Default::default())?;
+            let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
             assert_eq!(frame.view.decoupled.as_ref().unwrap().direct_keys,direct);
             // Direct work skips classification; timestamp readback must never resolve
             // its unwritten timestamp pair (a driver query wait can hang).
-            Ok(installed.render_frame(&r, &mut frame, 0.)?.rgba)
+            Ok(installed.render_frame(&r, &mut frame, 0.)?.linear_rgba.unwrap())
         };
         // The authored transmissive sphere exercises the original grouped crash.
         render(scene.clone(),false)?;
@@ -2065,14 +2131,14 @@ mod tests {
         }
         assert_ne!(diffused,render(tiny_radius,false)?,"diffusion must affect visible pixels");
         // An invisible-to-lighting off-screen blend switches grouping on without
-        // changing any camera pixel. Both routes must render identical bytes.
+        // changing any camera pixel. Both routes must preserve the linear image within float noise.
         scene.materials.insert("offscreen-blend".into(),vork_scene::v2::from_test_value(serde_json::json!({
             "opacity":"transmittance","inputs":{"geometry_opacity":0.5}}))?);
         scene.nodes.push(vork_scene::v2::from_test_value(serde_json::json!({"type":"mesh","name":"offscreen-blend","geometry":"unit_box","materials":["offscreen-blend"],"visible_shadow":false,"visible_diffuse":false,"visible_glossy":false,"translation":[10000,0,0]}))?);
-        assert_eq!(direct,render(scene.clone(),false)?);
+        crate::test_linear::assert_linear_eq(&direct,&render(scene.clone(),false)?);
         diffusion.materials.insert("offscreen-blend".into(),scene.materials["offscreen-blend"].clone());
         diffusion.nodes.push(scene.nodes.last().unwrap().clone());
-        assert_eq!(diffused,render(diffusion,false)?);
+        crate::test_linear::assert_linear_eq(&diffused,&render(diffusion,false)?);
         Ok(())
     }
     #[test]
@@ -2095,16 +2161,16 @@ mod tests {
             "nodes":nodes,
             "render":{"resolution":[2,2],"settings":{"integrator":"raster","samples":64,"reflections":"environment","fast_gi":null},"display":{"program":"std/standard","inputs":{"dither_intensity":0.}}}
         }))?;
-        let render=|scene:Scene,indexed:bool|->Result<Vec<u8>> {
+        let render=|scene:Scene,indexed:bool|->Result<Vec<[f32;4]>> {
             let require_overflow=scene.render.resolution[0]==2;
             let options=crate::InstallOptions {reservations:crate::Reservations {visibility_pool:4096,..Default::default()},..Default::default()};
             let mut installed=r.install_with_options(scene,std::path::Path::new("."),options)?;
-            let mut frame=installed.create_frame_slot(&r,Default::default())?;
+            let mut frame=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
             assert_eq!(frame.view.decoupled.as_ref().unwrap().evaluation.classification.as_ref().map(Vec::len),Some(if indexed {2} else {3}));
             if indexed && installed.render.resolution[1]>8 {
                 assert!(frame.view.decoupled.as_ref().unwrap().bands>1);
             }
-            let pixels=installed.render_frame(&r, &mut frame, 0.)?.rgba;
+            let pixels=installed.render_frame(&r, &mut frame, 0.)?.linear_rgba.unwrap();
             if !require_overflow || !indexed {return Ok(pixels);}
             let readback=r.device.create_buffer(&wgpu::BufferDescriptor {label:Some("overflow allocation proof"),size:4,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false});
             let mut encoder=r.device.create_command_encoder(&Default::default());
@@ -2124,10 +2190,10 @@ mod tests {
                 for node in &mut scene.nodes[1..] {node.transform.scale[1]=9.5;}
             }
             let indexed=render(scene.clone(),true)?;
-            assert!(indexed.chunks_exact(4).any(|p|p[..3]!=indexed[..3]),"different camera pixels must retain different bands");
+            assert!(indexed.iter().any(|p|p[..3]!=indexed[0][..3]),"different camera pixels must retain different bands");
             scene.materials.insert("offscreen-blend".into(),vork_scene::v2::from_test_value(serde_json::json!({"opacity":"transmittance","inputs":{"geometry_opacity":0.5}}))?);
             scene.nodes.push(vork_scene::v2::from_test_value(serde_json::json!({"type":"mesh","geometry":"quad","materials":["offscreen-blend"],"visible_shadow":false,"visible_diffuse":false,"visible_glossy":false,"translation":[10000,0,0]}))?);
-            assert_eq!(indexed,render(scene,false)?,"slot addressing and compacted work preserve pixels at {resolution:?}");
+            crate::test_linear::assert_linear_eq(&indexed,&render(scene,false)?);
         }
         Ok(())
     }

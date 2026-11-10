@@ -1,4 +1,0 @@
-post: white balance colour adaptation. Inputs: post --all.
-<!-- all -->
-Program: "program":"post/white_balance" in render.compositor.
-post/white_balance: source white to D65; temperature 6500 K (1800..100000), tint 10 (-500..500); preserves alpha, affects linear outputs.

@@ -10,6 +10,7 @@ programs trace beauty, depth, normals and IDs from their rays and export no K or
 
 `CameraContext`: film_size (pixels), filtered uv, lens_sample ([0,1)²), time,
 world origin/right/up/forward, focus_distance (object depth or -1).
+`uv = (pixel + 0.5 + filter_offset) / film_size` uses zero-based pixel coordinates, normalized to the film extent with (0,0) at the top-left corner and (1,1) at the bottom-right; x increases right and y down, `film_size` is (width,height) in pixels, and per-sample pixel-filter offsets can place `uv` outside [0,1].
 `CameraRay`: world origin/direction, weight (RGB; default 1), wavelength_scale
 (default 1), t_min/t_max (metres along normalized direction; geometry visibility).
 Lens samples are independent per path; weight includes any radiometric Jacobian.

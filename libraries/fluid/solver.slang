@@ -1,4 +1,4 @@
-import std.particles;
+import fluid.particles;
 
 // APIC/FLIP solver. Include after the authored configuration and boundary functions.
 // The coarse Zhu–Bridson boundary drives pressure; Yu–Turk density drives rendering.
@@ -40,7 +40,7 @@ float pressure_at(int3 p) {return pa_load(index(p));}
 // Exact compact ellipsoid gathers. The enclosing sphere rejects only zero weights.
 float marker_field(float3 p) {
  // Private raw reconstruction: +infinity certifies solid samples. The public
- // field is finite again after marker_publish, and NaNs still report failure.
+ // field is finite again after marker_publish; status reports failures.
  if(container(p)>=0.) return asfloat(0x7f800000u);
  float support=asfloat(~bounds_load(6u));int3 lo,hi;query_bins(p,support,lo,hi);
  lo=max(lo,int3(bounds_load(0),bounds_load(1),bounds_load(2)));
@@ -94,67 +94,7 @@ float particle_velocity(float3 p,uint axis,out float mass) {
     }
     mass=weight;return weight>0. ? sum/weight : 0.;
 }
-// Volume integration and publication must use the same clipped field. Otherwise
-// regularized occupancy on the domain boundary is counted, then discarded.
-float published_field(float source,float wall,float offset,int3 cell) {
-    if(!isfinite(source) && asuint(source)!=0x7f800000u) return source;
-    float shifted=source<2.*DOMAIN ? source+offset : source;
-    float f=asuint(source)==0x7f800000u ? wall : max(shifted,wall);
-    if(any(cell==int3(0)) || any(cell==int3(surface_dims)-1))
-        f=max(f,(2.*DOMAIN)/float(surface_dims.x));
-    return f;
-}
-
-// Exact X integral of a linear-over-linear Y occupancy on one sign interval.
-float ratio_average(float n0,float d0,float n1,float d1) {
- float f0=d0>0. ? saturate(n0/d0) : 0.,f1=d1>0. ? saturate(n1/d1) : 0.;
- if(d0<=0.) return f1;if(d1<=0.) return f0;
- if(d0>d1) {float t=d0;d0=d1;d1=t;t=f0;f0=f1;f1=t;}
- float r=d1/d0,e=r-1.,w;
- if(e<.1) w=.5+e*(1./6.+e*(-1./12.+e*(1./20.+e*(-1./30.+e/42.))));
- else w=isfinite(r) ? r/e*(1.-log(r)/e) : 1.;
- return lerp(f0,f1,w);
-}
-float occupied_x(float a0,float a1,float b0,float b1) {
- float cuts[4];cuts[0]=0.;cuts[1]=1.;uint count=2;
- if(a0*a1<0.) cuts[count++]=a0/(a0-a1);
- if(b0*b1<0.) cuts[count++]=b0/(b0-b1);
- for(uint i=1;i<count;i++) for(uint j=i;j>0 && cuts[j]<cuts[j-1];j--) {float t=cuts[j];cuts[j]=cuts[j-1];cuts[j-1]=t;}
- float sum=0.;
- for(uint i=1;i<count;i++) {
-  float lo=cuts[i-1],hi=cuts[i],mid=.5*(lo+hi);
-  float a=lerp(a0,a1,mid),b=lerp(b0,b1,mid);
-  if(a<=0. && b<=0.) {sum+=hi-lo;continue;}
-  if(a>=0. && b>=0.) continue;
-  float al=lerp(a0,a1,lo),ah=lerp(a0,a1,hi),bl=lerp(b0,b1,lo),bh=lerp(b0,b1,hi);
-  sum+=(hi-lo)*(a<0. ? ratio_average(-al,bl-al,-ah,bh-ah) : ratio_average(-bl,al-bl,-bh,ah-bh));
- }
- return sum;
-}
-float occupied_cell(float f[8]) {
- // Split at edge zeros and changes in the order of the two X crossings.
- // Thus narrow corner parcels cannot fall between quadrature samples.
- float cuts[8];cuts[0]=0.;cuts[1]=1.;uint count=2;
- for(uint k=0;k<4;k++) if(f[k]*f[k+4]<0.) cuts[count++]=f[k]/(f[k]-f[k+4]);
- float a=f[4]-f[0],b=f[5]-f[1],c=f[6]-f[2],d=f[7]-f[3];
- float qa=a*d-b*c,qb=f[0]*d+a*f[3]-f[1]*c-b*f[2],qc=f[0]*f[3]-f[1]*f[2];
- float roots[2];uint nr=0;
- if(qa!=0.) {float disc=qb*qb-4.*qa*qc;if(disc>=0.) {float r=sqrt(disc);roots[nr++]=(-qb-r)/(2.*qa);roots[nr++]=(-qb+r)/(2.*qa);}}
- else if(qb!=0.) roots[nr++]=-qc/qb;
- for(uint k=0;k<nr;k++) if(roots[k]>0. && roots[k]<1.) cuts[count++]=roots[k];
- for(uint i=1;i<count;i++) for(uint j=i;j>0 && cuts[j]<cuts[j-1];j--) {float t=cuts[j];cuts[j]=cuts[j-1];cuts[j-1]=t;}
- static const float nodes[16]={.0052995325,.0277124885,.0671843988,.1222977958,.1910618778,.2709916112,.3591982246,.4524937451,.5475062549,.6408017754,.7290083888,.8089381222,.8777022042,.9328156012,.9722875115,.9947004675};
- static const float weights[16]={.0135762297,.0311267620,.0475792558,.0623144856,.0747979944,.0845782597,.0913017075,.0947253052,.0947253052,.0913017075,.0845782597,.0747979944,.0623144856,.0475792558,.0311267620,.0135762297};
- float sum=0.;
- for(uint i=1;i<count;i++) {
-  float width=cuts[i]-cuts[i-1];if(width<=0.) continue;
-  for(uint k=0;k<16;k++) {
-   float z=cuts[i-1]+width*nodes[k];
-   sum+=width*weights[k]*occupied_x(lerp(f[0],f[4],z),lerp(f[1],f[5],z),lerp(f[2],f[6],z),lerp(f[3],f[7],z));
-  }
- }
- return sum;
-}
+#include "fluid/volume.slang"
 
 float rest_density(float3 p) {
  float dx=2.*DOMAIN/float(phi_dims.x);int3 lo,hi;query_bins(p,1.5*dx,lo,hi);float mass=0.;
@@ -188,7 +128,13 @@ void density_boundary_set(uint id,float value) {
 
 
 void compute(ComputeContext ctx,Inputs inputs) {
-    uint id=ctx.id.x;int stage=inputs.stage;    // Certify a bulk neighbourhood before allowing signed density feedback.
+    uint id=ctx.id.x;int stage=inputs.stage;
+#ifdef VORK_FLUID_STATUS_BOUND
+    if(stage==0 && id==0) fluid_status_store(0,0u);
+#endif
+    // Status is sticky and checked at the output fence. Ordinary simulation
+    // kernels need no receipt read; failing producers retain the first cause.
+    // Certify a bulk neighbourhood before allowing signed density feedback.
     // Two pressure cells cover the quadratic B-spline support.
     if(stage==31 || stage==32 || stage==33) {
      if(id>=phi_count) return;
@@ -294,7 +240,13 @@ void compute(ComputeContext ctx,Inputs inputs) {
     if(stage==17) {
         if(id>=markers_count) return;
         float3 q=markers_load(id);if(landed_load(id)==3u) return;
-        if(!all(isfinite(q)) || any(abs(q-DOMAIN_ORIGIN)>DOMAIN_EXTENT-MARKER_SPACING)) {overflow_atomic_min(0,0u);return;}
+        if(!all(isfinite(q)) || any(abs(q-DOMAIN_ORIGIN)>DOMAIN_EXTENT-MARKER_SPACING)) {
+            overflow_atomic_min(0,0u);
+#ifdef VORK_FLUID_STATUS_BOUND
+            fluid_status_atomic_compare_exchange(0,0u,1u);
+#endif
+            return;
+        }
         int3 c=clamp(int3(floor((q-DOMAIN_ORIGIN+DOMAIN_EXTENT)*(.5*float(BIN_RES)/DOMAIN))),int3(0),int3(BIN_DIMS)-1);
         // Insert in ascending marker order. Each atomic minimum retains the
         // smaller ID and carries the displaced larger ID to its successor.
@@ -313,7 +265,11 @@ void compute(ComputeContext ctx,Inputs inputs) {
         float3 q=(float3(c)+.5)*(2.*DOMAIN)/float(dims.x)+DOMAIN_ORIGIN-DOMAIN_EXTENT;
         float f=marker_field(q);
         if(any(c==int3(0)) || any(c==int3(dims)-1)) f=max(f,(2.*DOMAIN)/float(dims.x));
+#ifdef VORK_FLUID_STATUS_BOUND
+        if(!isfinite(container(q)) || (!isfinite(f) && asuint(f)!=0x7f800000u)) fluid_status_atomic_compare_exchange(0,0u,4u);
+#else
         if(overflow_load(0)!=0xffffffffu) f=asfloat(0x7fc00000u);
+#endif
         surface_store(id,f);
         return;
     }
@@ -321,6 +277,9 @@ void compute(ComputeContext ctx,Inputs inputs) {
         if(id==0) {
             correction_store(0,0.);correction_store(1,asfloat(0xff800000u));correction_store(2,asfloat(0x7f800000u));
             correction_store(3,0.);correction_store(4,0.);correction_store(5,0.);
+#ifdef VORK_FLUID_STATUS_BOUND
+            correction_store(6,0.);
+#endif
         }
         return;
     }
@@ -349,7 +308,30 @@ void compute(ComputeContext ctx,Inputs inputs) {
         correction_store(4,residual);
         // Monotone continuous occupancy of the actual published trilinear field.
         // A fixed relative ceiling cannot grow with the liquid's surface area.
+#ifdef VORK_FLUID_STATUS_BOUND
+        if(abs(residual)<=max(target*0.0001,0.000001)) {
+            // The same evaluated field must also be a valid trilinear surface.
+            if(sum.x<0.) fluid_status_atomic_compare_exchange(0,0u,5u);
+            correction_store(3,1.);return;
+        }
+        if(!isfinite(residual)) {correction_store(3,-1.);fluid_status_atomic_compare_exchange(0,0u,4u);return;}
+        if(correction_load(6)==0. && iteration==1. && residual<0. &&
+           sum.x+film*film_dx*film_dx/(surface_dx*surface_dx*surface_dx)<target-max(target*0.0001,0.000001)) {
+            // An accepted or over-target evaluation already proves capacity.
+            // Otherwise whole negative cells give a conservative lower bound;
+            // only inconclusive bounds request the exact-capacity pass.
+            correction_store(6,-1.);
+        }
+        // The first distance-family evaluation is its largest admitted volume.
+        // Refuse immediately if the rest ledger lies outside that capacity.
+        if(correction_load(6)==1. && iteration==1. && residual<0.) {
+            correction_store(3,-1.);fluid_status_atomic_compare_exchange(0,0u,2u);return;
+        }
+#else
+        // Preserve the 0.4.0 correction arithmetic and failure publication for
+        // scenes whose six-word correction buffer predates capacity receipts.
         if(abs(residual)<=max(target*0.0001,0.000001)) {correction_store(3,1.);return;}
+#endif
         float lo=correction_load(1),hi=correction_load(2);
         if(residual>0.) lo=offset;else hi=offset;
         correction_store(1,lo);correction_store(2,hi);
@@ -370,6 +352,9 @@ void compute(ComputeContext ctx,Inputs inputs) {
             float dx=2.*DOMAIN/float(surface_dims.x),offset=correction_load(0);
             for(uint y=0;y+1u<surface_dims.y;y++) {
                 float f[8],g[8];float minimum=1e30,maximum=-1e30;
+#ifdef VORK_FLUID_STATUS_BOUND
+                bool full_capacity=true;
+#endif
                 for(uint k=0;k<8;k++) {
                     int3 c=int3(x+(k&1u),y+((k>>1u)&1u),z+(k>>2u));
                     uint at=uint(c.x)+surface_dims.x*(uint(c.y)+surface_dims.y*uint(c.z));
@@ -377,9 +362,18 @@ void compute(ComputeContext ctx,Inputs inputs) {
                     float source=surface_load(at),wall=container(q);
                     f[k]=published_field(source,wall,offset,c);
                     if(any(c==int3(0)) || any(c==int3(surface_dims)-1)) wall=max(wall,dx);
+#ifdef VORK_FLUID_STATUS_BOUND
+                    full_capacity=full_capacity && wall<0. && !(isfinite(source) && source>=2.*DOMAIN);
+#endif
                     g[k]=isfinite(source) && source<2.*DOMAIN && source+offset>wall ? 1. : 0.;
                     minimum=min(minimum,f[k]);maximum=max(maximum,f[k]);
                 }
+#ifdef VORK_FLUID_STATUS_BOUND
+                sum.x+=full_capacity ? 1. : 0.;
+                // Negative sentinel survives the fixed reductions. It is used
+                // only on an accepted offset, not during root iterations.
+                if(minimum==0. && maximum==0.) sum.x=-1e30;
+#endif
                 if(minimum>=0.) continue;
                 if(maximum<=0.) {sum.y+=1.;continue;}
                 float volume=occupied_cell(f);
@@ -398,7 +392,13 @@ void compute(ComputeContext ctx,Inputs inputs) {
             float3 q=(float3(c)+.5)*(2.*DOMAIN)/float(surface_dims.x)+DOMAIN_ORIGIN-DOMAIN_EXTENT;
             float source=surface_load(id);
             float f=source>=2.*DOMAIN && isfinite(source) ? source : published_field(source,container(q),correction_load(0),c);
+#ifdef VORK_FLUID_STATUS_BOUND
+            if(correction_load(3)!=1.) {fluid_status_atomic_compare_exchange(0,0u,3u);return;}
+            if(!isfinite(f)) {fluid_status_atomic_compare_exchange(0,0u,4u);return;}
+            surface_store(id,f);
+#else
             surface_store(id,correction_load(3)==1. ? f : asfloat(0x7fc00000u));
+#endif
         }
         return;
     }

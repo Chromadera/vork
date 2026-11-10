@@ -217,6 +217,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn secondary_compilation_bounds_are_draft_only_and_inherited() {
+        for level in 0..=3 {
+            let profile=Profile::parse("renamed.json",format!(r#"{{"version":1,"level":{level},"settings":{{}}}}"#).as_bytes()).unwrap();
+            for denoise in [false,true] {
+                let intent=serde_json::from_value(serde_json::json!({"samples":64,"denoise":denoise})).unwrap();
+                let settings=profile.resolve(&intent).unwrap();
+                assert_eq!(settings.bounded_secondary_compilation,level==0);
+                let mut scene=Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"}]}"#).unwrap();
+                scene.apply_settings(settings.clone(),"renamed").unwrap();
+                let capture:ImageRender=serde_json::from_value(serde_json::json!({"resolution":[16,16]})).unwrap();
+                assert_eq!(capture.resolve(&scene.render).settings.bounded_secondary_compilation,level==0);
+                let mut fallback=settings;
+                fallback.without_fast_denoiser(level,true);
+                assert_eq!(fallback.bounded_secondary_compilation,level==0);
+            }
+        }
+        assert!(!Settings::default().bounded_secondary_compilation);
+        assert!(!Profile::load(DEFAULT_PROFILE).unwrap().resolve(&Default::default()).unwrap().bounded_secondary_compilation);
+    }
+
+    #[test]
     fn promotion_retains_explicit_denoise_intent() {
         for profile in ["std/previs", "std/draft", "std/final", "std/path"] {
             let profile=Profile::load(profile).unwrap();
@@ -287,17 +308,24 @@ mod tests {
 
     #[test]
     fn shipped_budgets_and_sample_overrides() {
-        for (name, budget) in [("std/draft",4),("std/final",8),("std/previs",4),("std/path",4096)] {
+        for (name, budget) in [("std/draft",4),("std/final",8),("std/previs",4),("std/path",64)] {
             let profile = Profile::load(name).unwrap();
             let default = profile.resolve(&Default::default()).unwrap();
             assert_eq!(default.samples, budget);
             assert_eq!(default.integrator.denoiser().is_some(), name != "std/previs");
+            let undenoised = profile.resolve(serde_json::json!({"denoise":false}).as_object().unwrap()).unwrap();
+            assert_eq!(undenoised.samples, budget);
             for samples in [1, 7, 4096] {
                 let call = CallOverrides::resolve([("samples".into(), serde_json::json!(samples))]).unwrap();
                 let mut expected = default.clone();
                 expected.samples = samples;
                 assert_eq!(profile.resolve(&call.settings).unwrap(), expected);
             }
+        }
+        for denoise in [false, true] {
+            let bytes = serde_json::to_vec(&serde_json::json!({"version":1,"level":2,"settings":{"denoise":denoise}})).unwrap();
+            let custom = Profile::parse("custom", &bytes).unwrap();
+            assert_eq!(custom.resolve(&Default::default()).unwrap().samples, 64);
         }
         let profile = Profile::parse("custom", br#"{"version":1,"level":1,"settings":{"samples":13}}"#).unwrap();
         assert_eq!(profile.resolve(&Default::default()).unwrap().samples, 13);

@@ -10,7 +10,10 @@
 //! boundary is described by [`Abi`]; see docs/PROGRAMS.md.
 mod image_native;
 mod identity;
+mod filesystem;
 pub use identity::{InputIdentity, PreparedModules, PreparedProgram};
+pub mod metal_source;
+
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,6 +91,9 @@ mod hair;
 pub use hair::{HAIR_VEC4S, hair_fields};
 mod openpbr;
 mod native_blend;
+mod native_value;
+/// Outline generated material functions with a value-only native boundary.
+pub use native_value::outline as outline_native_material_functions;
 pub mod progress;
 pub mod registry;
 pub mod renderer_registry;
@@ -109,7 +115,7 @@ mod volume;
 pub use medium::{MEDIUM_FP_FLAGS, MEDIUM_VEC4S, MediumProgram};
 
 /// Changes to reflection/bridge metadata invalidate the shared program artifact key.
-pub const ABI_VERSION: u32 = 42;
+pub const ABI_VERSION: u32 = 43;
 /// Program-visible ABI version, `VORK_ABI` in `import vork`. Bump it when a
 /// public declaration a program can use changes incompatibly.
 pub const PROGRAM_ABI: u32 = 1;
@@ -163,7 +169,7 @@ fn reject_reserved_dependencies(work: &Workspace, dependencies: &[PathBuf]) -> R
     }
     Ok(())
 }
-pub const VERSION: &str = "2026.20";
+pub const VERSION: &str = "2026.21";
 // WGSL and native code must agree on implicit locals and declared field defaults.
 const INITIALIZATION: &str = "-zero-initialize";
 /// Kernel functions a compiled program may call; implemented by the scene shader.
@@ -448,7 +454,7 @@ impl Abi {
         s.push_str(include_str!("propagation_context.slang"));
         s.push_str("public struct EnvironmentContext { public float3 origin; public float3 direction; public float time; public bool camera; };\n");
         // Display stage: unassociated scene-linear Rec.709 after the compositor.
-        s.push_str("public struct DisplayContext { public float3 color; public uint2 pixel; public uint seed; };\n");
+        s.push_str("public struct DisplayContext { public float3 color; public uint2 pixel; public uint seed; public uint bit_depth; };\n");
         s.push_str(include_str!("composite_context.slang"));
         s.push_str("public struct ComputeContext { public uint3 id; public uint frame; public float time; public float dt; public uint seed; };\n");
         s.push_str(&hair::module());
@@ -975,6 +981,7 @@ impl Compiler {
             identity::check_imports(self, &work, snapshot)?;
         }
         let mut code=fs::read(output)?;
+        if metal {metal_source::validate(std::str::from_utf8(&code)?)?;}
         // Slang emits MSL source; its fp-mode flag cannot configure the later
         // Metal compiler invocation in a passthrough API. Carry the precise
         // contract as standard source directives, independent of shader names.
@@ -1054,7 +1061,7 @@ impl Compiler {
                 "Closure c = vork_lobe(surface(ctx, inputs), lobe, u, weight, count);",
                 &format!("vork_begin_blend(0xffffffffu);\n    let selected=vork_lobe(surface(ctx, inputs), lobe, u, weight, count);\n    vork_begin_blend(selected.leaf);\n    [loop] while(!vork_blend_done()) {{surface(ctx, inputs);vork_continue_blend();}}\n    weight=vork_blend_weight();\n    Closure c=vork_replay_closure(selected.geometry_opacity);"),
             );
-            format!("#ifdef VORK_PATH_SLANG_OUTLINE\n[noinline]\n#endif\n{wrapper}")
+            outline_native_material_functions(&format!("#ifdef VORK_PATH_SLANG_OUTLINE\n[noinline]\n#endif\n{wrapper}"))
         } else { function };
         let function = if is_hair { function.replace("Closure c = surface(ctx, inputs);", "Hair c = surface(ctx, inputs);") } else { function };
         let mut slang = program_text(source, origin) + &function;
@@ -1190,6 +1197,20 @@ impl Compiler {
             program_text(source,origin), field("subsurface_weight"), field("transmission_weight"), anisotropy=field("specular_roughness_anisotropy"), film=field("thin_film_weight"), dispersion=format!("({})*({})",field("transmission_weight"),field("transmission_dispersion_scale")), coat=field("coat_weight"), fuzz=field("fuzz_weight"), decode=inputs.slang_decode(), emission_effect=registry::EFFECT_SURFACE_EMISSION);
         let output = self.run(&work, &probe, &includes, false)?;
         Ok((EffectProbe::parse(&output.wgsl, lit)?.capabilities(&[]), output.wgsl))
+    }
+
+    /// Reflect authorable Inputs without compiling a stage or choosing a backend.
+    pub fn reflect_inputs(&self, abi: &Abi, source: &str, origin: &Path) -> Result<InputLayout> {
+        self.version()?;
+        let work = Workspace::new()?;
+        write_modules(&work, abi, source)?;
+        let mut includes = vec![work.0.clone()];
+        includes.extend(include_paths(origin));
+        let probe = format!("{}\nConstantBuffer<Inputs> vork_inputs;\n[shader(\"compute\")][numthreads(1,1,1)] void vork_entry() {{}}", program_text(source, origin));
+        let output = self.run(&work, &probe, &includes, true)?;
+        let mut inputs = InputLayout::reflect(&output.reflection)?;
+        enums::reflect(&work.0, &mut inputs)?;
+        Ok(inputs)
     }
 
     /// Discover module-level stage declarations using the compiler AST, including imports.
@@ -1399,20 +1420,19 @@ mod reserved_tests {
         let internal = module_source("std/grid").unwrap();
         assert!(reject_reserved(internal, "library").is_err());
         assert!(reject_reserved(&format!("// edited\n{internal}"), "library").is_err());
-        let bloom = module_source("std/bloom").unwrap();
-        reject_reserved(bloom, "library").unwrap();
-        reject_reserved(&format!("// edited\n{bloom}"), "library").unwrap();
+        let compositor = "import vork; float4 composite(CompositeContext ctx) { return compositor_sample(ctx.uv); }";
+        reject_reserved(compositor, "program").unwrap();
+        reject_reserved(&format!("// edited\n{compositor}"), "program").unwrap();
     }
 }
 
 fn write_modules(work: &Workspace, abi: &Abi, source: &str) -> Result<()> {
     reject_reserved(source, "program")?;
     fs::write(work.0.join("vork.slang"), abi.module())?;
-    for library in vork_scene::libraries::LIBRARIES {
-        fs::create_dir(work.0.join(library.name))?;
-    }
     for module in library_modules() {
-        fs::write(work.0.join(format!("{}.slang", module.name)), module.source)?;
+        let path = work.0.join(format!("{}.slang", module.name));
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, module.source)?;
     }
     for (name, source) in KERNEL_MODULES {
         fs::write(work.0.join(format!("{name}.slang")), source)?;
@@ -1463,7 +1483,7 @@ struct Output {
     declarations: BTreeSet<String>,
 }
 
-// Slang 2026.20's AST dump is generated by the successful reflection probe.
+// Slang 2026.21's AST dump is generated by the successful reflection probe.
 // Read declaration records, not diagnostics or source text (comments/macros/imports
 // cannot manufacture a stage). Only module-level functions are stage candidates.
 fn probe_declarations(work: &Path) -> Result<BTreeSet<String>> {
@@ -1824,10 +1844,14 @@ impl Workspace {
             let path =
                 std::env::temp_dir().join(format!("vork-slang-{}-{serial}", std::process::id()));
             match fs::create_dir(&path) {
-                // Canonical, so dependency paths slangc reports (macOS /var -> /private/var) compare as inside.
-                // Not on Windows: canonical paths there are \\?\ verbatim paths, which slangc cannot import from.
-                Ok(()) if cfg!(windows) => return Ok(Self(path)),
-                Ok(()) => return Ok(Self(path.canonicalize()?)),
+                // Match the compiler's canonical dependency spelling, including
+                // Windows short TEMP names, without its unsupported verbatim prefix.
+                Ok(()) => {
+                    let path = path.canonicalize()?;
+                    #[cfg(windows)]
+                    let path = PathBuf::from(filesystem::compiler_path(&path));
+                    return Ok(Self(path));
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e.into()),
             }

@@ -19,3 +19,6 @@ libc = "0.2"
 [dev-dependencies.vork-scene]
 path = "../vork-scene"
 features = ["test-support"]
+
+[build-dependencies]
+cc = "1"

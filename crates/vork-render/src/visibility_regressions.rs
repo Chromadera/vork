@@ -50,3 +50,50 @@ fn hidden_world_medium_has_no_absorption_or_emission() -> Result<()> {
     }
     Ok(())
 }
+
+/// BB105: a hidden middle TLAS slot must not corrupt the later live slot on CPU.
+#[test]
+fn hidden_geometry_matches_deleted_geometry() -> Result<()> {
+    let Some(r) = crate::test_renderer()? else { return Ok(()); };
+    let input: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/hidden-geometry-bb105.json"))?;
+    let render = |input: serde_json::Value, times: &[f32]| -> Result<Vec<Vec<[f32; 4]>>> {
+        let mut scene = crate::test_scene(input, Path::new("."))?;
+        scene.render.settings = vork_scene::Profile::load("std/path")?.resolve(
+            serde_json::json!({"samples": 1, "denoise": false, "seed": 0}).as_object().unwrap())?;
+        let installed = r.install(scene, Path::new("."))?;
+        let mut slot = installed.create_frame_slot(&r, ReadbackPrecision::Float)?;
+        let mut frames = Vec::new();
+        for &time in times {
+            slot.submit_outputs(&installed, &r, time, ReadbackOutputs { float: FloatOutputs { color: true, ..Default::default() }, ..Default::default() })?;
+            let pixels = slot.collect(&r)?.linear_rgba.context("BB105 linear colour")?;
+            assert!(pixels.iter().flatten().all(|c| c.is_finite()));
+            frames.push(pixels);
+        }
+        Ok(frames)
+    };
+    let hidden = render(input.clone(), &[0.])?;
+    let mut visible = input.clone();
+    visible["nodes"][1]["visible"] = true.into();
+    let visible = render(visible, &[1.])?;
+    assert_eq!(visible[0].len(), hidden[0].len());
+    let mut deleted = input.clone();
+    deleted["nodes"].as_array_mut().unwrap().remove(1);
+    let deleted = render(deleted, &[0.])?;
+    assert!(hidden == deleted, "hidden and deleted geometry must produce identical linear pixels");
+    // Reuse a frame slot through visibility changes and a backward seek. The
+    // software placeholder must restore the real BLAS when visibility returns.
+    let mut animated = input;
+    // The repro's fox is behind the screen. Bring it in front for an observable
+    // reactivation check, while retaining the unmodified three controls above.
+    animated["nodes"][1]["translation"][2] = 1.into();
+    animated["nodes"][1]["visible"] = true.into();
+    let visible_front = render(animated.clone(), &[1.])?;
+    assert!(visible_front[0] != hidden[0], "reactivated geometry must affect pixels");
+    animated["animation"] = serde_json::json!([{"tracks":[{"path":["nodes","fox","visible"],"keys":[[0,false],[1,true]]}]}]);
+    let animated = render(animated, &[0., 1., 0.])?;
+    assert!(animated[0] == hidden[0], "initial hidden animation frame");
+    assert!(animated[1] == visible_front[0], "reactivated geometry");
+    assert!(animated[2] == hidden[0], "backward seek to hidden geometry");
+    r.errors.check()?;
+    Ok(())
+}

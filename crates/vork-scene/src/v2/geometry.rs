@@ -40,9 +40,9 @@ pub struct Buffer {
     /// OpenVDB/NanoVDB field name; buffer.type describes voxel values.
     #[schemars(extend("x-source" = "OpenVDB/NanoVDB; USD OpenVDBAsset fieldName", "x-help-path" = "buffer.grid", "x-help" = "name|null; .vdb/.nvdb only; f32 or vec3 voxels"))]
     pub grid: Option<String>,
-    /// Dense typed array, x contiguous. Initially zero unless data is supplied.
+    /// Dense typed array, x contiguous. Initially zero unless data or a binary file is supplied.
     /// Field consumers interpret cell centres in local [-1,1]³.
-    #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.dims", "x-help" = "[u32,u32,u32]|null; positive dense typed array dimensions; non-file; x contiguous; field cell centres span local [-1,1]³"))]
+    #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.dims", "x-help" = "[u32,u32,u32]|null; positive dense typed array dimensions; data or binary file optional; file count defaults to dims product and must match it; x contiguous; field cell centres span local [-1,1]³"))]
     pub dims: Option<[u32; 3]>,
     #[serde(default)]
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "buffer.offset", "x-help" = "u64; bytes, multiple of 4"))]
@@ -116,12 +116,25 @@ pub struct Geometry {
     #[schemars(extend("x-source" = "vork", "x-help-path" = "geometry.count", "x-help" = "one-element u32 buffer|null; points only; overflow rejects the exposure"))]
     #[schemars(with = "Option<NameOr<Buffer>>")]
     pub count: Option<String>,
+    /// Solver-owned sticky failure receipt, collected with evaluated geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-source" = "vork", "x-help-path" = "geometry.status", "x-help" = "{buffer,message}|null; one u32, zero succeeds, nonzero rejects output with message and value; producer keeps failure sticky until reset"))]
+    pub status: Option<GeometryStatus>,
     #[serde(default)]
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "geometry.material_ranges", "x-help" = "{start,count,material_index}[]; partition indices into node.materials slots; empty = one material"))]
     pub material_ranges: Vec<MaterialRange>,
     #[serde(default)]
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "geometry.morphs", "x-help" = "{name:{POSITION,NORMAL?}}"))]
     pub morphs: Table<Morph>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GeometryStatus {
+    #[schemars(extend("x-source" = "vork", "x-help-path" = "geometry.status.buffer", "x-help" = "one-element u32 buffer-name|inline buffer; zero succeeds, nonzero rejects the exposure"))]
+    #[schemars(with = "NameOr<Buffer>")]
+    pub buffer: String,
+    #[schemars(extend("x-source" = "vork", "x-help-path" = "geometry.status.message", "x-help" = "nonempty failure message including producer identity and remedy; reported u32 value appended"))]
+    pub message: String,
 }
 /// An undirected cage edge. Crease is OpenSubdiv sharpness: 0 is smooth; 10 or greater is infinitely sharp.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

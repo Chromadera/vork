@@ -12,29 +12,26 @@ struct AreaStep {uint4 value;uint4 emission;}; // support base, first node, coun
 // wgpu Metal binding arrays are one argument buffer of resource handles.
 #ifdef VORK_METAL
 [[vk::binding(0,3)]] ParameterBlock<RayHitBuffersTable> source_hit_buffers : register(b9);
-uint source_load(uint buffer,uint i) {return source_hit_buffers.buffers[buffer][i];}
+
 #else
 [[vk::binding(0,3)]] StructuredBuffer<uint> source_hit_buffers[REG_RAY_HIT_BUFFERS] : register(t9);
-uint source_load(uint buffer,uint i) {return source_hit_buffers[NonUniformResourceIndex(buffer)][i];}
+
 #endif
-struct AreaGeometry : IHitGeometry {
-    static uint word(uint i) {return source_words[i];}
-    static uint load(uint buffer,uint i) {return source_load(buffer,i);}
-}
+typedef RayGeometry AreaGeometry;
 uint area_index(uint3 group,uint lane) {return (group.y*area_step.value.w+group.x)*REG_EMITTER_WEIGHT_GROUP+lane;}
 [shader("compute")][numthreads(REG_EMITTER_WEIGHT_GROUP,1,1)]
 void areas(uint3 group:SV_GroupID,uint lane:SV_GroupIndex) {
     let i=area_index(group,lane);if(i>=area_step.value.z) {return;}
     let base=area_step.value.x;let count=source_words[base+1u];var area=0.;
     if(i<count) {
-        let source=emitter_mesh_triangle<AreaGeometry>(base,i);
-        if (objects[source.object].metadata.y!=0u) {area=hit_emitter<AreaGeometry>(source.instance,source.primitive,source.object,(float3x4)object_normal(source.object),float2(0.)).area;}
+        let source=emitter_mesh_triangle<AreaGeometry>(AreaGeometry(source_words,source_hit_buffers),base,i);
+        if (objects[source.object].metadata.y!=0u) {area=hit_emitter<AreaGeometry>(AreaGeometry(source_words,source_hit_buffers),source.instance,source.primitive,source.object,(float3x4)object_normal(source.object),float2(0.)).area;}
     }
     // Builtin factors come from this frame's animated material records. For
     // arbitrary programs the current world area remains a complete proposal;
     // never infer zero support from a point evaluation or initial input values.
     if(i<count && area>0.) {
-        let source=emitter_mesh_triangle<AreaGeometry>(base,i);
+        let source=emitter_mesh_triangle<AreaGeometry>(AreaGeometry(source_words,source_hit_buffers),base,i);
         let record=source_materials[objects[source.object].material_index];
         if(record.tag.x==0u) {
             let c=area_step.emission.x;let l=area_step.emission.y;

@@ -227,7 +227,7 @@ test('SDK render options map to vork render flags', () => {
 test('SDK writes std shapes to the buffer sidecar', async () => {
  const directory = await mkdtemp(join(tmpdir(), 'vork-sdk-shapes-'));
  try {
-  const shape = sdk.sphere('ball');
+  const shape = sdk.roundedBox('ball');
   const path = await sdk.writeScene({version:2, ...shape, nodes:[{type:'mesh', geometry:'ball'}]}, join(directory, 'ball.json'));
   const saved = JSON.parse(await readFile(path, 'utf8'));
   for (const buffer of Object.values(saved.buffers)) assert.match(buffer.file, /^ball\.json\.buffers\.[0-9a-f-]+\.bin$/);
@@ -379,7 +379,7 @@ test('relocation preserves expanded text geometry and nested display images', {s
   const text = sdk.text('label',options);
   const display = {program:'blender/filmic',inputs:{lut:{image:{file:'lut.exr'}}}};
   const scene = {version:2,...text,nodes:[{type:'mesh',geometry:{...text.geometry.label}}],
-    render:{display},images:{capture:{render:{compositor:[{program:'post/white_balance',
+    render:{display},images:{capture:{render:{compositor:[{program:'authored_white_balance',
       inputs:{texture:{image:{file:'nested.exr'}}}}]}}}};
   try {
     const path = await sdk.writeScene(scene,join(directory,'out/scene.json'),directory);
@@ -438,3 +438,43 @@ test('frame selection uses flags, never --set keys', () => {
    assert.equal(await readFile(unrelated,'utf8'),'unrelated');
   } finally {await rm(directory,{recursive:true,force:true});}
  });
+
+test('SDK preserves explicit geometry stage order', async () => {
+ const directory=await mkdtemp(join(tmpdir(),'vork-stage-order-'));
+ const scene={version:2,nodes:[],geometry_stages:['displace','deform','compute']};
+ try {
+  const path=await sdk.writeScene(scene,join(directory,'scene.json'));
+  assert.deepEqual(JSON.parse(await readFile(path,'utf8')).geometry_stages,scene.geometry_stages);
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+
+test('dense fields round trip through check below, at and above 4 KiB', async () => {
+  const binary=process.env.VORK_BIN ?? resolve(process.env.CARGO_TARGET_DIR ?? '../../target','release','vork');
+  const directory=await mkdtemp(join(tmpdir(),'vork-bb107-'));
+  try {
+    for(const x of [15,16,17]) {
+      const data=Array.from({length:x*8*8},(_,i)=>i%x-(x-1)/2);
+      const scene={version:2,buffers:{field:{type:'f32',dims:[x,8,8],data}},
+        geometry:{shape:{topology:'implicit',attributes:{field:'field'}}},
+        nodes:[{type:'mesh',geometry:'shape'},{type:'camera'}]};
+      const path=await sdk.writeScene(scene,join(directory,`scene-${x}.json`));
+      const saved=JSON.parse(await readFile(path,'utf8')).buffers.field;
+      assert.deepEqual(saved.dims,[x,8,8]);
+      if(x<16) assert.deepEqual(saved.data,data);
+      else {
+        assert.equal(saved.count,data.length);
+        assert.equal(saved.offset,0);
+        const bytes=await readFile(join(directory,saved.file));
+        assert.deepEqual(Array.from({length:data.length},(_,i)=>bytes.readFloatLE(i*4)),data);
+      }
+      const result=spawnSync(binary,['check',path],{encoding:'utf8'});
+      assert.equal(result.status,0,result.stderr ?? String(result.error));
+      assert.deepEqual(scene.buffers.field.data,data);
+      if(x>=16) {
+        scene.buffers.field.dims=[2,2,2];
+        await assert.rejects(()=>sdk.writeScene(scene,join(directory,'invalid.json')),/dims product/);
+      }
+    }
+  } finally {await rm(directory,{recursive:true,force:true});}
+});

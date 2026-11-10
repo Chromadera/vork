@@ -4,9 +4,9 @@ import * as sdk from '../dist/index.js';
 import {checkOptions} from '../dist/lib/validate.js';
 
 test('shape options suggest names and reject the misspelling', () => {
-  for (const generate of [options => sdk.sphere('ball', options)]) {
+  for (const generate of [options => sdk.roundedBox('ball', options)]) {
     assert.throws(() => generate({raduis:2}), /unknown option "raduis"; did you mean "radius"\? Valid names:/);
-    assert.throws(() => generate({zzzzzzzz:2}), error => !error.message.includes('did you mean') && /Valid names:/.test(error.message) && ['radius','rings','segments'].every(name => error.message.includes(name)));
+    assert.throws(() => generate({zzzzzzzz:2}), error => !error.message.includes('did you mean') && /Valid names:/.test(error.message) && ['radius','size','segments'].every(name => error.message.includes(name)));
   }
   assert.throws(() => sdk.extrude('plate',{outline:[],depht:2}), /did you mean "depth"/);
 });

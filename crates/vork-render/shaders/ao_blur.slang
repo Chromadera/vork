@@ -8,7 +8,7 @@ import vork_prelude;
 [[vk::binding(5, 0)]] Texture2D<float4> blur_incident_input : register(t4);
 // Guide records retain raw visibility variance and the actual beauty count.
 [[vk::binding(6,0)]] StructuredBuffer<float4> raw_moments : register(t1);
-struct FilterScale {uint4 stride;};
+struct FilterScale {uint4 stride;uint4 tile;};
 [[vk::binding(7,0)]] ConstantBuffer<FilterScale> filter_scale : register(b2);
 float visibility_variance(int2 pixel,uint width) {
     let guide=raw_moments[(uint(pixel.y)*width+uint(pixel.x))*2u+1u];
@@ -62,10 +62,14 @@ void blur_axis(uint2 pixel,int2 axis) {
 [shader("compute")]
 [numthreads(REG_COMPUTE_TILE, REG_COMPUTE_TILE, 1)]
 void horizontal(uint3 gid : SV_DispatchThreadID) {
+    if(any(gid.xy>=filter_scale.tile.zw)) return;
+    gid.xy+=filter_scale.tile.xy;
     blur_axis(gid.xy,int2(1,0));
 }
 [shader("compute")]
 [numthreads(REG_COMPUTE_TILE, REG_COMPUTE_TILE, 1)]
 void vertical(uint3 gid : SV_DispatchThreadID) {
+    if(any(gid.xy>=filter_scale.tile.zw)) return;
+    gid.xy+=filter_scale.tile.xy;
     blur_axis(gid.xy,int2(0,1));
 }

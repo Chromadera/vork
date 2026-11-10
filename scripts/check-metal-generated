@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Install final/path scenes without a GPU and validate every emitted MSL module."""
+import argparse
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from metal_compile import compile_all
+
+
+def file_scope_acceleration_structures(source):
+    # Ignore comments, quoted strings and preprocessor lines before tracking
+    # scopes. Context fields and entry arguments are legal and must not match.
+    source = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|^[ \t]*#[^\n]*',
+                    lambda m: '\n' * m[0].count('\n'), source,
+                    flags=re.MULTILINE | re.DOTALL)
+    tokens = re.findall(r'[A-Za-z_]\w*|[^\s]', source)
+    braces = parens = 0
+    violations = []
+    for at, token in enumerate(tokens):
+        if token == '{':
+            braces += 1
+        elif token == '}':
+            braces -= 1
+        elif token == '(':
+            parens += 1
+        elif token == ')':
+            parens -= 1
+        elif token == 'acceleration_structure' and braces == parens == 0 and tokens[at + 1:at + 2] == ['<']:
+            angle, end = 1, at + 2
+            while end < len(tokens) and angle:
+                angle += (tokens[end] == '<') - (tokens[end] == '>')
+                end += 1
+            while end < len(tokens) and tokens[end] in ('const', 'volatile', 'thread', 'device', 'constant', '*', '&'):
+                end += 1
+            if end + 1 < len(tokens) and tokens[end + 1] in (';', '=', '[', ','):
+                violations.append(tokens[end])
+    return violations
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--scan', type=Path, help='scan existing MSL instead of installing scenes')
+    parser.add_argument('--apple', action='store_true', help='also invoke Apple metal compiler')
+    parser.add_argument('--release', action='store_true')
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix='vork-metal-generated-') as temporary:
+        directory = (args.scan or args.output or Path(temporary)).resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        if not args.scan:
+            if any(directory.glob('*.metal')):
+                parser.error('output already contains MSL; use an empty directory to avoid stale modules')
+            command = ['cargo', 'test', '--locked', '-p', 'vork-render', '--lib']
+            if args.release:
+                command.append('--release')
+            command += ['metal_generated_tests::installed_scene_modules', '--', '--exact', '--ignored', '--nocapture']
+            subprocess.run(command, check=True, env={**os.environ,
+                'VORK_INSTALLED_METAL_DIR': str(directory),
+                'VORK_SHADER_TARGETS': 'spirv,metal',
+                'VORK_CACHE_DIR': str(Path(temporary) / 'cache')})
+        shaders = sorted(directory.glob('*.metal'))
+        if not shaders:
+            raise SystemExit('no installed MSL modules captured')
+        failed = 0
+        for shader in shaders:
+            source = shader.read_text()
+            if not source.strip():
+                raise SystemExit(f'empty MSL module: {shader}')
+            bad = file_scope_acceleration_structures(source)
+            if bad:
+                print(f'::error file={shader}::file-scope acceleration structure: {bad}', file=sys.stderr)
+                failed += 1
+        if args.apple:
+            failed += compile_all(shaders)
+        print(f'Installed Metal: {len(shaders)} modules checked, {failed} failures', flush=True)
+        return bool(failed)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

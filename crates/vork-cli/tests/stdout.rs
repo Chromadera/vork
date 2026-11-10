@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 fn closed_consumers_terminate_successfully_without_panics() {
     let root = std::env::temp_dir().join(format!("vork-stdout-init-{}", std::process::id()));
     let project = root.to_str().unwrap();
-    for args in [vec!["std", "sphere", "{}"], vec!["help", "programs", "--all"],
+    for args in [vec!["std", "rounded_box", "{}"], vec!["help", "programs", "--all"],
         vec!["init", project], vec!["setup"], vec!["--help"], vec!["--version"]] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_vork")).args(&args)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
@@ -20,7 +20,7 @@ fn closed_consumers_terminate_successfully_without_panics() {
 #[test]
 fn real_stdout_errors_are_filesystem_failures() {
     let root = std::env::temp_dir().join(format!("vork-full-init-{}", std::process::id()));
-    for args in [vec!["std", "sphere", "{}"], vec!["help"],
+    for args in [vec!["std", "rounded_box", "{}"], vec!["help"],
         vec!["init", root.to_str().unwrap()], vec!["setup"], vec!["--help"], vec!["--version"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_vork")).args(&args)
             .stdout(std::fs::File::options().write(true).open("/dev/full").unwrap()).output().unwrap();
@@ -33,7 +33,7 @@ fn real_stdout_errors_are_filesystem_failures() {
 #[test]
 fn consumer_can_close_after_reading_a_prefix() {
     use std::io::Read;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vork")).args(["std", "sphere", "{}"])
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vork")).args(["std", "rounded_box", "{}"])
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let mut stdout = child.stdout.take().unwrap();
     stdout.read_exact(&mut [0u8; 1]).unwrap();

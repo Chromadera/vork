@@ -21,6 +21,9 @@ import zipfile
 from runtime_platform import check_runtime_platform
 
 ROOT = Path(__file__).resolve().parents[1]
+# npm provenance (trusted publishing) requires the package's repository metadata
+# to name the public repository that publishes it, case-sensitively.
+REPOSITORY = {'type': 'git', 'url': 'git+https://github.com/voyager-so/vork.git'}
 TARGETS = {
     'linux-x64': ('linux', 'x64', 'manylinux_2_35_x86_64', 'sys_platform == "linux" and platform_machine == "x86_64"'),
     'darwin-arm64': ('darwin', 'arm64', None, 'sys_platform == "darwin" and platform_machine == "arm64"'),
@@ -67,7 +70,8 @@ def main():
         p.error('registry candidate must use a final numeric version; private registries isolate rehearsals')
     tree = a.tree.resolve()
     binary = 'vork.exe' if a.platform == 'windows-x64' else 'vork'
-    for name in [binary, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries', 'sdk', 'python']:
+    companion = 'vork-slang-filesystem.exe' if a.platform == 'windows-x64' else 'vork-slang-filesystem'
+    for name in [binary, companion, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries', 'sdk', 'python']:
         if not (tree / name).exists():
             p.error(f'incomplete release tree: missing {name}')
     if json.loads((tree / 'sdk/package.json').read_text())['version'] != version:
@@ -105,7 +109,7 @@ def main():
         rel = f.relative_to(tree)
         if rel.parts[0] in ('sdk', 'python', 'examples', 'README.md'):
             continue
-        if rel.parts[0] not in (binary, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries'):
+        if rel.parts[0] not in (binary, companion, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries'):
             p.error(f'unexpected release content: {rel}')
         if not f.resolve().is_relative_to(tree):
             p.error(f'runtime symlink escapes tree: {rel}')
@@ -128,7 +132,7 @@ def main():
             dest = native / 'runtime' / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, dest)
-        native_meta = dict(name=f'@voyager-so/vork-{a.platform}', version=version, os=[os_name], cpu=[cpu], license='SEE LICENSE IN runtime/LICENSE')
+        native_meta = dict(name=f'@voyager-so/vork-{a.platform}', version=version, os=[os_name], cpu=[cpu], license='SEE LICENSE IN runtime/LICENSE', repository=REPOSITORY)
         if a.platform == 'linux-x64':
             native_meta['libc'] = ['glibc']
         (native / 'package.json').write_text(json.dumps(native_meta))
@@ -142,7 +146,7 @@ def main():
         for key in ('scripts', 'devDependencies'):
             meta.pop(key, None)
         (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npx vork init my-shot`. Follow init\'s printed next steps in my-shot. The default `std/final` first render is warmed by setup; use `--profile std/draft` for quicker previews. Run `npx vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+ (older Node emits EBADENGINE warnings; upgrade, or run TypeScript source with node --experimental-strip-types scene.ts where supported), a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
-        meta.update(description='Native vork renderer, TypeScript SDK and scene schema', version=version, bin={'vork': 'cli.cjs'}, files=['dist', 'cli.cjs', 'LICENSE', 'README.md', 'scene.schema.json'], optionalDependencies={f'@voyager-so/vork-{t}': version for t in TARGETS})
+        meta.update(description='Native vork renderer, TypeScript SDK and scene schema', version=version, bin={'vork': 'cli.cjs'}, files=['dist', 'cli.cjs', 'LICENSE', 'README.md', 'scene.schema.json'], optionalDependencies={f'@voyager-so/vork-{t}': version for t in TARGETS}, repository=REPOSITORY)
         meta['exports']['./package.json'] = './package.json'
         (main / 'package.json').write_text(json.dumps(meta, indent=2) + '\n')
         subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=main, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -151,7 +155,7 @@ def main():
         shutil.copy2(ROOT / 'packages/create-vork/cli.cjs', creator / 'cli.cjs')
         shutil.copy2(ROOT / 'packages/create-vork/README.md', creator / 'README.md')
         shutil.copy2(ROOT / 'LICENSE', creator / 'LICENSE')
-        (creator / 'package.json').write_text(json.dumps(dict(name='create-vork', version=version, description='Create an offline vork rendering project', bin={'create-vork': 'cli.cjs'}, engines={'node': '>=22.18'}, license='SEE LICENSE IN LICENSE', dependencies={'@voyager-so/vork': version}), indent=2) + '\n')
+        (creator / 'package.json').write_text(json.dumps(dict(name='create-vork', version=version, description='Create an offline vork rendering project', bin={'create-vork': 'cli.cjs'}, engines={'node': '>=22.18'}, license='SEE LICENSE IN LICENSE', dependencies={'@voyager-so/vork': version}, repository=REPOSITORY), indent=2) + '\n')
         subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=creator, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     module = 'vork_native_' + a.platform.replace('-', '_')
     wheel(a.output, 'vork-native-' + a.platform, version, tag,

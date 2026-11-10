@@ -6,6 +6,8 @@ use crate::view::ViewState;
 /// Storage an installation reserves that collection can outgrow (`FrameRedo`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reservations {
+    /// Device storage for actual dielectric interiors beyond the inline list.
+    pub dielectric_spill: u64,
     /// Measured visibility overflow demand; speculative capacity is device-budget limited.
     pub visibility_pool: u32,
     /// Submission-ordered shadow demand generation.
@@ -20,13 +22,14 @@ pub struct Reservations {
 }
 impl Default for Reservations {
     fn default() -> Self {
-        Self { probe_pages: 0, visibility_pool: 0, transparent_fragments: 0, shading_evaluations: 0 }
+        Self { dielectric_spill: 0, probe_pages: 0, visibility_pool: 0, transparent_fragments: 0, shading_evaluations: 0 }
     }
 }
 impl Reservations {
     /// Each reservation's larger value.
     pub fn max(self, other: Self) -> Self {
         Self {
+            dielectric_spill: self.dielectric_spill.max(other.dielectric_spill),
             visibility_pool: self.visibility_pool.max(other.visibility_pool),
             probe_pages: self.probe_pages.max(other.probe_pages),
             transparent_fragments: self.transparent_fragments.max(other.transparent_fragments),
@@ -65,6 +68,8 @@ fn reservation_retry_allowed(errors: Option<[u32; 2]>) -> bool {
 }
 
 pub struct FrameSlot {
+    pub(crate) dielectric_spill_reservation: u64,
+    boundary_names: Vec<String>,
     pub(crate) nominal_frame: u32,
     pub(crate) nominal_request: vork_time::Request,
     pub(crate) sample_request: vork_time::Request,
@@ -75,6 +80,7 @@ pub struct FrameSlot {
     _retained_transients: std::sync::Arc<std::sync::Mutex<crate::graph::State>>,
     publication_error: std::sync::Arc<std::sync::OnceLock<String>>,
     publication_checks: Option<crate::graph::PublicationChecks>,
+    solver_receipts: Vec<(crate::graph::PublicationDiagnostic, wgpu::Buffer)>,
     _retained_shadows: std::sync::Arc<crate::shadows::Persistent>,
     /// The frame's decoupled overflow pool and transparent fragment demands,
     /// nonzero once either was full (passes/decoupled.rs).
@@ -135,6 +141,8 @@ pub struct FrameSlot {
     pub(crate) query_resolve: wgpu::Buffer,
     pub(crate) query_readback: wgpu::Buffer,
     shader_error_readback: Option<wgpu::Buffer>,
+    computed_bounds: computed_geometry::BoundsPublication,
+    pub(crate) point_publication: point_publication::Frame,
     environment_diagnostics:Option<crate::environment::Validation>,
     nonfinite_readback: Option<wgpu::Buffer>,
     /// Display exposure report of the final colour sample.
@@ -213,6 +221,12 @@ pub struct FrameTiming {
     pub nonfinite: Option<NonfiniteCounts>,
     /// Non-finite light contributions dropped, collected even without diagnostics.
     pub dropped_light_samples: u64,
+    /// Camera path samples zeroed before accumulation for non-finite transport.
+    pub dropped_path_samples: u64,
+    pub terminated_medium_paths: u64,
+    /// Absolute luminance sum of evaluated path radiance discarded by fog caps.
+    /// Includes catcher auxiliary paths; excludes the unknown untraced tail.
+    pub discarded_medium_radiance: f64,
     /// First-to-last written GPU timestamp, including intervals between named spans.
     pub gpu_elapsed_ms: f64,
     /// Named GPU spans in milliseconds, summed over shutter samples.
@@ -254,6 +268,8 @@ impl FloatOutputs {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReadbackOutputs {
     pub color: bool,
+    /// Display-referred RGBA16 colour, packed by the display stage into its staging planes.
+    pub color16: bool,
     pub depth_ids: bool,
     pub normals: bool,
     pub motion: bool,
@@ -263,6 +279,7 @@ pub struct ReadbackOutputs {
 impl ReadbackOutputs {
     pub const ALL: Self = Self {
         color: true,
+        color16: false,
         depth_ids: true,
         normals: true,
         motion: true,
@@ -270,13 +287,14 @@ impl ReadbackOutputs {
         aovs: true,
     };
     pub fn any(self) -> bool {
-        self.color || self.depth_ids || self.normals || self.motion || self.aovs || self.float.any()
+        self.color || self.color16 || self.depth_ids || self.normals || self.motion || self.aovs || self.float.any()
     }
     /// Every plane `other` requests is one of these.
     pub fn contains(self, other: Self) -> bool {
         let (a, b) = (self, other);
         (a.aovs || !b.aovs)
             && (a.color || !b.color)
+            && (a.color16 || !b.color16)
             && (a.depth_ids || !b.depth_ids)
             && (a.normals || !b.normals)
             && (a.motion || !b.motion)
@@ -296,6 +314,8 @@ pub struct FrameOutput {
     /// Named scene-linear program AOVs, associated with surface coverage.
     pub aovs: std::collections::BTreeMap<String,AovPixels>,
     pub rgba: Vec<u8>,
+    /// Display-referred RGBA, 16 bits per component; filled for `ReadbackOutputs::color16`.
+    pub rgba16: Vec<[u16; 4]>,
     pub depth_u16: Vec<u16>,
     pub ids: Vec<u16>,
     pub normals: Vec<u8>,
@@ -332,6 +352,8 @@ struct ReadbackLease {
     outputs: ReadbackOutputs,
     aovs: Vec<vork_scene::v2::Aov>,
     aov_base: usize,
+    /// First display staging plane; it holds RGBA16 after the display stage.
+    display_base: Option<usize>,
     has_catchers: bool,
 }
 impl Drop for ReadbackLease {
@@ -341,10 +363,11 @@ impl Drop for ReadbackLease {
 }
 impl FrameReadback {
     /// Unpack on the caller's thread; the CLI calls this only on PNG workers.
-    pub fn unpack(self) -> FrameOutput {
+    pub fn unpack(self) -> Result<FrameOutput> {
         let mut output = FrameOutput {
             aovs: Default::default(),
             rgba: Vec::new(),
+            rgba16: Vec::new(),
             depth_u16: Vec::new(),
             ids: Vec::new(),
             normals: Vec::new(),
@@ -398,6 +421,20 @@ impl FrameReadback {
                 let offset = (plane * count + pixel) * 4;
                 f32::from_le_bytes(mapped[offset..offset + 4].try_into().unwrap())
             };
+            if raw.outputs.color16 {
+                // pack2x16unorm: the first component in the low half of each word.
+                let base = raw.display_base.context("16-bit colour readback requires a display stage")?;
+                let word = |plane: usize, pixel: usize| {
+                    let offset = (plane * count + pixel) * 4;
+                    u32::from_le_bytes(mapped[offset..offset + 4].try_into().unwrap())
+                };
+                output.rgba16 = (0..count)
+                    .map(|i| {
+                        let (rg, ba) = (word(base, i), word(base + 1, i));
+                        [rg as u16, (rg >> 16) as u16, ba as u16, (ba >> 16) as u16]
+                    })
+                    .collect();
+            }
             if raw.outputs.aovs && !raw.has_catchers {
                 output.aovs.insert("shadow_catcher".into(),AovPixels {kind:vork_scene::v2::AovType::Color,pixels:vec![[1.,1.,1.,1.];count]});
             }
@@ -453,7 +490,7 @@ impl FrameReadback {
                 if let Some(motion)=&mut output.motion_f32 {motion.fill([0.,0.]);}
             }
         }
-        output
+        Ok(output)
     }
 }
 impl FrameSlot {
@@ -481,6 +518,10 @@ impl FrameSlot {
             object_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
+        let geometry_chain = crate::geometry_chain::Frame::new(r, s)?;
+        let deforms = geometry_chain.outputs();
+        let point_publication=point_publication::Frame::new(r,s,&deforms)?;
+        let point_buffer=point_publication.buffer.clone();
         let no_clusters = init(
             d,
             "unclustered config",
@@ -493,7 +534,7 @@ impl FrameSlot {
                            config: &wgpu::Buffer,
                            mask: &wgpu::Buffer,
                            objects: &wgpu::Buffer| {
-            crate::view::global(s, d, uniform, lights, config, mask, objects)
+            crate::view::global(s, d, uniform, lights, config, mask, objects, &point_buffer)
         };
         let dummy_lights = init(
             d,
@@ -501,9 +542,8 @@ impl FrameSlot {
             bytemuck::bytes_of(&Light::zeroed()),
             wgpu::BufferUsages::STORAGE,
         );
-        let mut rays = crate::rt::FrameRays::new(s, r, &objects)?;
-        let geometry_chain = crate::geometry_chain::Frame::new(r, s)?;
-        let deforms = geometry_chain.outputs();
+
+        let mut rays = crate::rt::FrameRays::new(s, r, &objects, &deforms)?;
         if let Some(rays) = rays.as_mut() { rays.resolve_hit_buffers(s, &deforms); }
         let shadow_bind = s.shadows().bind(s, d, rays.as_ref());
         r.errors.check()?;
@@ -511,7 +551,8 @@ impl FrameSlot {
         let frame_materials = (s.compute.as_ref().is_some_and(|c|c.has_material_attributes()) || s.dense.is_some() || s.draws.iter().any(|d|d.computed) || s.displacement.is_some() || s.animation.has_material_bindings()
             || s.material_table.has_render_images() || s.checked_shader_capacity
             || (s.rays.is_some() && s.draws.iter().any(|draw|draw.evaluated())))
-        .then(|| s.material_table.frame_with_images(r, &image_targets));
+        .then(|| s.material_table.frame_with_images(r, &image_targets,s.reservations.dielectric_spill));
+        let computed_bounds=computed_geometry::BoundsPublication::new(r,s,&deforms,frame_materials.as_ref());
         let compute_commands = s
             .compute
             .as_ref()
@@ -530,6 +571,7 @@ impl FrameSlot {
             &s.graph.views.entries[s.graph.views.camera],
             &queries,
             crate::view::SharedBindings {
+                points: &point_buffer,
                 rays: rays.as_ref(),
                 compute: compute_commands.as_ref(),
                 objects: &objects,
@@ -617,14 +659,28 @@ impl FrameSlot {
             view.float_output,
             s.readback,
             view.aovs.len(),
+            view.post.display_base,
         );
+        let solids=crate::passes::path::solids(&s.draws,&s.roots,&s.materials)?;
+        let mut boundary_names=vec![String::new();solids.count as usize];
+        for (row,&solid) in solids.owners.iter().enumerate() {
+            if solid==u32::MAX {continue;}
+            let root=&s.roots[row];let name=&s.nodes[root.node].node.name;
+            let name=if name.is_empty() {format!("node {}",root.node)} else {name.clone()};
+            boundary_names[solid as usize]=root.instance_index.map_or_else(||name.clone(),|instance|format!("{name}[{instance}]"));
+        }
         let mut slot = Self {
+            dielectric_spill_reservation: s.reservations.dielectric_spill,
+            boundary_names,
+            computed_bounds,
+            point_publication,
             propagation_motion: s.scene.propagation.is_some(),
             warned_propagation_motion: false,
             _retained_shadows: retained_shadows,
             _retained_transients: retained_transients,
             publication_error: s.transients.recording_error.clone(),
-            publication_checks: (s.has_media || s.compute.is_some() || !image_targets.is_empty()).then(||s.transients.publication_checks.clone()),
+            solver_receipts: Vec::new(),
+            publication_checks: (s.has_media || s.compute.is_some() || s.displacement.is_some() || s.implicit_fields.iter().any(|f|!f.statuses.is_empty()) || !image_targets.is_empty()).then(||s.transients.publication_checks.clone()),
             simulation_checkpoint: None,
             slot_overflow: s.plan.decoupled.then(|| buffer(
                 "visibility slot overflow readback", 8 * (1 + s.graph.views.images.len() * if s.plan.effects.image_feedback {2} else {1}) as u64,
@@ -836,6 +892,7 @@ impl FrameSlot {
             &s.graph.views.entries[s.graph.views.camera],
             &self.queries,
             crate::view::SharedBindings {
+                points: &self.point_publication.buffer,
                 compute: self.compute_commands.as_ref(),
                 objects: &self.objects,
                 deforms: &self.deforms,
@@ -907,6 +964,7 @@ impl FrameSlot {
         }
         self.simulation_checkpoint = None;
         ensure!(self.probe_generation==s.reservations.probe_pages,"frame slot has stale probe support; include every slot in redo_frame");
+        ensure!(self.dielectric_spill_reservation==s.reservations.dielectric_spill,"frame slot has stale dielectric storage; include every slot in redo_frame");
         self.submitted_time = time;
         for view in self.views_mut() {
             view.refresh_variants(s, r)?;
@@ -944,7 +1002,7 @@ impl FrameSlot {
             self.nonfinite_readback=Some(crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some("nonfinite readback"),size:((vork_slang::registry::NONFINITE_WORDS-vork_slang::registry::NONFINITE_SHADE)*4) as u64,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false}));
         }
         self.view.readback_outputs = outputs;
-        self.view.color_enabled = self.view.write_color || outputs.color || outputs.float.color || (outputs.aovs && !self.view.aovs.is_empty());
+        self.view.color_enabled = self.view.write_color || outputs.color || outputs.color16 || outputs.float.color || (outputs.aovs && !self.view.aovs.is_empty());
         self.capture_images = self.view.color_enabled || s.capture_controls;
         let read_pixels = outputs.any();
         // Keep tile history and all shutter samples in queue submission order.
@@ -1155,10 +1213,10 @@ impl FrameSlot {
             cpu += start.elapsed().as_secs_f64() * 1000.;
         }
         if let Some(checks) = &self.publication_checks {
-            let mut buffers = Vec::new();
-            if let Some(buffer)=&self.shader_error_readback {buffers.push(("shader",buffer.clone()));}
-            if let Some(env)=&self.environment_diagnostics {buffers.push(("environment",env.readback.clone()));}
-            if let Some(compute)=&self.compute {buffers.push(("placement",compute.error_readback.clone()));}
+            let mut buffers = std::mem::take(&mut self.solver_receipts);
+            if let Some(buffer)=&self.shader_error_readback {buffers.push((crate::graph::PublicationDiagnostic::Code("shader"),buffer.clone()));}
+            if let Some(env)=&self.environment_diagnostics {buffers.push((crate::graph::PublicationDiagnostic::Code("environment"),env.readback.clone()));}
+            if let Some(compute)=&self.compute {buffers.push((crate::graph::PublicationDiagnostic::Code("placement"),compute.error_readback.clone()));}
             checks.lock().unwrap().push((self.submission.clone().context("publication has no fence")?,buffers));
         }
         self.flight_ownership.submit();
@@ -1366,12 +1424,19 @@ impl FrameSlot {
         }
         if let Some(compute)=&s.compute {compute.publish_queries(r,&mut encoder,&self.materials.as_ref().expect("compute query diagnostics").shader_errors);}
         for field in &s.implicit_fields {
+            for (message,buffer,offset) in &field.statuses {
+                let receipt=r.device.create_buffer(&wgpu::BufferDescriptor {label:Some("implicit solver status"),size:4,usage:wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
+                encoder.copy_buffer_to_buffer(buffer,*offset,&receipt,0,4);
+                self.solver_receipts.push((crate::graph::PublicationDiagnostic::SolverStatus(message.clone()),receipt));
+            }
             let revision=compute_cursor.as_ref().and_then(|c|c.publications.get(&field.source)).copied().unwrap_or(0);
             let published=field.acceleration.publish(&mut encoder,image_changes,revision);
             if published || sample==0 {
                 field.acceleration.publish_diagnostics(r,&mut encoder,&self.materials.as_ref().expect("installed material diagnostics").shader_errors);
             }
         }
+        self.point_publication.encode(&mut encoder);
+        self.computed_bounds.encode(&mut encoder);
         self.changes.bytes = upload_bytes;
         self.changes.uploads = uploads;
 
@@ -1439,7 +1504,15 @@ impl FrameSlot {
                     }
                 }
                 Pass::Deform => self.geometry_chain.encode(&mut encoder, s, &self.queries),
-                Pass::Rays => crate::rt::encode(&mut encoder, s, self),
+                Pass::Rays => {
+                    if self.profile {
+                        timing::boundary(r, &mut encoder, &self.queries, timing::query("acceleration structures"));
+                    }
+                    crate::rt::encode(&mut encoder, s, self);
+                    if self.profile {
+                        timing::boundary(r, &mut encoder, &self.queries, timing::query("acceleration structures") + 1);
+                    }
+                },
                 Pass::Fibre => {if let (Some(p),Some(slot))=(&s.fibre,&self.fibre) {slot.encode(&p.storage(),&mut encoder,&self.queries);}},
                 Pass::Probes => {
                     if let (Some(volume), Some(slot)) = (&s.probes, &self.probes) {
@@ -1486,7 +1559,7 @@ impl FrameSlot {
             let pixels = u64::from(self.view.width) * u64::from(self.view.height);
             let display = if self.view.write_color {
                 Some(crate::display_stats::Display::Texture(&self.view.output))
-            } else if self.view.readback_outputs.color {
+            } else if self.view.readback_outputs.color || self.view.readback_outputs.color16 {
                 Some(crate::display_stats::Display::Packed(&self.view.post.pixels, pixels))
             } else {
                 None // float colour only: no display image is made
@@ -1621,7 +1694,7 @@ impl FrameSlot {
 
     /// Waits for this slot’s submission, leaving later slots in flight.
     pub fn collect(&mut self, r: &Renderer) -> Result<FrameOutput> {
-        Ok(self.collect_readback(r)?.unpack())
+        self.collect_readback(r)?.unpack()
     }
     /// Transfer this entry to its consumers; resubmission waits for the last lease.
     /// Device errors, naming the most recent frame and the work frames run.
@@ -1637,7 +1710,12 @@ impl FrameSlot {
         // Receipts use the existing slot readbacks; no extra GPU pass is needed.
         let checked = self.check_publications(r);
         let result = self.collect_readback_inner(r);
-        let result = result.and_then(|output| checked.map(|()|output));
+        // Preserve detailed renderer diagnostics unless the producer supplied
+        // its own actionable scene error before the downstream failure.
+        let result = match checked {
+            Err(error) if error.is::<crate::failure::FailureKind>() => Err(error),
+            checked => result.and_then(|output| checked.map(|()|output)),
+        };
         // Captures and retained publications may already have been consumed by
         // queued successors. An asynchronous failure invalidates the install,
         // not just this slot. Reservation retries have their own drained replay.
@@ -1666,9 +1744,16 @@ impl FrameSlot {
                 let code=u32::from_le_bytes(mapped[..4].try_into().unwrap());
                 drop(mapped);buffer.unmap();
                 if code!=0 {
-                    let message=format!("frame publication invalidated by {kind} diagnostic {code}; reinstall the scene");
+                    let solver=matches!(&kind,crate::graph::PublicationDiagnostic::SolverStatus(_));
+                    let reason=match kind {
+                        crate::graph::PublicationDiagnostic::Code(kind)=>format!("{kind} diagnostic {code}"),
+                        crate::graph::PublicationDiagnostic::ComputedGeometry=>computed_geometry::validation_message(code).to_owned(),
+                        crate::graph::PublicationDiagnostic::PointDisplacement=>format!("point displacement diagnostic {code}"),
+                        crate::graph::PublicationDiagnostic::SolverStatus(message)=>format!("{message} (reported value: {code})"),
+                    };
+                    let message=format!("frame publication invalidated by {reason}; reinstall the scene");
                     self.publication_error.get_or_init(||message.clone());
-                    return Err(anyhow::anyhow!(message));
+                    return Err(if solver {anyhow::anyhow!(message).context(crate::failure::FailureKind::Scene)} else {anyhow::anyhow!(message)});
                 }
             }
         }
@@ -1774,6 +1859,35 @@ impl FrameSlot {
             slot.pending = false;
             if let Some(checkpoint)=slot.simulation_checkpoint.take() {for buffer in checkpoint.buffers {buffer.unmap();}}
         };
+        if errors.is_some_and(|[code,_]|code==constants::PATH_BOUNDARY_OVERFLOW) {
+            let bytes=self.materials.as_ref().map_or(0,|m|m.shader_errors.size());
+            let limits=r.device.limits();
+            let maximum=limits.max_storage_buffer_binding_size.min(limits.max_buffer_size)&!3;
+            if bytes<maximum {
+                fail(self);
+                return Err(FrameRedo(Reservations {dielectric_spill:bytes.saturating_mul(2).min(maximum),..Default::default()}).into());
+            }
+        }
+        let dropped_path_samples = shader_diagnostics.as_ref().map_or(0, |words| {
+            let pair=words[(vork_slang::registry::DROPPED_PATH_SAMPLES_WORD/2) as usize];
+            u64::from(pair[0]) | (u64::from(pair[1])<<32)
+        });
+        // Refuse only when the dropped fraction is certainly above the threshold:
+        // adaptive stopping can reduce attempts below this authored budget.
+        // Valid paths need no counter atomics or full-image readback.
+        let budget_samples: u64=self.views().map(|view| {
+            let samples=view.sample_count as u64;
+            u64::from(view.width)*u64::from(view.height)*samples
+        }).sum();
+        #[cfg(any(test, feature="test-support"))]
+        let strict=std::env::var("VORK_TEST_STRICT_NONFINITE").as_deref()==Ok("1");
+        #[cfg(not(any(test, feature="test-support")))]
+        let strict=false;
+        if dropped_path_samples>0 && (strict || dropped_path_samples.saturating_mul(1000)>budget_samples) {
+            fail(self);
+            let reason=if strict {"test-only strict policy".to_owned()} else {format!("0.1% authored-sample allowance ({budget_samples} budgeted samples)")};
+            return Err(FrameRefused(format!("{dropped_path_samples} non-finite path samples exceed {reason}; frame refused")).into());
+        }
         if environment_invalid {
             fail(self);
             return Err(FrameRefused("environment radiance must be finite and nonnegative; frame refused".into()).into());
@@ -1811,7 +1925,18 @@ impl FrameSlot {
         if let Some([count, capacity]) = errors.filter(|[count, _]| *count != 0) {
             fail(self);
             if count == vork_slang::registry::CAMERA_COVERAGE_INVALID {anyhow::bail!("cached opaque slot coverage exceeds the camera sample budget; frame refused");}
-            if count == constants::PATH_BOUNDARY_OVERFLOW { anyhow::bail!("more glass solids overlap at a point (at object {capacity}) than the path integrator's occupancy storage installed for them (at most {}); separate or merge the overlapping transmissive solids",crate::passes::path::KERNEL_BOUNDARY_LIMIT); }
+            if count == constants::PATH_BOUNDARY_OVERFLOW {
+                let mut ids=vec![capacity];
+                if let Some(words)=&shader_diagnostics {
+                    ids.extend(words.get(8).into_iter().flatten().copied());
+                    if let Some(pair)=words.get(9) {ids.push(pair[0]);}
+                }
+                ids.sort_unstable();ids.dedup();
+                let names=ids.iter().filter_map(|&id|self.boundary_names.get(id as usize)).cloned().collect::<Vec<_>>().join(", ");
+                let bytes=self.materials.as_ref().map_or(0,|m|m.shader_errors.size());
+                let limits=r.device.limits();
+                anyhow::bail!("dielectric interior spill arena exhausted ({bytes} bytes, device memory {} bytes, max_storage_buffer_binding_size {} bytes, max_buffer_size {} bytes); active glass examples: {names}; frame refused without an image",r.device_memory,limits.max_storage_buffer_binding_size,limits.max_buffer_size);
+            }
             if count == vork_slang::registry::GEOMETRY_NONFINITE {anyhow::bail!("geometry prefix on object {capacity} produced nonfinite geometry; make displacement positions and shading frames finite");}
             if count == vork_slang::registry::IMPLICIT_INVALID { anyhow::bail!("implicit grid has a nonfinite sample, constant-zero cell or singular zero gradient (object {capacity})"); }
             if count == constants::PATH_BOUNDARY_AMBIGUOUS { anyhow::bail!("path solid boundary requires the same IOR and absorption descriptor in every surface lobe (object {capacity})"); }
@@ -1849,6 +1974,7 @@ impl FrameSlot {
                 has_catchers: self.view.has_catchers,
                 aovs: self.view.aovs.clone(),
                 aov_base: if self.view.float_output {constants::FLOAT_OUTPUT_PLANES as usize} else {constants::PACKED_OUTPUT_PLANES as usize},
+                display_base: self.view.post.display_base.map(|b| b as usize),
             }))
         } else {
             None
@@ -1937,6 +2063,15 @@ impl FrameSlot {
                 gpu_elapsed_ms: if timing_source == "gpu_timestamp" { timing::elapsed_ms(gpu_begin, gpu_end, r.queue.get_timestamp_period()).unwrap_or(0.) } else { self.sample_gpu_ms.first().copied().unwrap_or(0.) },
                 gpu_spans_ms,
                 nonfinite,
+                terminated_medium_paths: shader_diagnostics.as_ref().map_or(0, |words| {
+                    let pair=words[(vork_slang::registry::TERMINATED_MEDIUM_PATHS_WORD/2) as usize];
+                    u64::from(pair[0]) | (u64::from(pair[1])<<32)
+                }),
+                discarded_medium_radiance: shader_diagnostics.as_ref().map_or(0., |words| {
+                    let word=vork_slang::registry::DISCARDED_MEDIUM_RADIANCE_WORD as usize;
+                    f64::from(f32::from_bits(words[word/2][word%2]))
+                }),
+                dropped_path_samples,
                 dropped_light_samples: shader_diagnostics.as_ref().map_or(0, |words| {
                     let pair = words[(vork_slang::registry::DROPPED_LIGHT_SAMPLES_WORD / 2) as usize];
                     u64::from(pair[0]) | (u64::from(pair[1]) << 32)
@@ -2042,7 +2177,7 @@ mod profiling_tests {
         input["nodes"][1]["materials"] = serde_json::json!(["grey"]);
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
-        let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         frame.submit(&installed, &renderer, 0.25)?;
         renderer.device.destroy();
         let error = format!("{:#}", frame.collect(&renderer).err().context("a lost device completed the frame")?);
@@ -2057,7 +2192,7 @@ mod profiling_tests {
         let input = vork_scene::v2::with_test_settings(include_str!("../tests/fixtures/analytic.json"), include_str!("../tests/presets/analytic-7fefd52a.json"))?;
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
-        let frame = installed.create_frame_slot(&renderer, Default::default())?;
+        let frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         // An invalid host-side clear is rejected before any shader executes.
         let buffer = init(&renderer.device, "validation test source", &[0; 4], wgpu::BufferUsages::COPY_SRC);
         let mut encoder = renderer.device.create_command_encoder(&Default::default());
@@ -2083,7 +2218,7 @@ mod profiling_tests {
         input["nodes"][1]["materials"] = serde_json::json!(["spin"]);
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
-        let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         let error = frame.submit(&installed, &renderer, 0.).and_then(|_| frame.collect(&renderer).map(|_| ()))
             .err().context("an endless program completed")?;
         let error = format!("{error:#}");
@@ -2103,10 +2238,10 @@ mod profiling_tests {
         vork_scene::v2::replace_integrator(&mut input, serde_json::json!({"integrator":"path","denoiser":null}));
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
-        let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         frame.profile = true;
         frame.submit(&installed, &renderer, 0.)?;
-        let expected = frame.collect(&renderer)?.rgba;
+        let expected = frame.collect(&renderer)?.linear_rgba.unwrap();
         for end_only in [true, false] {
             frame.submit(&installed, &renderer, 0.)?;
             // Inject a missing endpoint after the real query copy, preserving
@@ -2116,7 +2251,7 @@ mod profiling_tests {
             encoder.clear_buffer(&frame.query_readback, offset + if end_only { 8 } else { 0 }, Some(if end_only { 8 } else { 16 }));
             frame.submission = Some(renderer.queue.submit([encoder.finish()]));
             let pixels = frame.collect(&renderer)?;
-            assert_eq!(pixels.rgba, expected);
+            crate::test_linear::assert_linear_eq(pixels.linear_rgba.as_ref().unwrap(),&expected);
             if let Ok(out) = std::env::var("VORK_TEST_FRAME_OUT") {
                 std::fs::create_dir_all(&out)?;
                 image::save_buffer(std::path::Path::new(&out).join(format!("missing-counter-{end_only}.png")), &pixels.rgba, 32, 24, image::ColorType::Rgba8)?;
@@ -2142,28 +2277,27 @@ mod profiling_tests {
         vork_scene::v2::replace_integrator(&mut input, serde_json::json!({"integrator":"path","denoiser":null}));
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
-        let mut batched = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut batched = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         assert!(batched.can_batch_samples(&installed));
         assert_eq!(batched.sample_upload.size(), 4, "install reserved speculative sample storage");
         batched.submit(&installed, &renderer, 0.5)?;
-        let expected = batched.collect(&renderer)?.rgba;
+        let expected = batched.collect(&renderer)?.linear_rgba.unwrap();
         assert!(!batched.exposure_upload.is_empty());
         for (buffer, bytes) in &batched.exposure_upload {
             assert_eq!(buffer.size(), bytes.len() as u64,
                 "staging must scale with actual dirty bytes, not destination capacity or sample budget");
         }
-        let mut streamed = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut streamed = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         streamed.batch_uploads = false;
         assert!(!streamed.can_batch_samples(&installed));
         streamed.submit(&installed, &renderer, 0.5)?;
-        assert_eq!(expected, streamed.collect(&renderer)?.rgba,
-            "reusing staging changed the animated exposure");
+        crate::test_linear::assert_linear_eq(&expected,&streamed.collect(&renderer)?.linear_rgba.unwrap());
         // Reusing the slots must discard the preceding exposure's sources without
         // aliasing any source still consumed by another sample.
         batched.submit(&installed, &renderer, 0.75)?;
-        let expected = batched.collect(&renderer)?.rgba;
+        let expected = batched.collect(&renderer)?.linear_rgba.unwrap();
         streamed.submit(&installed, &renderer, 0.75)?;
-        assert_eq!(expected, streamed.collect(&renderer)?.rgba);
+        crate::test_linear::assert_linear_eq(&expected,&streamed.collect(&renderer)?.linear_rgba.unwrap());
         renderer.errors.check()?;
         Ok(())
     }
@@ -2188,7 +2322,7 @@ mod profiling_tests {
         input["animation"].as_array_mut().unwrap().push(track);
         let installed = r.install(crate::test_scene(input.clone(), Path::new("."))?, Path::new("."))?;
         assert_eq!((installed.plan.exposure_samples,installed.plan.visibility_samples),(4,4));
-        let mut slot = installed.create_frame_slot(&r, Default::default())?;
+        let mut slot = installed.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         for (time,width) in [(0.,0.),(0.5,0.5),(1.,1.),(2.,0.),(1.,1.),(0.,0.)] {
             slot.submit(&installed,&r,time)?;
             let actual = slot.collect(&r)?;
@@ -2198,9 +2332,9 @@ mod profiling_tests {
             fixed["animation"].as_array_mut().unwrap().pop();
             fixed["render"]["motion_blur"] = if width>0. {serde_json::json!({"shutter":width})} else {serde_json::Value::Null};
             let reference = r.install(crate::test_scene(fixed, Path::new("."))?, Path::new("."))?;
-            let mut reference_slot = reference.create_frame_slot(&r,Default::default())?;
+            let mut reference_slot = reference.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
             reference_slot.submit(&reference,&r,time)?;
-            assert_eq!(actual.rgba,reference_slot.collect(&r)?.rgba,"shutter {width} at {time}");
+            crate::test_linear::assert_linear_eq((actual).linear_rgba.as_ref().expect("linear readback"), (reference_slot.collect(&r)?).linear_rgba.as_ref().expect("linear readback"));
         }
         r.errors.check()?;
         Ok(())
@@ -2219,7 +2353,7 @@ mod profiling_tests {
             }))?;
             let installed = renderer.install(input,Path::new("."))?;
             assert_eq!(installed.plan.samples, 2, "{integrator}: one shutter sample plus the nominal control pass");
-            let mut frame = installed.create_frame_slot(&renderer,Default::default())?;
+            let mut frame = installed.create_frame_slot(&renderer,crate::ReadbackPrecision::Float)?;
             for time in [0., 0.5] {
                 frame.submit(&installed,&renderer,time)?;
                 frame.collect(&renderer)?;
@@ -2241,7 +2375,7 @@ mod profiling_tests {
         let installed = r.install(input, Path::new("."))?;
         assert_eq!(installed.plan.exposure_samples, 1);
         assert_eq!(installed.plan.visibility_samples, 1024);
-        let mut frame = installed.create_frame_slot(&r, Default::default())?;
+        let mut frame = installed.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         frame.submit(&installed, &r, 0.)?;
         assert!(frame.sample_segments.segmented(), "spatial samples must publish their merge groups before the entire exposure ends");
         frame.collect(&r)?;
@@ -2262,8 +2396,8 @@ mod profiling_tests {
             "nodes":[{"type":"camera"},{"type":"mesh","geometry":"triangle","morph_weights":{"pose":0}}]
         }))?;
         let installed = renderer.install(input,Path::new("."))?;
-        let mut frame = installed.create_frame_slot(&renderer,Default::default())?;
-        let mut previous = None;
+        let mut frame = installed.create_frame_slot(&renderer,crate::ReadbackPrecision::Float)?;
+        let mut previous:Option<Vec<[f32;4]>> = None;
         for (estimate, diagnostics) in [(0., false), (10., true), (0.01, false)] {
             frame.sample_gpu_ms = vec![estimate; installed.plan.samples as usize];
             frame.profile = diagnostics;
@@ -2271,8 +2405,8 @@ mod profiling_tests {
             let pixels = frame.collect(&renderer)?;
             assert!(frame.sample_gpu_ms.iter().sum::<f64>() <= pixels.timing.gpu_elapsed_ms + 1e-6,
                 "measured group envelopes must fit within the complete exposure");
-            if let Some(previous) = &previous { assert_eq!(&pixels.rgba, previous); }
-            previous = Some(pixels.rgba);
+            if let Some(previous) = &previous { crate::test_linear::assert_linear_eq(pixels.linear_rgba.as_ref().unwrap(),previous); }
+            previous = pixels.linear_rgba;
             assert!(frame.sample_gpu_ms.iter().any(|&ms| ms > 0.), "scheduling feedback also runs without diagnostics");
             for (sample, &mask) in frame.sample_spans.iter().enumerate() {
                 assert_eq!(mask & timing::mask("deform") != 0, diagnostics && (sample == 0 || sample == 64));
@@ -2299,7 +2433,7 @@ mod profiling_tests {
                     {"type":"mesh","geometry":"triangle","materials":["skin"]}]
             }))?;
             let installed = renderer.install(input, std::path::Path::new("."))?;
-            let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+            let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
             frame.profile = true;
             assert!(frame.can_batch_samples(&installed), "opaque exposure must batch despite the empty image step");
             frame.submit(&installed, &renderer, 0.)?;
@@ -2371,4 +2505,81 @@ mod profiling_tests {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod path_sample_drop_tests {
+    use super::*;
+    #[test]
+    #[ignore="requires real GPU and pinned Slang; invokes isolated strict-mode children"]
+    fn rare_nonfinite_paths_warn_and_count_while_systematic_and_strict_refuse() -> Result<()> {
+        let mode=std::env::var("VORK_TEST_POISON_PATH_SAMPLE").ok();
+        if mode.is_none() {
+            for (mode,strict) in [("one",false),("one",true),("all",false)] {
+                let mut command=std::process::Command::new(std::env::current_exe()?);
+                command.args(["--exact","frame::path_sample_drop_tests::rare_nonfinite_paths_warn_and_count_while_systematic_and_strict_refuse","--ignored","--nocapture"])
+                    .env("VORK_TEST_POISON_PATH_SAMPLE",mode).env("VORK_GPU_TESTS","1");
+                if strict {command.env("VORK_TEST_STRICT_NONFINITE","1");}
+                else {command.env_remove("VORK_TEST_STRICT_NONFINITE");}
+                ensure!(command.status()?.success(),"drop policy child mode={mode}, strict={strict} failed");
+            }
+            return Ok(());
+        }
+        let Some(r)=crate::test_renderer()? else {anyhow::bail!("real GPU required");};
+        let scene=vork_scene::v2::from_test_value(serde_json::json!({
+            "version":2,"render":{"resolution":[32,32],"background":[0.18,0.18,0.18],
+                "settings":{"integrator":"path","samples":4,"denoiser":null}},"nodes":[{"type":"camera"}]
+        }))?;
+        let mut installed=r.install(scene,Path::new("."))?;
+        let mut slot=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
+        let result=installed.render_frame(&r,&mut slot,0.);
+        if mode.as_deref()==Some("all") || std::env::var("VORK_TEST_STRICT_NONFINITE").as_deref()==Ok("1") {
+            let error=result.err().context("non-finite policy failed to refuse")?;
+            ensure!(format!("{error:#}").contains("non-finite path samples"),"{error:#}");
+        } else {
+            let result=result?;
+            ensure!(result.timing.dropped_path_samples==1,"rare drop not counted exactly once");
+            let pixels=result.linear_rgba.context("missing linear image")?;
+            ensure!(pixels.iter().flatten().all(|v|v.is_finite()),"non-finite escaped the film guard");
+            ensure!((pixels[0][0]-0.135).abs()<1e-5,"zero sample was renormalized away: {:?}",pixels[0]);
+            ensure!((pixels[1][0]-0.18).abs()<1e-5,"valid neighbour changed: {:?}",pixels[1]);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn dielectric_arena_exhaustion_replays_before_publishing() -> Result<()> {
+    let Some(mut r)=crate::test_renderer()? else {return Ok(());};
+    r.reference_transport_bounces=Some(64);
+    r.reference_transparent_bounces=Some(64);
+    let mut input=vork_scene::v2::with_test_settings(include_str!("../tests/fixtures/analytic.json"),include_str!("../tests/presets/analytic-7fefd52a.json"))?;
+    input["buffers"].as_object_mut().unwrap().retain(|name,_|name.starts_with("shape_box_"));
+    input["geometry"].as_object_mut().unwrap().retain(|name,_|name=="shape_box");
+    input["animation"]=serde_json::json!([]);
+    input["render"]=serde_json::json!({"resolution":[8,8],"background":[0.4,0.6,0.8],"settings":{"integrator":"path","samples":1,"denoiser":null}});
+    input["materials"]=serde_json::json!({"glass":{"inputs":{"transmission_weight":1,"specular_ior":1,"specular_roughness":0}}});
+    input["nodes"]=serde_json::json!([
+        {"type":"camera","material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":0.001}}},
+        {"type":"light","shape":"environment","color":[0.4,0.6,0.8],"energy":1}
+    ]);
+    for i in 0..33 {
+        let size=2.+i as f32*0.04;
+        input["nodes"].as_array_mut().unwrap().push(serde_json::json!({"type":"mesh","name":format!("interior{i}"),"geometry":"shape_box","materials":["glass"],"scale":[size,size,size]}));
+    }
+    let mut scene=r.install(vork_scene::v2::from_test_value(input)?,std::path::Path::new("."))?;
+    let mut frame=scene.create_frame_slot(&r,ReadbackPrecision::Float)?;
+    let mut older_slot=scene.create_frame_slot(&r,ReadbackPrecision::Float)?;
+    r.queue.write_buffer(&older_slot.materials.as_ref().unwrap().shader_errors,crate::materials::SHADER_DIAGNOSTICS_BYTES,&0u32.to_le_bytes());
+    // Publish an empty arena directory without lying about device limits.
+    // The first exposure must reject its incomplete interiors and grow storage.
+    r.queue.write_buffer(&frame.materials.as_ref().unwrap().shader_errors,crate::materials::SHADER_DIAGNOSTICS_BYTES,&0u32.to_le_bytes());
+    let result=scene.render_frame(&r,&mut frame,0.)?;
+    assert!(scene.reservations.dielectric_spill>0,"exhausted storage was silently accepted");
+    let later=scene.render_frame(&r,&mut older_slot,0.)?;
+    for pixels in [result.linear_rgba.unwrap(),later.linear_rgba.unwrap()] {
+        for p in pixels {for c in 0..3 {assert!((p[c]-[0.4,0.6,0.8][c]).abs()<0.004,"replayed interior transport: {p:?}");}}
+    }
+    Ok(())
 }

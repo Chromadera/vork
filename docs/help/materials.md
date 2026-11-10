@@ -13,6 +13,10 @@ and RGB for colour. Custom factors, channels and UV transforms need a program.
 For glass panes use transmission_weight: 1 and geometry_thin_walled: true.
 Use transmission_color for glass tint and subsurface_color for scattering colour.
 Use std/path when refraction or indirect lighting is important.
+In std/previs, a used std/openpbr material with geometry_opacity < 1 or
+alpha_cutoff >= 0 switches the whole view to path transport and can substantially
+increase render time. Bindings or animation of either input also trigger this.
+See vork help profiles for preview alternatives.
 <!-- all -->
 MATERIAL REFERENCE
 Solid glass requires closed mesh boundaries; model hollow vessels with a shell.

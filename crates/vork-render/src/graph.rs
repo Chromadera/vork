@@ -255,7 +255,7 @@ fn declare(b: &mut Builder, plan: &crate::plan::ScenePlan) {
         .when(plan.transparent)
         .reads(if e.trace {&["deformed vertices", "depth 4x","ray structures"]} else {&["deformed vertices", "depth 4x"]})
         .writes(&MSAA[1..]);
-    b.pass(Controls).when(!e.fuse_controls()).reads(MSAA).writes(&[
+    b.pass(Controls).when(e.standalone_controls(None)).reads(MSAA).writes(&[
         "denoising guides",
         "resolved depth",
         "resolved IDs",
@@ -480,8 +480,7 @@ impl Graph {
                         d.enabled &= outputs.beauty || outputs.catcher;
                         if plan.effects.path {d.reads.retain(|name|*name!="resolved normals");}
                     },
-                    Pass::Controls => d.enabled &= !(plan.effects.implicit && plan.effects.path)
-                        && (!plan.effects.path || outputs.controls()),
+                    Pass::Controls => d.enabled &= plan.effects.standalone_controls(Some(outputs)),
                     Pass::Shade => d.enabled &= outputs.beauty || outputs.aovs || outputs.catcher,
                     Pass::Path => {
                         d.enabled &= outputs.beauty || outputs.aovs || outputs.catcher || (plan.effects.implicit && outputs.controls());
@@ -755,6 +754,7 @@ impl Step {
             Work::Compute(work) => mask(work.span),
             Work::Encode => match self.pass {
                 Pass::Deform => mask("deform"),
+                Pass::Rays => mask("acceleration structures"),
                 Pass::Probes => mask("probes"),
                 Pass::Fibre => mask("fibre"),
                 Pass::Images => mask("images"),
@@ -867,9 +867,16 @@ pub(crate) struct State {
     physical: Vec<Physical>,
     requested: u64,
 }
+/// A publication receipt checked at the existing output fence.
+pub(crate) enum PublicationDiagnostic {
+    Code(&'static str),
+    ComputedGeometry,
+    PointDisplacement,
+    SolverStatus(String),
+}
+pub(crate) type PublicationChecks = std::sync::Arc<Mutex<Vec<(wgpu::SubmissionIndex, Vec<(PublicationDiagnostic, wgpu::Buffer)>)>>>;
 /// Transient and frame-scoped backings shared by all frame slots and views of
 /// one installed scene. Used only while creating slots.
-pub(crate) type PublicationChecks = std::sync::Arc<Mutex<Vec<(wgpu::SubmissionIndex, Vec<(&'static str, wgpu::Buffer)>)>>>;
 pub(crate) struct Transients {
     intervals: HashMap<&'static str, (u16, u16)>,
     state: crate::residency::Cache<Mutex<State>>,
@@ -1185,6 +1192,52 @@ mod tests {
         assert!(error.to_string().contains("render-image capture"));
         Ok(())
     }
+    #[test]
+    fn standalone_controls_pipeline_covers_every_scheduled_output() {
+        use crate::{compositor::Dependencies, plan::{EffectPlan, ScenePlan}};
+        // Include composited subsurface/previs (Monster), explicit controls,
+        // image-only roots, path and implicit ownership, and capture subsets.
+        for flags in 0..256 {
+            // Spatial diffusion is a raster provider; path owns its own transport.
+            if flags & 1 != 0 && flags & 128 != 0 { continue; }
+            let effects = EffectPlan {
+                path: flags & 1 != 0, implicit: flags & 2 != 0,
+                compositor: flags & 4 != 0, indirect: flags & 8 != 0,
+                reflections: flags & 16 != 0, denoise: flags & 32 != 0,
+                force_standalone_controls: flags & 64 != 0, subsurface: flags & 128 != 0,
+                ..Default::default()
+            };
+            for bits in 0..64 {
+                let outputs = Dependencies {
+                    color: true, beauty: bits & 1 != 0, depth: bits & 2 != 0,
+                    normals: bits & 4 != 0, images: bits & 8 != 0,
+                    aovs: bits & 16 != 0, aov_output: bits & 16 != 0, catcher: bits & 32 != 0,
+                    ..Default::default()
+                };
+                // Installation drops beauty-only providers for control/image roots.
+                let effects = if !outputs.beauty && !outputs.catcher {
+                    EffectPlan { subsurface: false, indirect: false, reflections: false,
+                        denoise: false, ..effects }
+                } else { effects };
+                let plan = ScenePlan {
+                    effects: EffectPlan { outputs: Some(outputs), ..effects },
+                    decoupled: !effects.path, exposure_samples: 1, visibility_samples: 1,
+                    screen_refraction: false, draws: Vec::new(), casters: Default::default(),
+                    transparent: false, deform: false, rays: effects.path, cluster: false,
+                    samples: 1, aovs: outputs.aovs,
+                };
+                let graph = Graph::new(&plan, true)
+                    .unwrap_or_else(|error| panic!("effects={flags}, outputs={bits}: {error}"));
+                assert!(!graph.runs(Pass::Controls) || effects.standalone_controls(Some(outputs)),
+                    "scheduled controls without installation: effects={flags}, outputs={bits}");
+                if flags == 132 && bits == 1 {
+                    assert!(graph.runs(Pass::Controls), "composited subsurface beauty needs standalone controls");
+                    assert!(effects.standalone_controls(Some(outputs)));
+                }
+            }
+        }
+    }
+
     #[test]
     fn decoupled_shading_follows_culling_and_controls() {
         let mut plan = crate::plan::ScenePlan {

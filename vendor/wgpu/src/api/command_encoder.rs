@@ -126,13 +126,13 @@ impl CommandEncoder {
     /// retained BLAS reference from `blas`. Transforms, masks and custom indices must
     /// meet the native API requirements. Masked tails still need valid references and
     /// finite placeholder transforms. The buffer must remain unchanged until its GPU
-    /// readers retire. This always performs a full build, never a refit.
+    /// readers retire. The TLAS update preference applies unless `force_rebuild` is true.
     #[cfg(wgpu_core)]
     pub unsafe fn build_tlas_from_buffer(
-        &mut self, tlas: &Tlas, buffer: &Buffer, offset: u64, count: u32, blas: &[&Blas],
+        &mut self, tlas: &Tlas, buffer: &Buffer, offset: u64, count: u32, blas: &[&Blas], force_rebuild: bool,
     ) {
         self.inner.as_core_mut_opt().expect("native TLAS builds require wgpu-core")
-            .build_tlas_from_buffer(tlas, buffer, offset, count, blas);
+            .build_tlas_from_buffer(tlas, buffer, offset, count, blas, force_rebuild);
     }
 
     /// Finishes recording and returns a [`CommandBuffer`] that can be submitted for execution.

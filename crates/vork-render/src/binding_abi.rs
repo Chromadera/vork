@@ -109,7 +109,7 @@ mod tests {
             "render":{"resolution":[16,16],"settings":{"samples":1}},
             "nodes":[
                 {"type":"camera","translation":[0,0,4],"target":[0,0,0]},
-                {"type":"mesh","geometry":{"std":"sphere","segments":16,"rings":8}},
+                {"type":"mesh","geometry":crate::test_geometry::latitude_longitude(1.,16,8)},
                 {"type":"light","shape":"rectangle","translation":[1,2,3],"target":[0,0,0],"size":2,"energy":20}
             ]});
         let base = std::path::Path::new(".");

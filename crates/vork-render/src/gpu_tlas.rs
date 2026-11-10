@@ -11,6 +11,50 @@ pub(crate) struct Placement {
     group: wgpu::BindGroup,
     count: u32,
     width: u32,
+    points: Vec<(wgpu::ComputePipeline,wgpu::BindGroup,u32,u32)>,
+    software_masked: Option<SoftwareMasked>,
+}
+
+/// Mesa 25.2 lavapipe encodes only the active leaf count, but its BVH retains
+/// sparse input leaf offsets. A zero-mask slot before a live slot leaves that
+/// later leaf uninitialized. Keep every software TLAS slot active using a finite
+/// zero-area triangle that cannot intersect any ray. Hardware keeps zero masks.
+struct SoftwareMasked {
+    templates: wgpu::Buffer,
+    pipeline: wgpu::ComputePipeline,
+    group: wgpu::BindGroup,
+}
+impl SoftwareMasked {
+    fn new(r: &Renderer, buffer: &wgpu::Buffer, bytes: &[u8], references: &mut Vec<wgpu::Blas>, layout: wgpu::hal::TlasInstanceLayout, count: u32, width: u32) -> Result<Self> {
+        let d = &r.device;
+        let vertices = init(d, "masked software triangle", bytemuck::cast_slice(&[[0f32; 3]; 3]), wgpu::BufferUsages::BLAS_INPUT);
+        let size = wgpu::BlasTriangleGeometrySizeDescriptor { vertex_format: wgpu::VertexFormat::Float32x3, vertex_count: 3, index_format: None, index_count: None, flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE };
+        let blas = d.create_blas(&wgpu::CreateBlasDescriptor { label: Some("masked software BLAS"), flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build }, wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![size.clone()] });
+        let mut encoder = d.create_command_encoder(&Default::default());
+        encoder.build_acceleration_structures([wgpu::BlasBuildEntry { blas: &blas, geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry { size: &size, vertex_buffer: &vertices, first_vertex: 0, vertex_stride: 12, index_buffer: None, first_index: None, transform_buffer: None, transform_buffer_offset: None }]) }].iter(), std::iter::empty());
+        r.queue.submit([encoder.finish()]);
+        let (sentinel_layout, sentinel) = blas.native_tlas_instance(0, 255).context("masked software TLAS template")?;
+        ensure!(sentinel_layout == layout, "software TLAS template layout differs");
+        references.push(blas);
+        let mut templates = bytes.to_vec();
+        templates.extend(sentinel);
+        let templates = init(d, "software TLAS templates", &templates, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let words = layout.stride / 4;
+        let code = format!(r#"
+@group(0) @binding(0) var<storage,read> templates:array<u32>;
+@group(0) @binding(1) var<storage,read_write> descriptors:array<u32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid:vec3<u32>) {{
+    let i=gid.x+gid.y*{width}u;if(i>={count}u) {{return;}}
+    let base=i*{words}u;
+    if(((descriptors[base+{mask}u]>>{shift}u)&255u)==0u) {{
+        for(var word=0u;word<{words}u;word++) {{descriptors[base+word]=templates[{count}u*{words}u+word];}}
+    }}
+}}
+"#, mask=layout.mask, shift=layout.mask_shift);
+        let pipeline = crate::compute::pipeline_layout(r, &code, "software masked TLAS slots", &[Some(true), Some(false)], "main");
+        let group = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("software masked TLAS slots"), layout: &pipeline.get_bind_group_layout(0), entries: &[entry(0, templates.as_entire_binding()), entry(1, buffer.as_entire_binding())] });
+        Ok(Self { templates, pipeline, group })
+    }
 }
 
 /// Generate from backend layout facts, shared by production and packing tests.
@@ -76,6 +120,16 @@ impl Placement {
         instances: &[(u32, bool, bool, bool, wgpu::Blas)],
         retained: &std::sync::OnceLock<wgpu::ComputePipeline>,
     ) -> Result<Self> {
+        Self::with_points(r,objects,instances,retained,&vec![None;instances.len()])
+    }
+    pub(crate) fn with_points(
+        r: &Renderer,
+        objects: &wgpu::Buffer,
+        instances: &[(u32,bool,bool,bool,wgpu::Blas)],
+        retained: &std::sync::OnceLock<wgpu::ComputePipeline>,
+        point_poses: &[Option<(wgpu::Buffer,u32)>],
+    ) -> Result<Self> {
+        ensure!(point_poses.len()==instances.len(),"point placement mapping length differs from TLAS");
         let mut bytes = Vec::new();
         let mut mapping = Vec::new();
         let mut references = Vec::new();
@@ -110,7 +164,7 @@ impl Placement {
             &r.device,
             "native TLAS descriptors",
             &bytes,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::TLAS_INPUT,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::TLAS_INPUT | wgpu::BufferUsages::COPY_DST,
         );
         let mapping = init(
             &r.device,
@@ -144,7 +198,51 @@ impl Placement {
                 entry(2, buffer.as_entire_binding()),
             ],
         });
+        let mut point_groups:Vec<(wgpu::Buffer,Vec<[u32;4]>)>=Vec::new();
+        for (slot,pose) in point_poses.iter().enumerate() {
+            let Some((poses,row))=pose else {continue};
+            let index=point_groups.iter().position(|(b,_)|b==poses).unwrap_or_else(||{point_groups.push((poses.clone(),Vec::new()));point_groups.len()-1});
+            point_groups[index].1.push([slot as u32,instances[slot].0,*row,0]);
+        }
+        let mut points=Vec::new();
+        for (poses,rows) in point_groups {
+            let count=rows.len() as u32;
+            let width=count.div_ceil(64).min(r.device.limits().max_compute_workgroups_per_dimension);
+            let mut code=format!(r#"
+{finite_checks}
+{object_abi}
+@group(0) @binding(0) var<storage,read> objects:array<Object>;
+@group(0) @binding(1) var<storage,read> mapping:array<vec4<u32>>;
+@group(0) @binding(2) var<storage,read_write> descriptors:array<u32>;
+@group(0) @binding(3) var<storage,read> poses:array<u32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid:vec3<u32>) {{
+    let i=gid.x+gid.y*{dispatch_width}u;if(i>={count}u) {{return;}}
+    let map=mapping[i];let pose=bitcast<vec4<f32>>(vec4<u32>(poses[map.z],poses[map.z+1u],poses[map.z+2u],poses[map.z+3u]));
+    let object=objects[map.y];var rows=object.model;
+    let base=map.x*{words}u;
+    var mask=(descriptors[base+{mask_word}u]>>{mask_shift}u)&255u;
+    let radius=pose.w*0.5;
+    for(var row=0u;row<3u;row++) {{let original=rows[row];rows[row]=vec4<f32>(original.xyz*radius,dot(original.xyz,pose.xyz)+original.w);}}
+    let determinant=dot(rows[0].xyz,cross(rows[1].xyz,rows[2].xyz));
+    if(!(radius>0.) || determinant==0. || !finite_f32(determinant) || !finite4(pose) || !finite4(rows[0]) || !finite4(rows[1]) || !finite4(rows[2])) {{mask=0u;}}
+    if(mask==0u) {{rows=mat3x4<f32>(vec4(1.,0.,0.,0.),vec4(0.,1.,0.,0.),vec4(0.,0.,1.,0.));}}
+"#,finite_checks=crate::compute::FINITE_WGSL,object_abi=crate::object_abi::wgsl("Object"),dispatch_width=width*64,words=layout.stride/4,mask_word=layout.mask,mask_shift=layout.mask_shift);
+            for (coefficient,offset) in layout.transform.into_iter().enumerate() {
+                writeln!(code,"descriptors[base+{offset}u]=bitcast<u32>(rows[{}][{}]);",coefficient/4,coefficient%4)?;
+            }
+            writeln!(code,"descriptors[base+{}u]=(descriptors[base+{}u]&{}u)|(mask<<{}u);}}",layout.mask,layout.mask,!(255u32<<layout.mask_shift),layout.mask_shift)?;
+            let pipeline=crate::compute::pipeline_layout(r,&code,"compact point TLAS placement",&[Some(true),Some(true),Some(false),Some(true)],"main");
+            let mapping=init(&r.device,"point placement mapping",bytemuck::cast_slice(&rows),wgpu::BufferUsages::STORAGE);
+            let group=r.device.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("compact point TLAS placement"),layout:&pipeline.get_bind_group_layout(0),entries:&[
+                entry(0,objects.as_entire_binding()),entry(1,mapping.as_entire_binding()),entry(2,buffer.as_entire_binding()),entry(3,poses.as_entire_binding())]});
+            points.push((pipeline,group,count,width));
+        }
+        let software_masked = if r.adapter_info.device_type == wgpu::DeviceType::Cpu {
+            Some(SoftwareMasked::new(r, &buffer, &bytes, &mut references, layout, instances.len() as u32, width * 64)?)
+        } else { None };
         Ok(Self {
+            software_masked,
+            points,
             buffer,
             references,
             pipeline,
@@ -153,7 +251,12 @@ impl Placement {
             width,
         })
     }
-    pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, tlas: &wgpu::Tlas) {
+    pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder, tlas: &wgpu::Tlas, force_rebuild: bool) {
+        if let Some(masked) = &self.software_masked {
+            // Restore original references before evaluating this sample: a hidden
+            // object or point can become visible again, including backward seeks.
+            encoder.copy_buffer_to_buffer(&masked.templates, 0, &self.buffer, 0, self.buffer.size());
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("native TLAS placement"),
@@ -163,11 +266,22 @@ impl Placement {
             pass.set_bind_group(0, &self.group, &[]);
             pass.dispatch_workgroups(self.width, self.count.div_ceil(64).div_ceil(self.width), 1);
         }
+        for (pipeline,group,count,width) in &self.points {
+            let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("compact point TLAS placement"),..Default::default()});
+            pass.set_pipeline(pipeline);pass.set_bind_group(0,group,&[]);
+            pass.dispatch_workgroups(*width,count.div_ceil(64).div_ceil(*width),1);
+        }
+        if let Some(masked) = &self.software_masked {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("software masked TLAS slots"), ..Default::default() });
+            pass.set_pipeline(&masked.pipeline);
+            pass.set_bind_group(0, &masked.group, &[]);
+            pass.dispatch_workgroups(self.width, self.count.div_ceil(64).div_ceil(self.width), 1);
+        }
         let references: Vec<_> = self.references.iter().collect();
         // Templates retain their backend-owned native reference and object ID;
-        // only the backend-declared transform/mask words were written above.
+        // software placeholders also copy complete backend-owned templates above.
         unsafe {
-            encoder.build_tlas_from_buffer(tlas, &self.buffer, 0, self.count, &references);
+            encoder.build_tlas_from_buffer(tlas, &self.buffer, 0, self.count, &references, force_rebuild);
         }
     }
 }

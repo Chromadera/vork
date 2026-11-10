@@ -9,6 +9,9 @@ import vork_prelude;
 import vork_medium_point;
 import frame;
 internal extern Frame medium_frame();
+#ifdef VORK_MEDIUM_WORK_LIMIT
+internal extern bool medium_boundary_step();
+#endif
 // The ray parameter remains metres in world space, including under nonuniform scale.
 public float3 volume_vec3(uint at) {return float3(asfloat(medium_word(at)),asfloat(medium_word(at+1u)),asfloat(medium_word(at+2u)));}
 // Advance boundary queries by a representable world distance.
@@ -73,6 +76,9 @@ public float2 volume_boundary(uint at,float3 o,float3 d,float after,float limit,
     let count=medium_word(planes+7u);
     var enter=0.;var exit=REG_FP32_MAX;
     for(uint face=0u;face<count;face++) {
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_boundary_step()) {return float2(limit,0.);}
+#endif
         let plane=planes+8u+face*6u;
         let normal=volume_vec3(plane);let anchor=volume_vec3(plane+3u);
         let numerator=dot(normal,anchor-origin);let denominator=dot(normal,direction);
@@ -90,11 +96,17 @@ public float2 volume_boundary(uint at,float3 o,float3 d,float after,float limit,
     var nearest=REG_FP32_MAX;var winding=0.;
     var node=base+medium_word(at+1u);let end=base+medium_word(at+2u);
     while(node<end) {
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_boundary_step()) {return float2(limit,0.);}
+#endif
         let escape=base+medium_word(node+3u);
         if(!volume_node_hit(volume_vec3(node),volume_vec3(node+4u),origin,direction,after)) {node=escape;continue;}
         let count=medium_word(node+7u);
         if(count==0u) {node+=REG_MEDIUM_BVH_WORDS;continue;}
         for(var i=0u;i<count;i++) {
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(!medium_boundary_step()) {return float2(limit,0.);}
+#endif
             let triangle=node+REG_MEDIUM_BVH_WORDS+i*REG_MEDIUM_TRIANGLE_WORDS;
             let a=volume_vec3(triangle);let b=volume_vec3(triangle+3u);let c=volume_vec3(triangle+6u);
             let edge1=b-a;let edge2=c-a;

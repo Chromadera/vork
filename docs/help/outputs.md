@@ -34,3 +34,7 @@ frames/channels before writing. Save outputs elsewhere to retain them; serialize
 writers per destination (concurrent writes fail "output already in use").
 Only consume a shot after success with fresh meta.json; partial files can remain
 on failure. Cleanup also matches native non-UTF-8 filenames.
+
+--png-depth 8|16: PNG colour bits per component; default 8. Requires PNG colour
+output for 16. Both depths use the same exposure and display transform. Standard
+display dither scales to the output bit depth; control channels retain their depths.

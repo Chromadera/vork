@@ -582,14 +582,14 @@ float3 environment(EnvironmentContext ctx,Inputs inputs) {
         let mut value=spatial_scene();
         value["render"]["settings"]["integrator"]="path".into();
         value["programs"]["world"]["source"]=serde_json::json!("struct Inputs {};float3 environment(EnvironmentContext c,Inputs i){return float3(c.origin.z*.01);}");
-        let mut previous=None;
+        let mut previous:Option<Vec<[f32;4]>>=None;
         for near in [0.1,4.5] {
             value["nodes"][1]["material"]["inputs"]["clip_start"]=serde_json::json!(near);
             let scene=r.install(vork_scene::v2::from_test_value(value.clone())?,Path::new("."))?;
-            let mut frame=scene.create_frame_slot(&r,Default::default())?;
-            frame.submit(&scene,&r,0.)?;let pixels=frame.collect(&r)?.rgba;
-            assert!(pixels[0]>70,"observer remains at z=10");
-            if let Some(previous)=&previous {assert_eq!(&pixels,previous,"camera clipping must not move the environment observer");}
+            let mut frame=scene.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            frame.submit(&scene,&r,0.)?;let output=frame.collect(&r)?;let pixels=output.linear_rgba.context("linear readback")?;
+            assert!(output.rgba[0]>70,"observer remains at z=10");
+            if let Some(previous)=&previous {crate::test_linear::assert_linear_eq(&pixels,previous);}
             previous=Some(pixels);
         }
         Ok(())

@@ -93,6 +93,12 @@ pub(super) fn authored_schema() -> schemars::Schema {
             "offset":{"type":"integer","minimum":0,"maximum":0},"count":{"type":"null"}
         }
     }));
+    let mut dense_file = defs["Buffer"]["oneOf"][1].clone();
+    dense_file["title"] = serde_json::json!("DenseFileBuffer");
+    dense_file["required"] = serde_json::json!(["file", "dims"]);
+    dense_file["properties"]["dims"] = defs["Buffer"]["oneOf"][2]["properties"]["dims"].clone();
+    dense_file["properties"]["grid"] = serde_json::json!({"type":"null"});
+    defs["Buffer"]["oneOf"].as_array_mut().unwrap().push(dense_file);
     defs["Program"]["oneOf"][0]["properties"]["source_origin"]=serde_json::json!({"type":"null"});
     let values = schema.clone().to_value();
     let reference = reference(&values);
@@ -391,12 +397,15 @@ pub fn reference(schema: &serde_json::Value) -> String {
         let range = match p.kind {
             super::OpenPbrKind::Bool => "{false,true}".to_owned(),
             super::OpenPbrKind::Vector3 => "N/A".to_owned(),
-            _ => format!("{}{},{}{} per channel", if p.open_min { '(' } else { '[' },
-                p.min, p.max, if p.open_max { ')' } else { ']' }),
+            _ => format!("{}{},{}{}{}", if p.open_min { '(' } else { '[' },
+                p.min, p.max, if p.open_max { ')' } else { ']' },
+                if p.kind == super::OpenPbrKind::Color3 { " per channel" } else { "" }),
         };
         let path = format!("material.inputs.{}", p.name);
         lines.insert(path.clone(), format!("{path}: {ty}; {}; range {range}; units {}; {binding}; default {}",
             p.meaning, match p.unit { "" => "dimensionless", "length" => "metres", unit => unit }, p.default_text));
+        let program_path = format!("std/openpbr.{}", p.name);
+        lines.insert(program_path.clone(), lines[&path].replacen(&path, &program_path, 1));
     }
     lines.insert("material.inputs (std/openpbr)".into(), format!(
         "material.inputs (std/openpbr): OpenPBR Surface; shaded inputs: {}",
@@ -783,7 +792,7 @@ pub fn documents() -> Vec<(&'static str, String)> {
         (
             "docs/DEFAULTS.md",
             format!(
-                "# Defaults and standards\n\nGenerated from Rust scene types; run `scripts/generate-docs`. See [defaults policy](design/defaults.md) for precedence and rationale.\nStd compositor socket defaults: [COMPOSITOR.md](COMPOSITOR.md).\n\nRender calls default to `std/final`: scene-ray reflections, diffuse indirect light and physical shadows, with a smaller camera budget and bundled OIDN denoising by default. Retained probes are removed. Raster reconstruction preserves transmitting, strongly reflecting and mixed-surface pixels; scene effects requiring path transport retain the call's denoise intent at the same camera budget. `denoise=false` turns OIDN off and uses the profile reconstruction. Without a fast GPU denoiser, draft and final announce it and use 16 and 32 samples undenoised; explicit `denoise=true` uses the CPU denoiser. This affects glass, hair and interior lighting. `std/draft` uses OIDN at four samples; `std/final` uses eight; `--set samples=N` overrides the profile budget; `std/path` is the reference. `std/previs` is the explicit blocking-look exception: four samples, direct lights and ray shadows, environment reflections, no GI or probes, and no denoising by default; it does not estimate final transport. These quality-level choices are separate from the bare input defaults below.\n\nThe disk cache defaults to a 16 GiB ceiling, further limited to half of cache bytes plus available filesystem space (vork storage policy). `VORK_CACHE_BYTES` overrides the ceiling in bytes; `0` disables persistence. Invalid values use the default. `VORK_CACHE_DIR` overrides the platform cache directory. All artifact kinds share least-recently-used eviction at startup and before publication. Entries larger than the budget are not persisted.\n\nRaster quality levels use triangle visibility with physical emitter sampling shared\nwith path transport.\n\n`std/hair` evaluates Chiang scattering at every quality level. Raster no longer substitutes the EEVEE Color-only diffuse response, which discarded Melanin and Direct Absorption inputs. This changes raster hair appearance in `scenes/hair/`, curve hair and custom scenes using the bundled material; explicit custom diffuse Hair closures retain their meaning.\n\n<!-- generated-defaults:start -->\n| Field | Input default | Origin |\n|---|---|---|\n{}\n<!-- generated-defaults:end -->\n",
+                "# Defaults and standards\n\nGenerated from Rust scene types; run `scripts/generate-docs`. See [defaults policy](design/defaults.md) for precedence and rationale.\nStd compositor socket defaults: [COMPOSITOR.md](COMPOSITOR.md).\n\nRender calls default to `std/final`: scene-ray reflections, diffuse indirect light and physical shadows, with a smaller camera budget and bundled OIDN denoising by default. Retained probes are removed. Raster reconstruction preserves transmitting, strongly reflecting and mixed-surface pixels; scene effects requiring path transport retain the call's denoise intent at the same camera budget. `denoise=false` turns OIDN off and uses the profile reconstruction. Without a fast GPU denoiser, draft and final announce it and use 16 and 32 samples undenoised; explicit `denoise=true` uses the CPU denoiser. This affects glass, hair and interior lighting. `std/draft` uses OIDN at four samples; `std/final` uses eight; `--set samples=N` overrides the profile budget; `std/path` uses 64 samples independently of denoising; custom level-2 profiles without an explicit sample count use the same budget. Converged references must request `samples=4096`. `std/previs` is the explicit blocking-look exception: four samples, direct lights and ray shadows, environment reflections, no GI or probes, and no denoising by default; it does not estimate final transport. These quality-level choices are separate from the bare input defaults below.\n\nThe disk cache defaults to a 16 GiB ceiling, further limited to half of cache bytes plus available filesystem space (vork storage policy). `VORK_CACHE_BYTES` overrides the ceiling in bytes; `0` disables persistence. Invalid values use the default. `VORK_CACHE_DIR` overrides the platform cache directory. All artifact kinds share least-recently-used eviction at startup and before publication. Entries larger than the budget are not persisted.\n\nRaster quality levels use triangle visibility with physical emitter sampling shared\nwith path transport.\n\n`std/hair` evaluates Chiang scattering at every quality level. Raster no longer substitutes the EEVEE Color-only diffuse response, which discarded Melanin and Direct Absorption inputs. This changes raster hair appearance in `scenes/hair/`, curve hair and custom scenes using the bundled material; explicit custom diffuse Hair closures retain their meaning.\n\n<!-- generated-defaults:start -->\n| Field | Input default | Origin |\n|---|---|---|\n{}\n<!-- generated-defaults:end -->\n",
                 rows.join("\n")
             ),
         ),

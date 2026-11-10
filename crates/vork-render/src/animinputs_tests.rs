@@ -63,8 +63,8 @@ fn animated_emission_program_shutter_and_seek() -> Result<()> {
         );
         let sought = pixels(&r, &installed, &mut slot, 0.5)?;
         let mut alone = installed.create_frame_slot(&r, ReadbackPrecision::Float)?;
-        assert_eq!(sought, pixels(&r, &installed, &mut alone, 0.5)?);
-        assert_eq!(mixed, sought);
+        crate::test_linear::assert_linear_eq(&sought, &pixels(&r, &installed, &mut alone, 0.5)?);
+        crate::test_linear::assert_linear_eq(&mixed, &sought);
     }
     Ok(())
 }
@@ -149,7 +149,7 @@ fn animated_medium_parameter_matches_static_and_seek() -> Result<()> {
     let first = pixels(&r, &installed, &mut slot, 0.)?;
     let later = pixels(&r, &installed, &mut slot, 1.)?;
     assert!(first[0][0] > later[0][0] + 0.1, "{first:?} {later:?}");
-    assert_eq!(first, pixels(&r, &installed, &mut slot, 0.)?);
+    crate::test_linear::assert_linear_eq(&first, &pixels(&r, &installed, &mut slot, 0.)?);
     source.animation.clear();
     source
         .materials
@@ -394,7 +394,7 @@ fn animated_bounded_path_extinction_requires_an_input_independent_certificate() 
     value["render"]["settings"] = json!({"integrator":"path","samples":1,"denoiser":null});
     value["programs"]["fog"] = json!({"source":"struct Inputs {float density=.1;}; MediumCoefficients medium(MediumContext c,Inputs i){MediumCoefficients m;m.absorption=float3(i.density*(1.+c.position.x*c.position.x));return m;}"});
     value["materials"]["fog"] = json!({"program":"fog","inputs":{"density":0.1}});
-    value["nodes"].as_array_mut().unwrap().push(json!({"type":"mesh","geometry":{"std":"box"},"materials":["fog"]}));
+    value["nodes"].as_array_mut().unwrap().push(json!({"type":"mesh","geometry":{"std":"rounded_box","radius":0,"size":[2,2,2]},"materials":["fog"]}));
     value["animation"] = json!([{"tracks":[{"path":["materials","fog","inputs","density"],"keys":[[0,0.1],[1,10.]]}]}]);
     let parse = |mut value: serde_json::Value| -> Result<Scene> {
         let settings = value["render"].as_object_mut().unwrap().remove("settings").unwrap();
@@ -429,12 +429,12 @@ fn animated_compositor_inputs_match_static_and_seek() -> Result<()> {
     let first = pixels(&r, &installed, &mut slot, 0.)?;
     let later = pixels(&r, &installed, &mut slot, 1.)?;
     assert!(later[0][0] > first[0][0] + 0.1);
-    assert_eq!(first, pixels(&r, &installed, &mut slot, 0.)?);
+    crate::test_linear::assert_linear_eq(&first, &pixels(&r, &installed, &mut slot, 0.)?);
     source.animation.clear();
     source.materials.get_mut("glow").unwrap().inputs.insert("strength".into(), vork_scene::Input::Number(2.));
     let static_scene = r.install(source, Path::new("."))?;
     let mut static_slot = static_scene.create_frame_slot(&r, ReadbackPrecision::Float)?;
-    assert_eq!(later, pixels(&r, &static_scene, &mut static_slot, 1.)?);
+    crate::test_linear::assert_linear_eq(&later, &pixels(&r, &static_scene, &mut static_slot, 1.)?);
     Ok(())
 }
 

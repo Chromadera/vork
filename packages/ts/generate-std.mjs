@@ -114,10 +114,10 @@ for (const [index, path] of paths.entries()) {
   }
 }
 output += `const stdFunctions = {${entries.join(',\n')}};\nfunction stdEvaluate(name,args) {\n  if (!Object.hasOwn(stdFunctions,name)) throw new Error('unknown standard-library function '+name+'; see vork help std');\n  const fn=stdFunctions[name];\n  if (fn.keys === null) { if (!Array.isArray(args)) throw new TypeError('argument must be an array'); }\n  else { checkOptions(args,fn.keys); for (const key of fn.required) if (!Object.hasOwn(args,key)) throw new TypeError('missing option: '+key); }\n  return fn.invoke(args);\n}\n`;
-// The starting page keeps three builders; all other signatures live in the advanced std reference.
-const shapeLines = help.split('\n').filter(line => /^(box|sphere|cylinder|cone|torus|capsule|rounded_box|grid|revolve|text|extrude):/.test(line));
+// Builder signatures live in the advanced std reference.
+const shapeLines = help.split('\n').filter(line => /^(box|sphere|grid|cylinder|cone|torus|capsule|revolve|rounded_box|text|extrude):/.test(line));
 const sceneGeometryHelp = 'Scene geometry: {std: NAME, ...options}; omit name: the table key or inline position owns identity.';
-const apiShapeLines = shapeLines.filter(line => /^(box|sphere|grid):/.test(line));
+const apiShapeLines = [];
 const indexPath = new URL('../../docs/help/index.md', import.meta.url);
 const index = readFileSync(indexPath, 'utf8').replace(
   /<!-- generated-shapes:start -->[\s\S]*?<!-- generated-shapes:end -->/,

@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "materials": {"screen": {"inputs": {"base_color": [0.85,0.76,0.55],"specular_roughness": 0.85,"specular_weight": 0.15,"geometry_thin_walled": true,"subsurface_weight": 0.85,"subsurface_color": [0.85,0.76,0.55],"subsurface_scatter_anisotropy": 0.55}},"ink": {"inputs": {"base_color": [0.018,0.012,0.008],"specular_roughness": 0.85}},"brass": {"inputs": {"base_color": [0.48,0.28,0.065],"base_metalness": 0.8,"specular_roughness": 0.3}}},
+  "nodes": [
+    {"type": "mesh","name": "rice_screen","translation": [0,0,0],"geometry": {"attributes": {"POSITION": {"type": "vec3","data": [[-1.7,-1.1,0],[1.7,-1.1,0],[1.7,1.1,0],[-1.7,1.1,0]]}},"indices": {"type": "u32","data": [0,1,2,0,2,3]}},"materials": ["screen"]},
+    {"type": "mesh","name": "fox","translation": [-0.65,0.0,-0.35],"geometry": {"std": "rounded_box","size": [0.3,0.3,0.3],"radius": 0},"materials": ["ink"],"visible": false},
+    {"type": "mesh","name": "tack_0_0","translation": [-1.79,-0.98,0.57],"geometry": {"std": "rounded_box","size": [0.055,0.055,0.025],"radius": 0},"materials": ["brass"]},
+    {"type": "camera","name": "camera","translation": [0,0,5],"target": [0,0,0],"material": {"program": "std/camera","inputs": {"projection": "ortho","ortho_scale": 4,"fit": "horizontal"}}},
+    {"type": "light","name": "front_fill","shape": "rectangle","translation": [-2,3,3],"target": [0,0,0],"size": 3,"energy": 30,"color": [1,0.8,0.58]}
+  ],
+  "render": {"resolution": [320,240],"background": [0.008,0.009,0.014]}
+}

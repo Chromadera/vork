@@ -20,16 +20,15 @@ The JSON Schema is exported as `@voyager-so/vork/scene.schema.json`.
 Rust scene types are the source of truth. After changing them, run `npm run generate`.
 `npm run check:generated` fails if either generated artifact is stale.
 
-Authoring guidance: `vork help sdk`; looks: `vork help post`.
+Authoring guidance: `vork help sdk`; compositor contract: `vork help compositor`.
 Runnable starter: [orbit.ts](examples/orbit.ts). Scene reference: `vork --help`.
 
 Inline typed geometry and instance buffers are declared on `Scene.buffers`.
 Field reference: `vork help geometry --all`.
 
-The standard library keeps triangulated shape generation (`box`,
-`sphere`, `cylinder`, `cone`, `torus`, `capsule`, `roundedBox`, `grid`, `revolve`, and the
-native `extrude`) and the native font loader `text`. These return ordinary
-buffers and geometry maps. See `vork help std`.
+The standard library keeps `roundedBox`, bevelled `extrude` and the native font
+loader `text`. These return ordinary buffers and geometry maps. Author simple
+primitives and lathed profiles directly; see `vork help std --all`.
 
 `render('shot.json', {out: 'still.png', at: 0, profile: 'std/previs'})` runs `vork render` with
 render-time options (`at`, `profile`, `set`, `channels`); the scene file is unchanged.

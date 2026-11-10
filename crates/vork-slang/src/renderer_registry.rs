@@ -222,6 +222,7 @@ constants! {
     // Requested output stores; matches constants.rs, carried exactly in frame.projection.w.
     REG_OUTPUT_GPU_COLOR: u32 = common::OUTPUT_GPU_COLOR as u32 => "u32";
     REG_OUTPUT_COLOR_PLANE: u32 = common::OUTPUT_COLOR_PLANE as u32 => "u32";
+    REG_OUTPUT_COLOR_PLANE16: u32 = common::OUTPUT_COLOR_PLANE16 as u32 => "u32";
     REG_OUTPUT_DEPTH_IDS: u32 = common::OUTPUT_DEPTH_IDS as u32 => "u32";
     REG_OUTPUT_NORMALS: u32 = common::OUTPUT_NORMALS as u32 => "u32";
     REG_OUTPUT_MOTION: u32 = common::OUTPUT_MOTION as u32 => "u32";

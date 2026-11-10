@@ -179,3 +179,99 @@ fn file_program_imports_ignore_unreadable_scene_descendants() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+#[ignore = "renders images; requires a real GPU and pinned Slang"]
+fn fog_watchdog_warnings_reach_still_and_sequence_metadata() {
+    let dir = std::env::temp_dir().join(format!("vork-fog-warnings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let positions: Vec<_> = (0..4096).flat_map(|i| {
+        let z = -(i as f32) * 0.001;
+        [[-10., -10., z], [10., -10., z], [0., 10., z]]
+    }).collect();
+    let mut scene = serde_json::json!({
+        "version":2, "render":{"resolution":[8,8],"fps":4,"duration":0.5},
+        "buffers":{"p":{"type":"vec3","data":positions}},
+        "geometry":{"cutouts":{"attributes":{"POSITION":"p"}}},
+        "programs":{"fog":{"source":include_str!("../../vork-render/tests/fixtures/fog-constant.slang")}},
+        "materials":{
+            "fog":{"program":"fog","inputs":{"absorption":[0.01,0.01,0.01],"scattering":[0,0,0]}},
+            "cutout":{"inputs":{"geometry_opacity":0.1,"alpha_cutoff":0.5}}
+        },
+        "nodes":[{"type":"camera","translation":[0,0,2]},
+            {"type":"light","shape":"environment","medium":"fog"},
+            {"type":"mesh","geometry":"cutouts","materials":["cutout"]}]
+    });
+    for clean in [false, true] {
+        if clean { scene["nodes"].as_array_mut().unwrap().pop(); }
+        let path = dir.join("scene.json");
+        std::fs::write(&path, scene.to_string()).unwrap();
+        for sequence in [false, true] {
+            let destination = dir.join(if sequence {"frames"} else {"still.png"});
+            let output = Command::new(std::env::var_os("VORK_BIN").unwrap_or_else(|| env!("CARGO_BIN_EXE_vork").into()))
+                .arg("render").arg(&path).args(["--profile", "std/path", "--set", "samples=1", "--set", "denoise=false", "--out"])
+                .arg(&destination).output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            let meta = if sequence {destination.join("meta.json")} else {dir.join("still.png.meta.json")};
+            let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(meta).unwrap()).unwrap();
+            let warnings = metadata["warnings"].as_array().unwrap();
+            let frames = metadata["frames"].as_array().unwrap();
+            assert_eq!(warnings.len(), if clean {0} else {frames.len()}, "{metadata}");
+            assert_eq!(stderr.contains("[fog_watchdog]"), !clean, "{stderr}");
+            for frame in frames {
+                let count = frame["terminated_medium_paths"].as_u64().unwrap();
+                assert_eq!(count > 0, !clean, "fixture must actually exhaust the production cap: {metadata}");
+                if !clean {
+                    let warning = warnings.iter().find(|w| w["requested"]["frame"] == frame["index"]).unwrap();
+                    assert_eq!(warning["code"], "fog_watchdog");
+                    assert_eq!(warning["requested"]["terminated_medium_paths"], count);
+                    assert_eq!(warning["requested"]["discarded_medium_radiance"], frame["discarded_medium_radiance"]);
+                    assert!(stderr.contains(&format!("ended {count} fog paths")), "{stderr}");
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "renders images; requires a real GPU and pinned Slang"]
+fn nonfinite_path_warnings_match_actual_drops_and_reset_between_frames() {
+    let dir = std::env::temp_dir().join(format!("vork-path-warnings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scene = dir.join("scene.json");
+    // A tiny AOV patch produces real non-finite camera samples below the existing
+    // delivery threshold on frame 0. The same program is finite on frame 1.
+    std::fs::write(&scene, serde_json::json!({
+        "version":2, "render":{"resolution":[64,64],"fps":4,"duration":0.5,
+            "aovs":[{"name":"bad","type":"value"}]},
+        "buffers":{"p":{"type":"vec3","data":[[0,0,0],[0.03125,0,0],[0.03125,0.03125,0],[0,0.03125,0]]}},
+        "geometry":{"quad":{"attributes":{"POSITION":"p"},"indices":{"type":"u32","data":[0,1,2,0,2,3]}}},
+        "programs":{"bad":{"source":"import vork; struct Inputs { Aov value; }; Closure surface(ShadingContext c, Inputs i) { return unlit(float3(.4)); } void aov(ShadingContext c, Inputs i, inout AovOutputs o) { write_aov(o,i.value,c.time<.1 ? asfloat(0x7fc00000u) : .5); }"}},
+        "materials":{"bad":{"program":"bad","inputs":{"value":{"aov":"bad"}}}},
+        "nodes":[{"type":"camera","translation":[0,0,2],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2}}},
+            {"type":"light","shape":"environment","color":[0.18,0.18,0.18]},
+            {"type":"mesh","geometry":"quad","materials":["bad"]}]
+    }).to_string()).unwrap();
+    for sequence in [false, true] {
+        let destination = dir.join(if sequence {"frames"} else {"still.png"});
+        let output = Command::new(std::env::var_os("VORK_BIN").unwrap_or_else(|| env!("CARGO_BIN_EXE_vork").into()))
+            .arg("render").arg(&scene).args(["--profile", "std/path", "--set", "samples=1", "--set", "denoise=false", "--channels", "all", "--out"])
+            .arg(&destination).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        let meta = if sequence {destination.join("meta.json")} else {dir.join("still.png.meta.json")};
+        let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(meta).unwrap()).unwrap();
+        let warnings = metadata["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{metadata}");
+        let count = metadata["frames"][0]["dropped_path_samples"].as_u64().unwrap();
+        assert!(count > 0, "fixture must trigger real path drops: {metadata}");
+        assert_eq!(warnings[0]["code"], "nonfinite_path_samples");
+        assert_eq!(warnings[0]["requested"], serde_json::json!({"frame":0,"dropped_path_samples":count}));
+        assert!(stderr.contains(&format!("frame 0 dropped {count} non-finite path samples")), "{stderr}");
+        assert!(!stderr.contains("frame 1 dropped"), "{stderr}");
+        if sequence { assert_eq!(metadata["frames"][1]["dropped_path_samples"], 0); }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

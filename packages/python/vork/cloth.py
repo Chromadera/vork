@@ -210,8 +210,10 @@ def _build(
     self_leaves = 1 << (faces_count - 1).bit_length()
     buf("self_order", "u32", list(range(faces_count)))
     buf("snapshot", "vec3", positions)
+    buf("rest_position", "vec3", positions)
     for key in ["self_lo", "self_hi"]:
         buf(key, "vec3", [[0, 0, 0]] * (2 * self_leaves))
+    buf("contact_status", "u32", [0])
     contact_capacity = 512
     for key in ["contact_key", "contact_ids", "contact_weights", "contact_plane"]:
         buf(key, "vec4", [[0, 0, 0, 0]] * (n * contact_capacity))
@@ -320,7 +322,7 @@ def _build(
         contact
         or "void cloth_body_generate(uint i){}\nvoid cloth_collider_update(uint lane,Inputs inputs,bool initial){}\n"
     )
-    metadata = [k for k, v in buffers.items() if v["type"] == "u32" and k != "indices"]
+    metadata = [k for k, v in buffers.items() if v["type"] == "u32" and k not in ["indices", "contact_status"]]
     for k in metadata:
         buffers[k]["type"] = "f32"
     config = (
@@ -623,6 +625,12 @@ def attach(
         {k: remap(v) for k, v in fragment["geometry"]["cloth"]["attributes"].items()}
     )
     geometry["indices"] = remap("indices")
+    geometry["status"] = dict(
+        buffer=remap("contact_status"),
+        message=(f"cloth node {node!r}: self-contact capacity exceeded (512 slots per vertex; "
+                 "reported value is a lower bound on required slots). Reduce collision_margin "
+                 "or initial intersections; reduce dt for fast motion or extreme folding"),
+    )
     # All validation/build work precedes mutation of the author's scene.
     for table, values in [
         ("buffers", {remap(k): v for k, v in fragment["buffers"].items()}),

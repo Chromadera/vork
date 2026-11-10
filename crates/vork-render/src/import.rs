@@ -68,7 +68,7 @@ fn check_glb(bytes: &[u8]) -> Result<()> {
 
 /// Blender can emit texCoord=-1 for a missing UV-map selection. Omission has
 /// the glTF default TEXCOORD_0 meaning. Keep every other validation error intact.
-fn from_slice(bytes: &[u8]) -> Result<gltf::Gltf> {
+pub(crate) fn from_slice(bytes: &[u8]) -> Result<gltf::Gltf> {
     let text = vork_scene::diagnostics::without_bom(bytes);
     ensure!(!bytes.starts_with(b"Kaydara FBX Binary")
         && !text.trim_ascii_start().starts_with(b"; FBX"),
@@ -345,7 +345,7 @@ impl GeometryUpload<'_> {
         } = geometry;
         let bounds = *bounds;
         let mut layout = crate::geometry::VertexLayout::for_vertices(vertices, deform.is_some() || self.evaluated_layout);
-        if self.stream_layout { layout.uv = [0,1]; layout.color = true; }
+        if self.stream_layout || (self.evaluated_layout && !geometry.point_centers.is_empty()) { layout.uv = [0,1]; layout.color = true; layout.points = !geometry.point_centers.is_empty(); }
         layout.custom = self.attribute_names.len() as u8;
         if vertices.is_empty() || indices.is_empty() {
             return Ok(());
@@ -437,6 +437,7 @@ impl GeometryUpload<'_> {
             exit_bvh: None,
             open_edges: None,
             indices: index_buffer,
+            refit_indices: None,
             geometry_page,
             vertex_offset,
             index_offset,
@@ -705,6 +706,7 @@ impl GeometryUpload<'_> {
                 let geometry = crate::geometry::Geometry {
                     refinement: None,
                     point_centers: Vec::new(),
+                    point_widths: Vec::new(),
                     primitive_ids: (0..(indices.len()/3) as u32).collect(),
                     vertices,
                     vertex_ids,

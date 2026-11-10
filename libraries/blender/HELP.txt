@@ -7,4 +7,34 @@ Filmic reads libraries/blender/filmic.exr beside vork.
 Modules: blender.nodes
 (Diffuse_BSDF, Glass_BSDF, Transparent_BSDF, Fresnel, Layer_Weight_Fresnel, Math, Normal_Map);
 blender.texture_coordinate (Generated, Normal, UV, Object, Camera, Window, Reflection);
-blender.color (mix with BlendMode, float_curve); blender.procedurals (wave, brick, magic).
+blender.color (mix with BlendMode, float_curve); blender.procedurals (wave, brick, magic, noise, noise_color, voronoi, white_noise, gabor).
+
+blender.procedurals: noise, noise_color, voronoi, white_noise, gabor.
+Slang signatures below: p is float3; scalar inputs float except dimensions:int and normalize:bool.
+noise(p, scale=5, detail=2, roughness=.5, lacunarity=2, distortion=0, normalize=true,
+  type=NoiseType.FBM, dimensions=3, w=0, offset=0, gain=1) → float.
+noise_color: same inputs → float3, independently seeded channels.
+NoiseType: FBM|Multifractal|Hybrid_Multifractal|Ridged_Multifractal|Hetero_Terrain (case-sensitive).
+FBM with normalize=true is centred on .5, range [0,1]; other modes/un-normalized values may exceed it.
+Detail adds octaves beyond the base (0..15, fractional blends); dimensions 1..4; 1D uses w, 4D adds w.
+voronoi(p, scale=5, randomness=1, feature=VoronoiFeature.F1, metric=DistanceMetric.Euclidean,
+  smoothness=1, exponent=.5, dimensions=3, w=0, detail=0, roughness=.5, lacunarity=2,
+  normalize=false) → {distance:float, color:float3, position:float3, w:float, radius:float}.
+VoronoiFeature: F1|F2|Smooth_F1|Distance_To_Edge|N_Sphere_Radius.
+DistanceMetric: Euclidean|Manhattan|Chebychev|Minkowski (exponent controls Minkowski).
+Distances/radius use cell space; position/w locate features in input space; color identifies cells.
+Smooth_F1 is a smooth minimum and can undershoot zero (including color). normalize divides
+distance by weighted cell diagonal; not a clamp.
+white_noise(p, dimensions=3, w=0) → {value:float, color:float3} in [0,1]; hashes coordinates, no cells.
+gabor(p, scale=5, frequency=2, anisotropy=1, dimensions=2, orientation=.7853981634,
+  direction=float3(1.41421356237,1.41421356237,0)) → {value:float, phase:float, intensity:float}, [0,1].
+Gabor uses 2D XY/orientation radians, otherwise 3D/direction; anisotropy 0=random, 1=aligned.
+blender.color: color_ramp<N>(factor, RampStop[N], constant|linear|ease|cardinal|b_spline, rgb|hsv|hsl,
+  near|far|cw|ccw)
+
+blender.vector: bump(normal:float3, position_dx:float3, position_dy:float3, height_dx:float, height_dy:float,
+  strength=1, distance=.001, invert=false) → float3; supply position/height derivatives explicitly.
+
+blender.white_balance: white_balance(color:float3, WhiteBalanceInputs) → float3;
+  source white to D65, temperature=6500 K (1800..100000), tint=10 (-500..500).
+  Exact imported Blender display adaptation; linear Rec.709, no alpha operation.

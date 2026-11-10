@@ -93,6 +93,7 @@ pub(crate) const GPU_SPANS: &[&str] = &[
     "subsurface_compose",
     "resolve",
     "deform",
+    "acceleration structures",
     "ao",
     "gi demand",
     "gi pilots",
@@ -240,6 +241,9 @@ pub(crate) const EVALUATION_BAND_RECORDS: u64 = 1 << 25;
 /// the first frame that redo; replay sizes later frames from reported demand. Chosen to cover
 /// the largest band's measured excess over an even share (Classroom: 1.4-9.4% at 5-45 bands).
 pub(crate) const EVALUATION_ESTIMATE_HEADROOM: u64 = 8;
+/// Camera records share one quarter of stable startup headroom, leaving room
+/// for retained images, scene resources, denoising and downstream passes.
+pub(crate) const CAMERA_RECORD_MEMORY_SHARE: u64 = 4;
 /// allocation bound: one view's band of evaluations takes at most 1/N of device memory, so a
 /// small device splits the frame into more bands instead of exhausting its memory.
 pub(crate) const EVALUATION_MEMORY_SHARE: u64 = 8;

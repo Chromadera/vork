@@ -129,6 +129,7 @@ impl ImageRender {
             compositor: self.compositor.clone(),
             settings: Settings {
                 promotion_denoise: parent.settings.promotion_denoise,
+                bounded_secondary_compilation: parent.settings.bounded_secondary_compilation,
                 previs: parent.settings.previs,
                 reconstruct: parent.settings.reconstruct,
                 seed: parent.settings.seed,

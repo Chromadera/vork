@@ -14,7 +14,10 @@ impl BufferType {
     }
 }
 impl Scene {
-    pub(super) fn validate_resources(&self, nodes_by_name: &BTreeMap<&str, &Node>) -> Result<()> {
+    pub(super) fn validate_resources(&self, nodes_by_name: &BTreeMap<&str, &Node>, require_camera:bool) -> Result<()> {
+        for (index,stage) in self.geometry_stages.iter().enumerate() {
+            ensure!(!self.geometry_stages[..index].contains(stage),"geometry_stages[{index}] repeats {}; remove the duplicate stage",stage.name());
+        }
         let lookup = |name: &str| -> Result<&Buffer> {
             let buffer=self.buffers.get(name).with_context(|| {
                 diagnostics::unknown("buffer", name, self.buffers.keys().map(String::as_str))
@@ -27,7 +30,10 @@ impl Scene {
                 ensure!(dims.iter().all(|&n| n > 0), "buffer {name}: dims must be positive");
                 let count = dims.into_iter().try_fold(1u32, |n, d| n.checked_mul(d)).context("dense grid dimensions overflow")?;
                 ensure!(count.checked_mul(b.element_type.width() as u32).is_some(), "buffer {name}: dense grid word count overflows");
-                ensure!(b.file.is_none() && b.grid.is_none() && b.offset == 0 && b.count.is_none(), "buffer {name}: dims require non-file data without grid/offset/count");
+                ensure!(b.grid.is_none(), "buffer {name}: dims cannot be combined with grid");
+                ensure!(b.data.is_none() || b.file.is_none(), "buffer {name}: data and file are mutually exclusive");
+                ensure!(b.file.is_some() || (b.offset == 0 && b.count.is_none()), "buffer {name}: offset/count require a file");
+                ensure!(b.count.is_none_or(|n| n == count), "buffer {name}: count differs from dims product");
                 ensure!(b.data.as_ref().is_none_or(|v| v.len() == count as usize), "buffer {name}: data length differs from dims product");
             }
             if let Some(grid) = &b.grid {
@@ -144,7 +150,7 @@ impl Scene {
             Ok(())
         };
         for geometry in self.geometry.values() {
-            let dynamic = !matches!(geometry.topology, Topology::Volume | Topology::Implicit) && (geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.ids.iter()).any(|b| computed.contains(b.as_str())) || geometry.count.is_some());
+            let dynamic = !matches!(geometry.topology, Topology::Volume | Topology::Implicit) && (geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.ids.iter()).any(|b| computed.contains(b.as_str())) || geometry.count.is_some() || geometry.status.is_some());
             if dynamic {
                 ensure!(matches!(geometry.topology, Topology::Triangles | Topology::Points), "computed geometry requires triangles or points");
                 ensure!(geometry.subdivision.is_none() && geometry.face_vertex_counts.is_none(), "computed geometry requires fixed triangle topology without subdivision; place subdivision after the compute stage");
@@ -156,6 +162,12 @@ impl Scene {
                 if let Some(position)=geometry.attributes.get("POSITION") {
                     if let (Some(a),Some(b))=(ids.len(),lookup(position)?.len()) {ensure!(a==b,"point ids count must match POSITION");}
                 }
+            }
+            if let Some(status) = &geometry.status {
+                ensure!(matches!(geometry.topology, Topology::Triangles | Topology::Points | Topology::Implicit), "geometry.status requires triangles, points or implicit surfaces");
+                let buffer = lookup(&status.buffer)?;
+                ensure!(buffer.element_type == BufferType::U32 && buffer.grid.is_none() && buffer.dims.is_none() && buffer.len().is_none_or(|n| n == 1), "geometry.status requires a one-element numeric u32 buffer");
+                ensure!(!status.message.trim().is_empty(), "geometry.status.message must describe the failure and remedy");
             }
             if let Some(count) = &geometry.count {
                 ensure!(matches!(geometry.topology, Topology::Points), "geometry.count requires points");
@@ -755,11 +767,14 @@ impl Scene {
         }
         nodes(self, &self.nodes)?;
         self.validate_targets(nodes_by_name)?;
-        self.validate_render(&self.render, nodes_by_name)
+        self.validate_render_selection(&self.render, nodes_by_name,require_camera)
     }
 }
 impl Scene {
     pub(super) fn validate_render(&self, r: &Render, nodes: &BTreeMap<&str, &Node>) -> Result<()> {
+        self.validate_render_selection(r,nodes,true)
+    }
+    fn validate_render_selection(&self,r:&Render,nodes:&BTreeMap<&str,&Node>,require_camera:bool)->Result<()> {
         let mut names=std::collections::BTreeSet::new();
         for aov in &r.aovs {
             ensure!(!aov.name.is_empty() && aov.name.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'_' || b==b'-') && names.insert(&aov.name),"AOV name {:?} must be unique, nonempty and use only ASCII letters, digits, _ and -",aov.name);
@@ -780,7 +795,7 @@ impl Scene {
             }
             let cameras = count(&self.nodes);
             ensure!(
-                cameras <= 1 || self.animation.iter().any(|layer| layer.blend == Blend::Replace
+                !require_camera || cameras <= 1 || self.animation.iter().any(|layer| layer.blend == Blend::Replace
                     && layer.tracks.iter().flatten().any(|track| track.path == ["render", "camera"])),
                 "a scene with {cameras} cameras requires render.camera"
             );
@@ -816,25 +831,7 @@ impl Scene {
             let name = entry.material();
             let material = self.materials.get(name).with_context(|| format!("render.compositor[{index}]: unknown material {name}"))?;
             entry.extent(r.resolution)?;
-            if material.program == "std/bloom" {
-                let stage = match material.inputs.get("stage") {
-                    None => "combine",
-                    Some(Input::Token(stage)) => stage.as_str(),
-                    _ => anyhow::bail!("render.compositor[{index}]: std/bloom stage must be prepare, downsample, upsample or combine"),
-                };
-                let required: &[&str] = match stage {
-                    "prepare" => &["original"],
-                    "downsample" => &["source"],
-                    "upsample" => &["source", "fine"],
-                    "combine" => &["original", "source"],
-                    _ => anyhow::bail!("render.compositor[{index}]: unknown std/bloom stage {stage}"),
-                };
-                for &input in required {
-                    ensure!(matches!(material.inputs.get(input),
-                        Some(Input::Texture(_) | Input::Node(_) | Input::Channel(_) | Input::Aov(_))),
-                        "render.compositor[{index}]: std/bloom {stage} requires Image input {input}; see vork help compositor --all");
-                }
-            }
+
             for input in material.inputs.values() {
                 if let Input::Node(binding) = input {
                     ensure!(earlier.contains(binding.node.as_str()), "render.compositor[{index}]: node {} must name an earlier entry", binding.node);
@@ -1168,6 +1165,23 @@ mod hemisphere_tests {
     }
 
     #[test]
+    fn geometry_status_requires_scalar_u32_and_named_failure() {
+        let value=serde_json::json!({"version":2,"nodes":[{"type":"camera"}],
+            "geometry":{"g":{"attributes":{"POSITION":{"type":"vec3","data":[[0,0,0],[1,0,0],[0,1,0]]}},
+                "status":{"buffer":{"type":"u32","data":[0]},"message":"solver exhausted capacity; reduce contact distance"}}}});
+        Scene::from_json(value.to_string().as_bytes()).unwrap().validate().unwrap();
+        for (buffer,message) in [
+            (serde_json::json!({"type":"f32","data":[0]}),"failure"),
+            (serde_json::json!({"type":"u32","data":[0,0]}),"failure"),
+            (serde_json::json!({"type":"u32","data":[0]})," "),
+        ] {
+            let mut invalid=value.clone();
+            invalid["geometry"]["g"]["status"]=serde_json::json!({"buffer":buffer,"message":message});
+            assert!(Scene::from_json(invalid.to_string().as_bytes()).and_then(|s|s.validate()).is_err());
+        }
+    }
+
+    #[test]
     fn display_is_a_material_and_legacy_tracks_are_rejected() {
         let input = serde_json::json!({"version":2,"nodes":[{"type":"camera"}],
             "materials":{"grade":{"program":"std/agx","inputs":{"exposure":0}}},
@@ -1194,39 +1208,12 @@ mod hemisphere_tests {
         assert!(input.validate().unwrap_err().to_string().contains("target point must be finite"));
     }
     #[test]
-    fn bloom_graph_requires_each_stage_image_even_at_zero_strength() {
-        for (stage, required) in [
-            ("prepare", &["original"][..]),
-            ("downsample", &["source"][..]),
-            ("upsample", &["source", "fine"][..]),
-            ("combine", &["original", "source"][..]),
-        ] {
-            let mut inputs = serde_json::json!({"stage":stage,"strength":0});
-            for &field in required { inputs[field] = serde_json::json!({"channel":"color"}); }
-            let scene = |inputs: serde_json::Value, capture: bool| {
-                let mut value = serde_json::json!({"version":2,"nodes":[{"type":"camera"}],
-                    "materials":{"glow":{"program":"std/bloom","inputs":inputs}}});
-                if capture {
-                    value["images"] = serde_json::json!({"capture":{"render":{"compositor":["glow"]}}});
-                } else { value["render"] = serde_json::json!({"compositor":["glow"]}); }
-                crate::v2::from_test_value::<Scene>(value).unwrap()
-            };
-            for capture in [false, true] {
-                scene(inputs.clone(), capture).validate().unwrap();
-                for &field in required {
-                    for bad in [None, Some(serde_json::json!(0))] {
-                        let mut invalid = inputs.clone();
-                        invalid.as_object_mut().unwrap().remove(field);
-                        if let Some(bad) = bad { invalid[field] = bad; }
-                        let error = scene(invalid, capture).validate().unwrap_err().to_string();
-                        assert!(error.contains(stage) && error.contains(field), "{error}");
-                    }
-                }
-            }
+    fn compatibility_library_programs_keep_loading() {
+        for name in ["std/bloom","post/white_balance"] {
+            let scene:Scene=crate::v2::from_test_value(serde_json::json!({"version":2,
+                "nodes":[{"type":"camera"}],"materials":{"unused":{"program":name}}})).unwrap();
+            scene.validate().unwrap();
         }
-        let scene: Scene = crate::v2::from_test_value(serde_json::json!({"version":2,
-            "nodes":[{"type":"camera"}],"render":{"compositor":[{"program":"std/bloom","inputs":{"strength":0}}]}})).unwrap();
-        assert!(scene.validate().unwrap_err().to_string().contains("combine requires Image input original"));
     }
 
     #[test]
@@ -1466,7 +1453,17 @@ mod dense_grid_tests {
         let check=|v|->Result<Scene>{let s:Scene=crate::v2::from_test_value(v)?;s.validate()?;Ok(s)};
         assert_eq!(check(base.clone())?.buffers["d"].len(),Some(24));
         for value in [serde_json::json!([0,3,4]),serde_json::json!([u32::MAX,2,4])] {let mut v=base.clone();v["buffers"]["d"]["dims"]=value;assert!(check(v).is_err());}
-        for (key,value) in [("file",serde_json::json!("x.bin")),("count",serde_json::json!(24)),("data",serde_json::json!([0]))] {let mut v=base.clone();v["buffers"]["d"][key]=value;assert!(check(v).is_err());}
+        for (key,value) in [("count",serde_json::json!(24)),("data",serde_json::json!([0]))] {let mut v=base.clone();v["buffers"]["d"][key]=value;assert!(check(v).is_err());}
+        let mut file = base.clone();
+        file["buffers"]["d"]["file"] = "field.bin".into();
+        assert_eq!(check(file.clone())?.buffers["d"].len(), Some(24));
+        file["buffers"]["d"]["offset"] = 16.into();
+        file["buffers"]["d"]["count"] = 24.into();
+        check(file.clone())?;
+        for (key, value) in [("count", serde_json::json!(23)), ("data", serde_json::json!(vec![0; 24])), ("grid", serde_json::json!("density")), ("offset", serde_json::json!(3))] {
+            let mut invalid = file.clone(); invalid["buffers"]["d"][key] = value;
+            assert!(check(invalid).is_err());
+        }
         for kind in ["f32","i32","u32","vec2","vec3","vec4","uvec4","mat4"] {
             let mut v=base.clone();v["buffers"]["d"]["type"]=kind.into();
             assert_eq!(check(v.clone())?.buffers["d"].len(),Some(24));

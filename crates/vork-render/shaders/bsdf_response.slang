@@ -104,15 +104,21 @@ float thin_diffuse_probability(Closure c) {
 }
 float3 direct_brdf_prepared(Closure c, float3 view, float3 light, uint mask, float3 diffuse, float3 metal_compensation) {
     if (c.base_weight==0. && c.specular_weight==0.) {return float3(0.);}
-    let n=c.geometry_normal;let h=normalize(view+light);
+    let n=c.geometry_normal;
     let nl=max(dot(n,light),0.);let nv=max(dot(n,view),.0001);
     if (nl<=0.) {return float3(0.);}
 
-    let nh=max(dot(n,h),0.);let vh=max(dot(view,h),0.);
-    let f=compensated_surface_reflection(c,view,vh,metal_compensation);
-    let specular=c.specular_roughness_anisotropy>0.
-        ? f*microfacet_distribution(c,h)*microfacet_visibility(c,view,light)
-        : ggx_reflection(f,nv,nl,nh,c.specular_roughness);
+    // The lobe mask is dynamic at shared hit-lighting call sites. Do not
+    // evaluate Fresnel/GGX only to select it away for diffuse-only transport.
+    var specular=float3(0.);
+    if((mask&REG_RAY_SPECULAR)!=0u) {
+        let h=normalize(view+light);
+        let nh=max(dot(n,h),0.);let vh=max(dot(view,h),0.);
+        let f=compensated_surface_reflection(c,view,vh,metal_compensation);
+        specular=c.specular_roughness_anisotropy>0.
+            ? f*microfacet_distribution(c,h)*microfacet_visibility(c,view,light)
+            : ggx_reflection(f,nv,nl,nh,c.specular_roughness);
+    }
     return (select((mask&REG_RAY_DIFFUSE)!=0u,diffuse,float3(0.))+select((mask&REG_RAY_SPECULAR)!=0u,specular,float3(0.)))*nl;
 }
 float2 specular_quadrature_point(uint i, float2 rotation, uint samples) {
@@ -126,7 +132,7 @@ float3 direct_brdf(Closure c, float3 view, float3 light, uint mask, float3 direc
         return (mask&REG_RAY_DIFFUSE)!=0u ? thin_diffuse(c,view,directional_albedo)*(-dot(c.geometry_normal,light)) : float3(0.);
     }
     if (c.base_weight==0. && c.specular_weight==0.) {return float3(0.);}
-    return direct_brdf_prepared(c,view,light,mask,(mask&REG_RAY_DIFFUSE)!=0u ? direct_diffuse(c,view,directional_albedo) : float3(0.),transport_metal_compensation(c,view));
+    return direct_brdf_prepared(c,view,light,mask,(mask&REG_RAY_DIFFUSE)!=0u ? direct_diffuse(c,view,directional_albedo) : float3(0.),(mask&REG_RAY_SPECULAR)!=0u ? transport_metal_compensation(c,view) : float3(0.));
 }
 
 float3 interface_reflection<V:IVariant>(Closure c,float3 view) {

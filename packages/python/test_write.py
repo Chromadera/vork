@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 import subprocess
 import json
 import os
@@ -10,6 +11,38 @@ from vork import std, write_scene
 
 class WriteScene(unittest.TestCase):
     """Mirrors packages/ts/test/serialization.test.mjs for writeScene."""
+
+    def test_dense_fields_round_trip_across_binary_threshold(self):
+        binary = os.environ.get('VORK_BIN', os.path.join(os.environ.get('CARGO_TARGET_DIR', str(Path(__file__).resolve().parents[2] / 'target')), 'release', 'vork'))
+        for x in (15, 16, 17):
+            with self.subTest(x=x), tempfile.TemporaryDirectory() as directory:
+                data = [float(i % x) - (x - 1) / 2 for i in range(x * 8 * 8)]
+                scene = {'version': 2, 'buffers': {'field': {'type': 'f32', 'dims': [x, 8, 8], 'data': data}},
+                         'geometry': {'shape': {'topology': 'implicit', 'attributes': {'field': 'field'}}},
+                         'nodes': [{'type': 'mesh', 'geometry': 'shape'}, {'type': 'camera'}]}
+                path = write_scene(scene, os.path.join(directory, 'scene.json'))
+                saved = self.read(path)['buffers']['field']
+                self.assertEqual(saved['dims'], [x, 8, 8])
+                if x < 16:
+                    self.assertEqual(saved['data'], data)
+                else:
+                    self.assertEqual(saved['count'], len(data))
+                    self.assertEqual(saved['offset'], 0)
+                    with open(os.path.join(directory, saved['file']), 'rb') as f:
+                        self.assertEqual(f.read(), struct.pack('<' + 'f' * len(data), *data))
+                result = subprocess.run([binary, 'check', path], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(scene['buffers']['field']['data'], data)
+        with tempfile.TemporaryDirectory() as directory:
+            scene['buffers']['field']['dims'] = [2, 2, 2]
+            with self.assertRaisesRegex(ValueError, 'dims product'):
+                write_scene(scene, os.path.join(directory, 'invalid.json'))
+
+    def test_geometry_stage_order_is_preserved(self):
+        scene={'version':2,'nodes':[],'geometry_stages':['displace','deform','compute']}
+        with tempfile.TemporaryDirectory() as directory:
+            saved=self.read(write_scene(scene,os.path.join(directory,'scene.json')))
+            self.assertEqual(saved['geometry_stages'],scene['geometry_stages'])
 
     def test_numeric_input_tracks_preserve_shared_scene_ir(self):
         animation = [{'tracks': [
@@ -224,7 +257,7 @@ class WriteScene(unittest.TestCase):
                             os.path.join(self.directory, 'bad.json'))
 
     def test_std_shapes_go_to_the_sidecar(self):
-        shape = std('sphere', name='ball')
+        shape = std('rounded_box', name='ball')
         scene = {'version': 2, **shape, 'nodes': [{'type': 'mesh', 'geometry': 'ball'}]}
         saved = self.read(write_scene(scene, os.path.join(self.directory, 'ball.json')))
         self.assertEqual(len({b['file'] for b in saved['buffers'].values()}), 1)

@@ -5,7 +5,7 @@ import material;
 import frame;
 import vork_constants;
 void trace_failure(uint reason) {InterlockedMax(shader_errors[0],REG_TRACE_EXHAUSTED);InterlockedMin(shader_errors[1],reason);}
-TraceHit geometric_trace<G:IHitGeometry>(RaytracingAccelerationStructure scene,float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
+TraceHit geometric_trace<G:IHitGeometry>(G g,RaytracingAccelerationStructure scene,float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
     TraceHit h={};h.distance=-1.;h.object_id=0xffffffffu;h.instance_index=0xffffffffu;h.primitive_id=0xffffffffu;
     let scale=max(abs(direction.x),max(abs(direction.y),abs(direction.z)));
     let magnitude=length(direction/scale);
@@ -25,11 +25,11 @@ TraceHit geometric_trace<G:IHitGeometry>(RaytracingAccelerationStructure scene,f
     h.hit=true;h.distance=query.CommittedRayT();h.position=origin+axis*h.distance;
     h.object_id=query.CommittedInstanceID();h.instance_index=query.CommittedInstanceIndex();h.primitive_id=query.CommittedPrimitiveIndex();
     let uv=query.CommittedTriangleBarycentrics();h.barycentrics=float3(1.-uv.x-uv.y,uv);
-    let triangle=hit_triangle<G>(h.instance_index,h.primitive_id,h.object_id,query.CommittedWorldToObject3x4());
+    let triangle=hit_triangle<G>(g,h.instance_index,h.primitive_id,h.object_id,query.CommittedWorldToObject3x4());
     h.geometric_normal=hit_face(triangle);
     let varying=hit_varying(triangle,h.barycentrics);
     h.shading_normal=dot(varying.NORMAL,varying.NORMAL)>0. ? normalize(varying.NORMAL) : h.geometric_normal;h.uv=varying.TEXCOORD_0;
     h.front_facing=dot(axis,h.geometric_normal)<0.;
     let record=objects[h.object_id];h.object_id=uint(record.opacity.y);
-    h.instance_index=record.padding.y;h.primitive_id=material_words[record.reserved+14u+h.primitive_id];return h;
+    h.instance_index=record.padding.y;h.primitive_id=material_words[record.reserved+14u+h.primitive_id+triangle.primitive_offset];return h;
 }

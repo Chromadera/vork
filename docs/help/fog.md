@@ -1,7 +1,7 @@
 FOG AND VOLUMES
 Author a Slang program with MediumCoefficients medium(MediumContext, Inputs).
 Bind its material to light.medium on the single environment light for world fog,
-or to a closed convex triangle mesh for finite homogeneous fog. No surface stage
+or to a closed triangle mesh for finite homogeneous fog. No surface stage
 is needed on a carrier. See vork help programs --all for program bindings.
 
 MediumCoefficients fields all default to zero:
@@ -30,16 +30,17 @@ World segments end at mathematical infinity. Positive constant extinction closes
 the world; uniform nonemitting fog cannot receive light from infinity.
 Height fog can have finite optical depth toward the sky. A zero-extinction
 emitting channel at infinity is refused, as is an unrepresentable collision position.
-At most eight finite carriers, each with at most 32 triangles, are supported.
 Independent carriers and world fog add, including inside glass; a vacuum carrier
 cannot subtract fog. Glass priority selects solid IOR/absorption, not independent fog.
 
 Fog selects complete-camera path transport for the shot and render-image captures,
 retaining the selected profile's sample budget. Raster and real-time fog have no
-qualified fallback. Builtin OpenPBR surfaces, including glass, are supported.
-Subsurface surfaces (including animated/textured activation), custom surface
-callbacks, displacement, authored curved propagation, implicit geometry,
-deformed carriers and finite-fog subtree renders are refused. Subsurface weight
-must be zero with no texture/animation binding. Work exhaustion refuses the image;
-failed publication invalidates retained captures and requires reinstallation.
+qualified fallback. Builtin OpenPBR surfaces, including glass and subsurface,
+may coexist with fog, implicit geometry and curved propagation.
+Custom surface callbacks, including those paired with displacement, are not yet supported. Deformed carriers and finite-fog
+subtree renders remain unsupported. Normal fog paths use sampled free flights and compensated Russian roulette.
+An emergency step watchdog reports `terminated_medium_paths` and warns if it fires.
+`discarded_medium_radiance` reports the accumulated absolute-luminance sum erased
+before sample averaging; additional energy in the untraced continuation is unknown.
+Ordinary scenes should not reach this watchdog.
 Exact attachment field: vork help field light.medium.

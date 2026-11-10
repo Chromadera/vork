@@ -80,8 +80,10 @@ fn dispatch(r: &Renderer, tree: &Tree, body: &str, count: u32) -> Result<Vec<[f3
         includes: vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders")],
         ..Default::default()
     };
+    // Include the production implementation so boundary probes can inspect its
+    // private partition helper without making that helper a public shader API.
     let source = format!(
-        "import light_tree;\n[[vk::binding(0,0)]] StructuredBuffer<LightTreeNode> nodes;\n[[vk::binding(1,0)]] RWStructuredBuffer<float4> output;\n{body}"
+        "#include \"light_tree.slang\"\nimport vork_constants;\n[[vk::binding(0,0)]] StructuredBuffer<LightTreeNode> nodes;\n[[vk::binding(1,0)]] RWStructuredBuffer<float4> output;\n{body}"
     );
     let entries = [
         pipelines::buffer_entry(
@@ -145,6 +147,46 @@ fn dispatch(r: &Renderer, tree: &Tree, body: &str, count: u32) -> Result<Vec<[f3
     r.errors.check()?;
     Ok(values)
 }
+#[test]
+fn weighted_remapping_never_enters_a_zero_power_branch() -> Result<()> {
+    let Some(r) = crate::test_renderer()? else {
+        return Ok(());
+    };
+    // #1186: the old selector remapped a finite coordinate to 1, entered a
+    // zero-power branch, and divided 0/0. A zero light contribution then became
+    // NaN when divided by the selected probability. Each subtree here has one
+    // powered and one dark leaf, so the weighted strategy must avoid dark leaves
+    // even immediately below/above the root's partition boundary.
+    let sources = [source(0., 0., 1.), source(0., 0., 0.),
+        source(100., 0., 1.), source(100., 0., 0.)];
+    let tree = Tree::build(&sources)?;
+    let body = format!(r#"
+[shader("compute")][numthreads(1,1,1)] void numerical_test(uint3 id:SV_DispatchThreadID) {{
+    float3 point=float3((float(id.x/2u)+.5)/32768.*400.-150.,1.,0.);
+    uint2 children=nodes[0].links.xy;
+    float split=light_tree_branch(nodes[children.x],nodes[children.y],point);
+    bool left=(id.x&1u)==0u;
+    float u=asfloat(left ? asuint(split)-1u : asuint(split)+1u);
+    var pick=light_tree_pick(nodes,{}u,point,float2(u,.75));
+    float expected=REG_LIGHT_TREE_UNIFORM_MIX/4.+(1.-REG_LIGHT_TREE_UNIFORM_MIX)*(left ? split : 1.-split);
+    output[id.x]=float4(float(nodes[pick.leaf].source.z),pick.probability/expected,
+        light_tree_probability(nodes,pick.leaf,point)/expected,left ? u/split : (u-split)/(1.-split));
+}}
+"#, tree.nodes.len());
+    let values = dispatch(&r, &tree, &body, 65534)?;
+    let mut rounded_to_one = 0;
+    for (i, v) in values.iter().enumerate() {
+        assert_eq!(v[0], if i % 2 == 0 { 0. } else { 2. },
+            "weighted selection entered a dark branch at case {i}: {v:?}");
+        assert!(v.iter().all(|x| x.is_finite()), "non-finite selection at {i}: {v:?}");
+        assert!((v[1]-1.).abs()<3e-5 && (v[2]-1.).abs()<3e-5,
+            "sample/replayed probability at {i}: {v:?}");
+        rounded_to_one += usize::from(v[3] >= 1.);
+    }
+    eprintln!("light-tree boundary regression: {} cases, {rounded_to_one} unbounded remaps rounded to 1", values.len());
+    Ok(())
+}
+
 #[test]
 fn compiled_sampler_matches_brute_force_and_reduces_many_light_noise() -> Result<()> {
     let Some(r) = crate::test_renderer()? else {

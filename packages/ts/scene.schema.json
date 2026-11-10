@@ -355,7 +355,7 @@
               "x-source": "vork (explicit contract/technique choice)"
             },
             "dims": {
-              "description": "Dense typed array, x contiguous. Initially zero unless data is supplied.\nField consumers interpret cell centres in local [-1,1]³.",
+              "description": "Dense typed array, x contiguous. Initially zero unless data or a binary file is supplied.\nField consumers interpret cell centres in local [-1,1]³.",
               "items": {
                 "format": "uint32",
                 "minimum": 1,
@@ -364,7 +364,7 @@
               "maxItems": 3,
               "minItems": 3,
               "type": "array",
-              "x-help": "[u32,u32,u32]|null; positive dense typed array dimensions; non-file; x contiguous; field cell centres span local [-1,1]³",
+              "x-help": "[u32,u32,u32]|null; positive dense typed array dimensions; data or binary file optional; file count defaults to dims product and must match it; x contiguous; field cell centres span local [-1,1]³",
               "x-help-path": "buffer.dims",
               "x-source": "vork (explicit contract/technique choice)"
             },
@@ -391,6 +391,72 @@
             "dims"
           ],
           "title": "DenseBuffer",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-help": "u32|null; file only",
+              "x-help-path": "buffer.count",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "data": {
+              "type": "null"
+            },
+            "dims": {
+              "description": "Dense typed array, x contiguous. Initially zero unless data or a binary file is supplied.\nField consumers interpret cell centres in local [-1,1]³.",
+              "items": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array",
+              "x-help": "[u32,u32,u32]|null; positive dense typed array dimensions; data or binary file optional; file count defaults to dims product and must match it; x contiguous; field cell centres span local [-1,1]³",
+              "x-help-path": "buffer.dims",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "file": {
+              "type": [
+                "string"
+              ],
+              "x-help": "file-path; little-endian, or .vdb/.nvdb with grid; XOR data",
+              "x-help-path": "buffer.file",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "grid": {
+              "type": "null"
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer",
+              "x-help": "u64; bytes, multiple of 4",
+              "x-help-path": "buffer.offset",
+              "x-source": "vork (explicit contract/technique choice)"
+            },
+            "type": {
+              "$ref": "#/$defs/BufferType",
+              "x-help": "f32|i32|u32|vec2|vec3|vec4|uvec4|mat4",
+              "x-help-path": "buffer.type",
+              "x-source": "vork (explicit contract/technique choice)"
+            }
+          },
+          "required": [
+            "type",
+            "file",
+            "dims"
+          ],
+          "title": "DenseFileBuffer",
           "type": "object"
         }
       ]
@@ -755,6 +821,20 @@
               "x-help-path": "geometry.morphs",
               "x-source": "vork (explicit contract/technique choice)"
             },
+            "status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GeometryStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Solver-owned sticky failure receipt, collected with evaluated geometry.",
+              "x-help": "{buffer,message}|null; one u32, zero succeeds, nonzero rejects output with message and value; producer keeps failure sticky until reset",
+              "x-help-path": "geometry.status",
+              "x-source": "vork"
+            },
             "subdivision": {
               "anyOf": [
                 {
@@ -838,6 +918,37 @@
       },
       "required": [
         "geometry"
+      ],
+      "type": "object"
+    },
+    "GeometryStage": {
+      "description": "Native deformation (including subdivision), geometry compute, and displacement.",
+      "enum": [
+        "deform",
+        "compute",
+        "displace"
+      ],
+      "type": "string"
+    },
+    "GeometryStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "buffer": {
+          "$ref": "#/$defs/NameOr3",
+          "x-help": "one-element u32 buffer-name|inline buffer; zero succeeds, nonzero rejects the exposure",
+          "x-help-path": "geometry.status.buffer",
+          "x-source": "vork"
+        },
+        "message": {
+          "type": "string",
+          "x-help": "nonempty failure message including producer identity and remedy; reported u32 value appended",
+          "x-help-path": "geometry.status.message",
+          "x-source": "vork"
+        }
+      },
+      "required": [
+        "buffer",
+        "message"
       ],
       "type": "object"
     },
@@ -2420,7 +2531,7 @@
                 }
               ],
               "description": "Environment radiance material instance.",
-              "x-help": "material-name|inline material|null; environment program",
+              "x-help": "material-name|inline material|null; environment program; omitted = uniform color × energy radiance",
               "x-help-path": "light.material",
               "x-source": "vork (explicit contract/technique choice)"
             },
@@ -2516,7 +2627,7 @@
               "default": 1.0,
               "format": "float",
               "type": "number",
-              "x-help": "number; rectangle full side, ellipse diameter",
+              "x-help": "number; rectangle full side, ellipse diameter; size_y sets the second axis",
               "x-help-path": "light.size",
               "x-source": "Blender 5.2.1 AreaLight.size (Add Light default)"
             },
@@ -3283,7 +3394,7 @@
       "type": "string"
     }
   },
-  "$id": "https://raw.githubusercontent.com/voyager-so/vork/v0.4.0/packages/ts/scene.schema.json",
+  "$id": "https://raw.githubusercontent.com/voyager-so/vork/v0.5.0/packages/ts/scene.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -3325,6 +3436,21 @@
       "x-help": "{name:geometry}",
       "x-help-path": "scene.geometry",
       "x-source": "vork (explicit contract/technique choice)"
+    },
+    "geometry_stages": {
+      "default": [
+        "deform",
+        "compute",
+        "displace"
+      ],
+      "description": "Ordered geometry lowerings; compute contains ordinary geometry programs.",
+      "items": {
+        "$ref": "#/$defs/GeometryStage"
+      },
+      "type": "array",
+      "x-help": "(deform|compute|displace)[]; ordered, each at most once; default [deform,compute,displace]",
+      "x-help-path": "scene.geometry_stages",
+      "x-source": "vork geometry chain"
     },
     "images": {
       "additionalProperties": {
@@ -3467,7 +3593,7 @@
     "animation.track.path: string[]; [\"nodes\",node,property...] | [\"nodes\",asset,\"nodes\",imported-name|#index,property...] | [\"materials\",material,\"inputs\",input] | [\"animation\",layer,\"weight\"] | [\"render\",property...]",
     "buffer.count: u32|null; file only",
     "buffer.data: number[]|number[][]; XOR file; one typed element per outer entry; vector/matrix entries contain 2/3/4/16 scalar components, not a flat scalar stream; mat4 column-major",
-    "buffer.dims: [u32,u32,u32]|null; positive dense typed array dimensions; non-file; x contiguous; field cell centres span local [-1,1]³",
+    "buffer.dims: [u32,u32,u32]|null; positive dense typed array dimensions; data or binary file optional; file count defaults to dims product and must match it; x contiguous; field cell centres span local [-1,1]³",
     "buffer.file: file-path; little-endian, or .vdb/.nvdb with grid; XOR data",
     "buffer.grid: name|null; .vdb/.nvdb only; f32 or vec3 voxels",
     "buffer.offset: u64; bytes, multiple of 4; default 0",
@@ -3491,6 +3617,9 @@
     "geometry.morphs: {name:{POSITION,NORMAL?}}; default {}",
     "geometry.morphs.NORMAL: buffer-name|inline buffer|null",
     "geometry.morphs.POSITION: vec3-buffer-name|inline buffer",
+    "geometry.status: {buffer,message}|null; one u32, zero succeeds, nonzero rejects output with message and value; producer keeps failure sticky until reset",
+    "geometry.status.buffer: one-element u32 buffer-name|inline buffer; zero succeeds, nonzero rejects the exposure",
+    "geometry.status.message: nonempty failure message including producer identity and remedy; reported u32 value appended",
     "geometry.subdivision: {subdivision_type?,render_levels?,use_limit_surface?}|null; Blender Subdivision Surface; one material range",
     "geometry.subdivision.render_levels: u32; refinement iterations; allocation checked against device limits; default 2",
     "geometry.subdivision.subdivision_type: catmull_clark|simple; default catmull_clark",
@@ -3515,12 +3644,12 @@
     "node.energy (light): number|null; sun W/m²; local W; environment multiplier",
     "node.illuminates (light): light-link-tag[]|null; receivers with any tag; null=all; []=none",
     "node.image (light): image-name|inline image|null; LM-63 Type C IES (path only); non-environment lights; emits -Z, no peak normalization",
-    "node.material (light): material-name|inline material|null; environment program",
+    "node.material (light): material-name|inline material|null; environment program; omitted = uniform color × energy radiance",
     "node.medium (light): material-name|inline material|null; environment only; authored medium program for world fog",
     "node.radius (light): number; point/spot emitter radius (shadow softness); default 0",
     "node.shadowed_by (light): light-link-tag[]|null; casters with any tag; null=all; []=none",
     "node.shape (light): sun|point|spot|rectangle|ellipse|environment",
-    "node.size (light): number; rectangle full side, ellipse diameter; default 1",
+    "node.size (light): number; rectangle full side, ellipse diameter; size_y sets the second axis; default 1",
     "node.size_y (light): number|null; second side/diameter; omitted = size (square/disk)",
     "node.spot_blend (light): number; 0..1; default 0.15",
     "node.spot_size (light): number; full cone angle; default 0.7853982",
@@ -3535,43 +3664,43 @@
     "material.grid.grid: buffer-name|inline buffer; buffer with a grid",
     "material.inputs: {name: number|vector|bool|enum-token|{image}|{attribute}|{grid}|{aov}|{node}|{channel}|{geometry}}; default {}",
     "material.inputs (std/openpbr): OpenPBR Surface; shaded inputs: base_weight base_color base_metalness specular_weight specular_color specular_roughness specular_roughness_anisotropy specular_ior transmission_weight transmission_color transmission_depth subsurface_weight subsurface_color subsurface_radius subsurface_radius_scale subsurface_scatter_anisotropy coat_weight coat_color coat_roughness coat_ior coat_darkening fuzz_weight fuzz_color fuzz_roughness emission_luminance emission_color thin_film_weight thin_film_thickness thin_film_ior geometry_opacity geometry_thin_walled geometry_normal geometry_tangent geometry_coat_normal transmission_dispersion_scale transmission_dispersion_abbe_number alpha_cutoff",
-    "material.inputs.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1] per channel; units dimensionless; constant|texture|attribute; animatable; default -1",
+    "material.inputs.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1]; units dimensionless; constant|texture|attribute; animatable; default -1",
     "material.inputs.base_color: color3; Base reflection albedo (dielectric); F0 colour at normal incidence (metal); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
-    "material.inputs.base_metalness: number; Fraction of the microsurface that is metallic; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
-    "material.inputs.base_weight: number; Scalar multiplier to `base_color`; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.base_metalness: number; Fraction of the microsurface that is metallic; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.base_weight: number; Scalar multiplier to `base_color`; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 1",
     "material.inputs.coat_color: color3; Square of the coat's normal-incidence transmittance; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
-    "material.inputs.coat_darkening: number; Modulates the physical coat darkening effect; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
-    "material.inputs.coat_ior: number; Refractive index of the coat; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1.6",
-    "material.inputs.coat_roughness: number; Roughness of the coat NDF; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
-    "material.inputs.coat_weight: number; Coverage weight of the coat slab; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.coat_darkening: number; Modulates the physical coat darkening effect; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.coat_ior: number; Refractive index of the coat; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 1.6",
+    "material.inputs.coat_roughness: number; Roughness of the coat NDF; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.coat_weight: number; Coverage weight of the coat slab; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.inputs.emission_color: color3; Emission colour multiplier (emitted = `emission_color` × `emission_luminance`); range [0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
-    "material.inputs.emission_luminance: number; Emission luminance with `emission_color` = (1,1,1), before coat and fuzz; range [0,inf) per channel; units cd/m² (nits); constant|texture|attribute; animatable; default 0",
+    "material.inputs.emission_luminance: number; Emission luminance with `emission_color` = (1,1,1), before coat and fuzz; range [0,inf); units cd/m² (nits); constant|texture|attribute; animatable; default 0",
     "material.inputs.fuzz_color: color3; Reflection albedo colour of the fuzz; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
-    "material.inputs.fuzz_roughness: number; Reflection roughness of the fuzz; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0.5",
-    "material.inputs.fuzz_weight: number; Coverage weight of the fuzz slab; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.fuzz_roughness: number; Reflection roughness of the fuzz; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0.5",
+    "material.inputs.fuzz_weight: number; Coverage weight of the fuzz slab; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.inputs.geometry_coat_normal: vector3; Shading normal of the coat; linear tangent-space RGB; factor scales XY; independent of base normal; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
     "material.inputs.geometry_normal: vector3; Shading normal of the base; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
-    "material.inputs.geometry_opacity: number; Opacity (presence) of the surface; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.geometry_opacity: number; Opacity (presence) of the surface; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 1",
     "material.inputs.geometry_tangent: vector3; Reference tangent for specular anisotropy; range N/A; units dimensionless; constant or texture; animatable; default unperturbed tangent",
     "material.inputs.geometry_thin_walled: bool; Surface is a thin shell with no interior volume; range {false,true}; units dimensionless; constant only; not animatable; default false",
     "material.inputs.specular_color: color3; Tints the dielectric Fresnel factor; metal colour at near-grazing incidence; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
-    "material.inputs.specular_ior: number; Refractive index of the base dielectric; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1.5",
-    "material.inputs.specular_roughness: number; Roughness of the NDF of the dielectric BSDF and conductor BRDF; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0.3",
-    "material.inputs.specular_roughness_anisotropy: number; Anisotropy of that NDF (stretch along `geometry_tangent`); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
-    "material.inputs.specular_weight: number; Modulates the dielectric reflectivity at normal incidence (via IOR); overall multiplier of the metallic Fresnel; range [0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "material.inputs.specular_ior: number; Refractive index of the base dielectric; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 1.5",
+    "material.inputs.specular_roughness: number; Roughness of the NDF of the dielectric BSDF and conductor BRDF; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0.3",
+    "material.inputs.specular_roughness_anisotropy: number; Anisotropy of that NDF (stretch along `geometry_tangent`); range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.specular_weight: number; Modulates the dielectric reflectivity at normal incidence (via IOR); overall multiplier of the metallic Fresnel; range [0,inf); units dimensionless; constant|texture|attribute; animatable; default 1",
     "material.inputs.subsurface_color: color3; Observed reflection colour of the subsurface medium; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
-    "material.inputs.subsurface_radius: number; Length scale of the mean free path; range [0,inf) per channel; units metres; constant|texture|attribute; animatable; default 1",
+    "material.inputs.subsurface_radius: number; Length scale of the mean free path; range [0,inf); units metres; constant|texture|attribute; animatable; default 1",
     "material.inputs.subsurface_radius_scale: color3; RGB multiplier to `subsurface_radius` (per-channel MFP); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1.0, 0.5, 0.25)",
-    "material.inputs.subsurface_scatter_anisotropy: number; Henyey-Greenstein anisotropy of the subsurface medium; range [-1,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
-    "material.inputs.subsurface_weight: number; Mix weight between subsurface and diffuse slabs; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
-    "material.inputs.thin_film_ior: number; Refractive index of the film; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 1.4",
-    "material.inputs.thin_film_thickness: number; Thickness of the film in micrometres; range [0,inf) per channel; units µm; constant|texture|attribute; animatable; default 0.5",
-    "material.inputs.thin_film_weight: number; Coverage weight of the thin film; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.subsurface_scatter_anisotropy: number; Henyey-Greenstein anisotropy of the subsurface medium; range [-1,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.subsurface_weight: number; Mix weight between subsurface and diffuse slabs; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.thin_film_ior: number; Refractive index of the film; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 1.4",
+    "material.inputs.thin_film_thickness: number; Thickness of the film in micrometres; range [0,inf); units µm; constant|texture|attribute; animatable; default 0.5",
+    "material.inputs.thin_film_weight: number; Coverage weight of the thin film; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.inputs.transmission_color: color3; Transmission colour; sets the extinction of the interior medium; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
-    "material.inputs.transmission_depth: number; Depth at which `transmission_color` is realised; 0 = constant on-surface tint; range [0,inf) per channel; units metres; constant|texture|attribute; animatable; default 0",
-    "material.inputs.transmission_dispersion_abbe_number: number; Physical Abbe number of the base dielectric medium; range (0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default 20",
-    "material.inputs.transmission_dispersion_scale: number; Linearly scales the amount of dispersion; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
-    "material.inputs.transmission_weight: number; Mix weight between translucent base and opaque base slabs; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.transmission_depth: number; Depth at which `transmission_color` is realised; 0 = constant on-surface tint; range [0,inf); units metres; constant|texture|attribute; animatable; default 0",
+    "material.inputs.transmission_dispersion_abbe_number: number; Physical Abbe number of the base dielectric medium; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 20",
+    "material.inputs.transmission_dispersion_scale: number; Linearly scales the amount of dispersion; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "material.inputs.transmission_weight: number; Mix weight between translucent base and opaque base slabs; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
     "material.node.node: earlier compositor entry name; clamped bilinear image sampling",
     "material.opacity: coverage|transmittance|null; null = coverage, transmittance for transmitting surfaces; coverage = occupied area fraction; transmittance = continuous attenuation by 1 - geometry_opacity; renderer chooses integration; default null",
     "material.priority: integer; highest owns overlapping solid media; equal priorities: last entered wins, simultaneous entries: later solid order wins; lower-priority boundaries change membership only; default 0",
@@ -3635,6 +3764,7 @@
     "scene.animation: layer[]; default []",
     "scene.buffers: {name:buffer}; default {}",
     "scene.geometry: {name:geometry}; default {}",
+    "scene.geometry_stages: (deform|compute|displace)[]; ordered, each at most once; default [deform,compute,displace]; default [deform,compute,displace]",
     "scene.images: {name:image}; default {}",
     "scene.materials: {name:material}; default {}",
     "scene.nodes: node[]",
@@ -3652,6 +3782,43 @@
     "simulation.state: buffer-name[]; complete typed persistent and scratch state; exclusive schedule ownership",
     "simulation.steps: program-name[]; ordered tick passes with storage barriers; schedule simulation",
     "simulation.t0: number|rational string; seconds; initialized state S0; requests before t0 hold S0",
+    "std/openpbr.alpha_cutoff: number; Negative disables threshold; otherwise geometry_opacity >= alpha_cutoff produces 1, else 0; range [-1,1]; units dimensionless; constant|texture|attribute; animatable; default -1",
+    "std/openpbr.base_color: color3; Base reflection albedo (dielectric); F0 colour at normal incidence (metal); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
+    "std/openpbr.base_metalness: number; Fraction of the microsurface that is metallic; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.base_weight: number; Scalar multiplier to `base_color`; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "std/openpbr.coat_color: color3; Square of the coat's normal-incidence transmittance; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "std/openpbr.coat_darkening: number; Modulates the physical coat darkening effect; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "std/openpbr.coat_ior: number; Refractive index of the coat; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 1.6",
+    "std/openpbr.coat_roughness: number; Roughness of the coat NDF; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.coat_weight: number; Coverage weight of the coat slab; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.emission_color: color3; Emission colour multiplier (emitted = `emission_color` × `emission_luminance`); range [0,inf) per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "std/openpbr.emission_luminance: number; Emission luminance with `emission_color` = (1,1,1), before coat and fuzz; range [0,inf); units cd/m² (nits); constant|texture|attribute; animatable; default 0",
+    "std/openpbr.fuzz_color: color3; Reflection albedo colour of the fuzz; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "std/openpbr.fuzz_roughness: number; Reflection roughness of the fuzz; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0.5",
+    "std/openpbr.fuzz_weight: number; Coverage weight of the fuzz slab; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.geometry_coat_normal: vector3; Shading normal of the coat; linear tangent-space RGB; factor scales XY; independent of base normal; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
+    "std/openpbr.geometry_normal: vector3; Shading normal of the base; range N/A; units dimensionless; constant or texture; animatable; default unperturbed normal",
+    "std/openpbr.geometry_opacity: number; Opacity (presence) of the surface; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 1",
+    "std/openpbr.geometry_tangent: vector3; Reference tangent for specular anisotropy; range N/A; units dimensionless; constant or texture; animatable; default unperturbed tangent",
+    "std/openpbr.geometry_thin_walled: bool; Surface is a thin shell with no interior volume; range {false,true}; units dimensionless; constant only; not animatable; default false",
+    "std/openpbr.specular_color: color3; Tints the dielectric Fresnel factor; metal colour at near-grazing incidence; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "std/openpbr.specular_ior: number; Refractive index of the base dielectric; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 1.5",
+    "std/openpbr.specular_roughness: number; Roughness of the NDF of the dielectric BSDF and conductor BRDF; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0.3",
+    "std/openpbr.specular_roughness_anisotropy: number; Anisotropy of that NDF (stretch along `geometry_tangent`); range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.specular_weight: number; Modulates the dielectric reflectivity at normal incidence (via IOR); overall multiplier of the metallic Fresnel; range [0,inf); units dimensionless; constant|texture|attribute; animatable; default 1",
+    "std/openpbr.subsurface_color: color3; Observed reflection colour of the subsurface medium; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (0.8, 0.8, 0.8)",
+    "std/openpbr.subsurface_radius: number; Length scale of the mean free path; range [0,inf); units metres; constant|texture|attribute; animatable; default 1",
+    "std/openpbr.subsurface_radius_scale: color3; RGB multiplier to `subsurface_radius` (per-channel MFP); range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1.0, 0.5, 0.25)",
+    "std/openpbr.subsurface_scatter_anisotropy: number; Henyey-Greenstein anisotropy of the subsurface medium; range [-1,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.subsurface_weight: number; Mix weight between subsurface and diffuse slabs; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.thin_film_ior: number; Refractive index of the film; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 1.4",
+    "std/openpbr.thin_film_thickness: number; Thickness of the film in micrometres; range [0,inf); units µm; constant|texture|attribute; animatable; default 0.5",
+    "std/openpbr.thin_film_weight: number; Coverage weight of the thin film; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.transmission_color: color3; Transmission colour; sets the extinction of the interior medium; range [0,1] per channel; units dimensionless; constant|texture|attribute; animatable; default (1, 1, 1)",
+    "std/openpbr.transmission_depth: number; Depth at which `transmission_color` is realised; 0 = constant on-surface tint; range [0,inf); units metres; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.transmission_dispersion_abbe_number: number; Physical Abbe number of the base dielectric medium; range (0,inf); units dimensionless; constant|texture|attribute; animatable; default 20",
+    "std/openpbr.transmission_dispersion_scale: number; Linearly scales the amount of dispersion; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
+    "std/openpbr.transmission_weight: number; Mix weight between translucent base and opaque base slabs; range [0,1]; units dimensionless; constant|texture|attribute; animatable; default 0",
     "animation.track.path properties: node translation|rotation|scale|visible|visible_camera|visible_shadow|visible_diffuse|visible_glossy|visible_transmission|morph_weights,<morph>, camera/light numeric fields (camera optics are material inputs); imported nodes: translation|rotation|scale|morph_weights|visible",
     "animation.track.path render properties: camera|background (RGB)|motion_blur,shutter",
     "coordinates: glTF right-handed Y-up; cameras look along local -Z",

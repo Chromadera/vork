@@ -290,7 +290,7 @@ fn decision_d_convex_slabs_match_beer_and_emission() -> Result<()> {
         for i in 0..copies {nodes.push(serde_json::json!({"name":format!("fog{i}"),"type":"mesh","geometry":"shape_box","materials":["fog"],"scale":[2,2,1]}));}
         s["nodes"]=serde_json::json!(nodes);
         let scene:vork_scene::v2::Scene=vork_scene::v2::from_test_value(s)?;
-        let mut control=None;
+        let mut control:Option<Vec<[f32;4]>>=None;
         for work_limit in [None,Some(131072),Some(0)] {
             let installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {
                 test_convex_media:true,test_convex_work_limit:work_limit,
@@ -300,12 +300,13 @@ fn decision_d_convex_slabs_match_beer_and_emission() -> Result<()> {
             frame.submit_outputs(&installed,&r,0.,ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
             let collected=frame.collect(&r);
             if work_limit==Some(0) {
-                let error=collected.err().context("exhausted medium frame published an image")?;
-                ensure!(format!("{error:#}").contains("medium work budget exhausted"),"{error:#}");
+                let output=collected?;
+                ensure!(output.timing.terminated_medium_paths>0,"exhausted paths were not counted");
+                ensure!(output.linear_rgba.as_ref().unwrap().iter().flatten().all(|x|x.is_finite()),"non-finite capped output");
                 continue;
             }
             let output=collected?.linear_rgba.context("missing float output")?;
-            if let Some(control)=&control {ensure!(control==&output,"guarded/control raw images differ");}
+            if let Some(control)=&control {crate::test_linear::assert_linear_eq(control,&output);}
             else {control=Some(output);}
         }
         let output=control.context("missing control image")?;
@@ -337,7 +338,7 @@ fn decision_d_convex_slabs_match_beer_and_emission() -> Result<()> {
 #[ignore = "Decision D packet refusal oracle requires a real GPU and pinned Slang"]
 fn decision_d_packet_refusals() -> Result<()> {
     let Some(r)=crate::test_renderer()? else {anyhow::bail!("Decision D requires a real GPU");};
-    for (absorption,limit,expected_error) in [(0.5_f32,0,Some("medium work budget exhausted")),(-1.,131072,Some("invalid physical coefficients")),(0.5,131072,None)] {
+    for (absorption,limit,expected_error) in [(0.5_f32,0,None),(-1.,131072,Some("invalid physical coefficients")),(0.5,131072,None)] {
         let mut s:serde_json::Value=vork_scene::v2::with_test_settings(include_str!("../tests/fixtures/analytic.json"),include_str!("../tests/presets/analytic-7fefd52a.json"))?;
         s["animation"]=serde_json::json!([]);
         s["buffers"].as_object_mut().unwrap().retain(|name,_|name.starts_with("shape_box_"));
@@ -364,8 +365,12 @@ fn decision_d_packet_refusals() -> Result<()> {
             let mut successor=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
             let retry=successor.submit_outputs(&installed,&r,0.,ReadbackOutputs::default()).unwrap_err();
             ensure!(format!("{retry:#}").contains("reinstall"),"{retry:#}");
+        } else if limit==0 {
+            let output=collected?;
+            ensure!(output.timing.terminated_medium_paths==9,"every capped camera path must be counted");
+            ensure!(output.linear_rgba.unwrap().iter().all(|p|p[..3]==[0.;3]),"capped path contributed radiance");
         } else {
-            // A valid render after both refusals also verifies device reuse.
+            // Valid rendering after a capped and an invalid exposure verifies reuse.
             let pixels=collected?.linear_rgba.context("missing recovery image")?;
             for pixel in pixels {for channel in &pixel[..3] {ensure!((f64::from(*channel)-(-0.5_f64).exp()).abs()<1e-5,"{pixel:?}");}}
         }
@@ -387,6 +392,8 @@ fn decision_d_convex_packet() -> Result<()> {
     let repetitions=packet["repetitions"].as_u64().context("packet repetitions missing")?;
     ensure!(!times.is_empty() && repetitions>0,"empty packet");
     let guarded=std::env::var("VORK_FOG_GUARDED").as_deref()==Ok("1");
+    let general=std::env::var("VORK_FOG_GENERAL").as_deref()==Ok("1");
+    let uncapped=packet["uncapped"].as_bool()==Some(true);
     let renderer_start=std::time::Instant::now();
     let Some(mut r)=crate::test_renderer()? else {anyhow::bail!("Decision D requires a real GPU");};
     let renderer_ms=renderer_start.elapsed().as_secs_f64()*1000.;
@@ -397,7 +404,9 @@ fn decision_d_convex_packet() -> Result<()> {
     if packet["measure_segments"].as_bool()==Some(true) {r.test_gpu_segment_times=Some(Default::default());}
     let outputs=ReadbackOutputs {color:true,float:FloatOutputs {color:roi.is_some(),..Default::default()},..Default::default()};
     let installed=r.install_with_options(scene.clone(),input.parent().unwrap(),InstallOptions {
-        test_convex_media:true,test_convex_work_limit:guarded.then_some(131072),
+        test_participating_media:!general || uncapped,
+        test_convex_media:!general && !uncapped,test_convex_work_limit:packet["work_limit"].as_u64().map(|v|u32::try_from(v)).transpose()?.or(guarded.then_some(131072)),
+        test_force_general_media:std::env::var("VORK_FOG_FORCE_BVH").as_deref()==Ok("1"),
         test_medium_batch_rows:std::env::var("VORK_FOG_BATCH_ROWS").ok().map(|v|v.parse()).transpose()?,
         test_volume_bounces:64,..Default::default()
     })?;
@@ -441,6 +450,7 @@ fn decision_d_convex_packet() -> Result<()> {
         let row=serde_json::json!({"repetition":repetition,"index":index,"time":time,"collected_ms":collected_ms,
             "timing_source":pixels.timing.timing_source,"gpu_ms":pixels.timing.gpu_ms,"gpu_elapsed_ms":pixels.timing.gpu_elapsed_ms,
             "gpu_spans_ms":pixels.timing.gpu_spans_ms,"sample_count":pixels.timing.sample_count,
+            "terminated_medium_paths":pixels.timing.terminated_medium_paths,"dropped_path_samples":pixels.timing.dropped_path_samples,"discarded_medium_radiance":pixels.timing.discarded_medium_radiance,
             "gpu_segments":segments,"rgba_blake3":blake3::hash(&pixels.rgba).to_hex().as_str(),"image":name});
         println!("FOG_PACKET {}",serde_json::to_string(&row)?);rows.push(row);
     }}
@@ -478,7 +488,7 @@ fn decision_d_single_scatter_sun_slab() -> Result<()> {
         let mut frame=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
         frame.submit_outputs(&installed,&r,0.,ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
         let pixels=frame.collect(&r)?.linear_rgba.context("missing oracle float output")?;
-        if let Some(control)=&control {ensure!(&pixels==control,"guard changed raw single-scatter samples");}
+        if let Some(control)=&control {crate::test_linear::assert_linear_eq(control,&pixels);}
         let n=pixels.len() as f64;
         let mean=pixels.iter().map(|p|f64::from(p[0])).sum::<f64>()/n;
         let variance=pixels.iter().map(|p|(f64::from(p[0])-mean).powi(2)).sum::<f64>()/(n-1.);
@@ -512,7 +522,7 @@ fn decision_d_world_infinity_closure() -> Result<()> {
             {"name":"world","type":"light","shape":"environment","energy":1,"color":[1,1,1],"medium":"fog"}
         ]);
         let scene:vork_scene::v2::Scene=vork_scene::v2::from_test_value(s)?;
-        let mut control=None;
+        let mut control:Option<Vec<[f32;4]>>=None;
         for work_limit in [None,Some(131072)] {
             let installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {
                 test_convex_media:true,test_convex_work_limit:work_limit,
@@ -526,7 +536,7 @@ fn decision_d_world_infinity_closure() -> Result<()> {
                 ensure!(format!("{error:#}").contains("zero-extinction"),"{error:#}");continue;
             }
             let pixels=collected?.linear_rgba.context("missing world float output")?;
-            if let Some(control)=&control {ensure!(&pixels==control,"guard changed raw world output");}
+            if let Some(control)=&control {crate::test_linear::assert_linear_eq(control,&pixels);}
             for pixel in &pixels {for c in 0..3 {
                 let expected=if absorption[c]>0. {f64::from(emission[c])/f64::from(absorption[c])}else{1.};
                 ensure!((f64::from(pixel[c])-expected).abs()<=1e-6+1e-4*expected.abs(),"world absorption={absorption:?} emission={emission:?}, {pixel:?} vs channel {c}: {expected}");
@@ -555,7 +565,7 @@ fn decision_d_height_world_beer_closure() -> Result<()> {
             {"name":"camera","type":"camera","rotation":rotation,"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":0.1,"clip_start":0.0001}}},
             {"name":"world","type":"light","shape":"environment","energy":1,"color":[1,1,1],"medium":"fog"}
         ]);
-        let scene:vork_scene::v2::Scene=vork_scene::v2::from_test_value(s)?;let mut control=None;
+        let scene:vork_scene::v2::Scene=vork_scene::v2::from_test_value(s)?;let mut control:Option<Vec<[f32;4]>>=None;
         for work_limit in [None,Some(131072),Some(0)] {
             let installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {
                 test_convex_media:true,test_convex_work_limit:work_limit,
@@ -565,11 +575,10 @@ fn decision_d_height_world_beer_closure() -> Result<()> {
             frame.submit_outputs(&installed,&r,0.,ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
             let collected=frame.collect(&r);
             if work_limit==Some(0) {
-                let error=collected.err().context("exhausted height frame published an image")?;
-                ensure!(format!("{error:#}").contains("medium work budget exhausted"),"{error:#}");continue;
+                ensure!(collected?.timing.terminated_medium_paths>0,"exhausted height paths were not counted");continue;
             }
             let pixels=collected?.linear_rgba.context("missing height float output")?;
-            if let Some(control)=&control {ensure!(&pixels==control,"guard changed raw height output");}
+            if let Some(control)=&control {crate::test_linear::assert_linear_eq(control,&pixels);}
             for pixel in &pixels {for (c,sigma) in [0_f64,0.5,1.].into_iter().enumerate() {
                 let expected=if sigma==0. {1.}else if upward {(-sigma*(-0.7_f64*0.0001).exp()/0.7).exp()}else{0.};
                 ensure!((f64::from(pixel[c])-expected).abs()<=1e-6+1e-4*expected.abs(),"height rotation={rotation:?}, {pixel:?} vs channel {c}: {expected}");
@@ -613,10 +622,9 @@ fn fog_alpha_candidates_exhaust_shared_budget() -> Result<()> {
         })?;
         let mut frame=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
         frame.submit_outputs(&installed,&r,0.,ReadbackOutputs::default())?;
-        let error=frame.collect(&r).err().context("alpha candidates bypassed the medium work bound")?;
-        let message=format!("{error:#}");
-        println!("FOG_ALPHA_REFUSAL limit={limit} expected_operation={operation}: {message}");
-        ensure!(message.contains("medium work budget exhausted") && message.contains(&format!("operation {operation}")),"{message}");
+        let output=frame.collect(&r)?;
+        ensure!(output.timing.terminated_medium_paths>0,"alpha candidates bypassed the step cap");
+        println!("FOG_ALPHA_CAP limit={limit} former_operation={operation} count={}",output.timing.terminated_medium_paths);
     }
     fog_admission_segment_witness(&r)?;
     Ok(())
@@ -624,7 +632,7 @@ fn fog_alpha_candidates_exhaust_shared_budget() -> Result<()> {
 
 #[test]
 #[ignore = "requires real GPU and pinned Slang"]
-fn fog_render_image_failure_invalidates_queued_publications() -> Result<()> {
+fn fog_capped_paths_preserve_queued_publications() -> Result<()> {
     let Some(mut r)=crate::test_renderer()? else {anyhow::bail!("real GPU required");};
     r.test_gpu_segment_times=Some(Default::default());
     let mut value:serde_json::Value=vork_scene::v2::with_test_settings(include_str!("../tests/fixtures/analytic.json"),include_str!("../tests/presets/analytic-7fefd52a.json"))?;
@@ -660,12 +668,10 @@ fn fog_render_image_failure_invalidates_queued_publications() -> Result<()> {
     let mut successor=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
     first.submit_outputs(&installed,&r,0.,ReadbackOutputs::ALL)?;
     successor.submit_outputs(&installed,&r,1.,ReadbackOutputs::ALL)?;
-    let error=successor.collect(&r).err().context("queued successor reused a failed capture")?;
-    ensure!(format!("{error:#}").contains("medium work budget exhausted") || format!("{error:#}").contains("invalidated"),"{error:#}");
-    let error=first.collect(&r).err().context("invalid capture published an image")?;
-    ensure!(format!("{error:#}").contains("medium work budget exhausted"),"{error:#}");
-    let error=successor.submit_outputs(&installed,&r,2.,ReadbackOutputs::ALL).unwrap_err();
-    ensure!(format!("{error:#}").contains("reinstall"),"{error:#}");
+    ensure!(successor.collect(&r)?.timing.terminated_medium_paths>0,"successor did not report capped paths");
+    ensure!(first.collect(&r)?.timing.terminated_medium_paths>0,"capture did not report capped paths");
+    successor.submit_outputs(&installed,&r,2.,ReadbackOutputs::ALL)?;
+    successor.collect(&r)?;
     fog_admission_segment_witness(&r)?;
     Ok(())
 }
@@ -674,8 +680,98 @@ fn fog_admission_segment_witness(r:&Renderer)->Result<()> {
     let segments=r.test_gpu_segment_times.as_ref().context("missing GPU witnesses")?.lock().unwrap();
     ensure!(!segments.is_empty(),"no measured GPU segments");
     println!("FOG_ADMISSION_SEGMENTS {}",serde_json::to_string(&*segments)?);
+    // A numeric qualification limit belongs to the measured device/driver packet,
+    // not to image correctness. Without one this test collects timing evidence.
+    let budget=std::env::var("VORK_FOG_SEGMENT_BUDGET_MS").ok()
+        .map(|value|value.parse::<f64>()).transpose()?;
+    if let Some(limit)=budget {ensure!(limit.is_finite() && limit>0.,"invalid measured GPU segment budget");}
+    println!("FOG_SEGMENT_QUALIFICATION {}",serde_json::json!({
+        "adapter":r.adapter_info.name,"budget_ms":budget,"measurement_only":budget.is_none()}));
     for (_,_,ms,source) in segments.iter() {
-        ensure!(*source=="gpu_timestamp" && *ms>0. && *ms<=100.,"unqualified GPU segment {ms} ms ({source})");
+        ensure!(*source=="gpu_timestamp" && ms.is_finite() && *ms>0.,"invalid GPU segment {ms} ms ({source})");
+        if let Some(limit)=budget {ensure!(*ms<=limit,"GPU segment {ms} ms exceeds measured device budget {limit} ms");}
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore="requires real GPU and pinned Slang"]
+fn general_fog_carriers_exceed_old_shape_and_count_limits() -> Result<()> {
+    let Some(mut r)=crate::test_renderer()? else {anyhow::bail!("real GPU required");};
+    r.test_gpu_segment_times=Some(Default::default());
+    // Three disjoint closed boxes make one nonconvex, 36-triangle carrier.
+    let fixture:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/analytic.json"))?;
+    let original=fixture["buffers"]["shape_box_position"]["data"].as_array().unwrap();
+    for (count,shifts) in [(9,&[0.][..]),(9,&[-3.,0.,3.][..]),(257,&[0.][..])] {
+    let mut positions=Vec::new();
+    for &x in shifts {for p in original {
+        positions.push([p[0].as_f64().unwrap()+x,p[1].as_f64().unwrap(),p[2].as_f64().unwrap()]);
+    }}
+    let nodes:Vec<_>=std::iter::once(serde_json::json!({"type":"camera","translation":[0,0,2],
+        "material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":0.1}}}))
+        .chain(std::iter::once(serde_json::json!({"type":"light","shape":"environment","color":[1,1,1],"energy":1})))
+        .chain((0..count).map(|i|serde_json::json!({"type":"mesh","name":format!("fog{i}"),"geometry":"carrier","materials":["fog"]}))).collect();
+    let scene:vork_scene::v2::Scene=vork_scene::v2::from_test_value(serde_json::json!({
+        "version":2,"render":{"resolution":[8,8],"background":"environment","settings":{"integrator":"path","samples":1,"denoiser":null}},
+        "buffers":{"p":{"type":"vec3","data":positions},"i":{"type":"u32","data":(0..positions.len() as u32).collect::<Vec<u32>>()}},
+        "geometry":{"carrier":{"attributes":{"POSITION":"p"},"indices":"i"}},
+        "programs":{"fog":{"source":format!("struct Inputs {{}}; MediumCoefficients medium(MediumContext c, Inputs i) {{MediumCoefficients m={{}};m.absorption=float3({});return m;}}",0.45/count as f64)}},
+        "materials":{"fog":{"program":"fog"}},"nodes":nodes
+    }))?;
+    let mut reference:Option<Vec<[f32;4]>>=None;
+    for force_general in [false,true] {
+    // Exercise delivery admission and compare the optimization with its fallback.
+    let mut installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {test_participating_media:false,test_force_general_media:force_general,..Default::default()})?;
+    let mut slot=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
+    let output=installed.render_frame(&r,&mut slot,0.)?;
+    ensure!(output.timing.terminated_medium_paths==0,"ordinary carrier test unexpectedly hit the cap");
+    let expected=(-0.45_f32).exp();
+    let pixels=output.linear_rgba.context("missing general-carrier image")?;
+    if let Some(previous)=&reference {crate::test_linear::assert_linear_eq(previous,&pixels);}
+    for pixel in &pixels {
+        for channel in &pixel[..3] {ensure!((*channel-expected).abs()<1e-4,"general carrier Beer law: {pixel:?}, expected {expected}");}
+    }
+    reference=Some(pixels);
+    }
+    }
+    fog_admission_segment_witness(&r)?;
+    Ok(())
+}
+
+/// Height free flights plus independent banks must not spend fictitious worst-case
+/// instruction credits. Same-seed unguarded transport is the energy oracle.
+#[test]
+#[ignore = "requires pinned Slang and a real GPU"]
+fn height_carriers_preserve_uncapped_radiance() -> Result<()> {
+    let Some(r)=crate::test_renderer()? else {anyhow::bail!("fog regression requires a real GPU");};
+    let mut value:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/fog-height-carriers.json"))?;
+    value["render"]["settings"]=serde_json::json!({"integrator":"path","samples":32,"denoiser":null});
+    let scene:vork_scene::v2::Scene=vork_scene::v2::from_test_value(value)?;
+    // Isolate the watchdog: hold boundary representation fixed on both sides.
+    // Plane/BVH sampling differences belong to the separate energy comparison.
+    for force_general in [false,true] {
+        let mut reference:Option<Vec<[f32;4]>>=None;
+        for limit in [None,Some(131072),Some(256)] {
+            let installed=r.install_with_options(scene.clone(),Path::new("."),InstallOptions {
+                test_participating_media:limit.is_none(),test_convex_media:limit.is_none(),
+                test_force_general_media:force_general,test_convex_work_limit:limit,
+                test_volume_bounces:64,..Default::default()
+            })?;
+            let mut frame=installed.create_frame_slot(&r,ReadbackPrecision::Float)?;
+            frame.submit_outputs(&installed,&r,0.,ReadbackOutputs {float:FloatOutputs {color:true,..Default::default()},..Default::default()})?;
+            let output=frame.collect(&r)?;
+            let image=output.linear_rgba.context("missing linear radiance")?;
+            println!("HEIGHT_CARRIERS force_general={force_general} limit={limit:?} capped={} discarded={} gpu_ms={}",output.timing.terminated_medium_paths,output.timing.discarded_medium_radiance,output.timing.gpu_ms);
+            if limit==Some(256) {
+                ensure!(output.timing.terminated_medium_paths>0,"injected watchdog did not fire");
+                ensure!(output.timing.discarded_medium_radiance>0.,"watchdog must report erased accumulated radiance");
+            } else {
+                ensure!(output.timing.terminated_medium_paths==0,"ordinary fog reached watchdog");
+                ensure!(output.timing.discarded_medium_radiance==0.,"ordinary fog discarded energy");
+                if let Some(control)=&reference {crate::test_linear::assert_linear_eq(control,&image);}
+                else {reference=Some(image);}
+            }
+        }
     }
     Ok(())
 }

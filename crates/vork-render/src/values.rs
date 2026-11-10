@@ -444,7 +444,8 @@ impl FrameSlot {
         changes.bytes.clear();
         changes.uploads.clear();
         let camera_index = s.animation.camera_at_request(&self.sample_request,s.camera)?;
-        let sample_key=[time.to_bits(),camera_index as u32];
+        let generation = s.animation.live_generation();
+        let sample_key=[time.to_bits(),camera_index as u32,generation as u32,(generation >> 32) as u32];
         let mut discrete_key=Vec::new();
         s.animation.append_discrete_key(&self.sample_request,&mut discrete_key)?;
         if s.animation.has_discrete_tracks() {
@@ -478,7 +479,8 @@ impl FrameSlot {
             sample_frame(s,&self.sample_request,&mut self.next_animation_values,&mut self.next_nodes,&mut self.next_worlds)?;
         }
         // Spatial AA/aperture samples at one time reuse the evaluated pose and render values.
-        let previous_key = [previous_time.to_bits(), u32::from(cut),s.animation.camera_at_request(&self.previous_request,s.camera)? as u32];
+        let previous_key = [previous_time.to_bits(), u32::from(cut),s.animation.camera_at_request(&self.previous_request,s.camera)? as u32,
+            generation as u32,(generation >> 32) as u32];
         discrete_key.clear();
         s.animation.append_discrete_key(&self.previous_request,&mut discrete_key)?;
         if s.animation.has_discrete_tracks() {
@@ -636,8 +638,11 @@ impl FrameSlot {
                 },
                 ((u32::from(self.view.write_color && !self.view.nominal_sample)
                     * constants::OUTPUT_GPU_COLOR)
-                    | (u32::from(self.view.readback_outputs.color && !self.view.nominal_sample)
+                    // 16-bit colour also publishes the 8-bit plane that exposure metering reads.
+                    | (u32::from((self.view.readback_outputs.color || self.view.readback_outputs.color16) && !self.view.nominal_sample)
                         * constants::OUTPUT_COLOR_PLANE)
+                    | (u32::from(self.view.readback_outputs.color16 && !self.view.nominal_sample)
+                        * vork_slang::registry::OUTPUT_COLOR_PLANE16)
                     | (u32::from(controls && self.view.readback_outputs.depth_ids)
                         * constants::OUTPUT_DEPTH_IDS)
                     | (u32::from(controls && self.view.readback_outputs.normals)
@@ -933,7 +938,8 @@ impl FrameSlot {
         let mut shadow_local_bounds=s.rays.as_ref().filter(|r|r.dynamic_shadow_bounds()).map(|_|Vec::with_capacity(s.draws.len()));
         for (index, draw) in s.draws.iter().enumerate() {
             let displaced=displacement_bounds.get(index).copied().flatten();
-            let evaluated=displaced.or_else(||draw.deform.as_ref().and_then(|deform|local_bounds[deform.job]));
+            let gpu_bounds=self.deforms[index].as_ref().is_some_and(|g|g.gpu_bounds.is_some());
+            let evaluated=if gpu_bounds {None} else {displaced.or_else(||draw.deform.as_ref().and_then(|deform|local_bounds[deform.job]))};
             self.geometry_bounds[index]=displaced;
             if let Some(bounds)=&mut shadow_local_bounds {
                 bounds.push(evaluated.unwrap_or_else(||if draw.evaluated() {(Vec3::splat(f32::NEG_INFINITY),Vec3::splat(f32::INFINITY))} else {draw.bounds}));
@@ -1579,7 +1585,7 @@ mod capture_lens_tests {
         std::fs::remove_file(&file)?;
         let mut installed = installed?;
         assert!(installed.plan.draws.iter().all(|draw| draw.casts_shadows));
-        let mut frame = installed.create_frame_slot(&renderer,Default::default())?;
+        let mut frame = installed.create_frame_slot(&renderer,crate::ReadbackPrecision::Float)?;
         for (time,shown) in [(0.,false),(1.,true),(0.,false)] {
             let output = installed.render_frame(&renderer, &mut frame, time)?;
             assert_eq!(output.ids.iter().any(|id| *id != 0),shown,"imported visibility at {time}");
@@ -1603,7 +1609,7 @@ mod capture_lens_tests {
             "animation":[{"tracks":[{"path":["nodes","rig","visible"],"keys":[[0,false],[1,true]]}]}]
         }))?;
         let installed = renderer.install(input, Path::new("."))?;
-        let mut frame = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         let mut changes = LightingTracker::default();
         for (time, visible) in [(0.,false),(0.999,false),(1.,true),(0.5,false)] {
             let (_,_,_,uniform) = frame.prepare_values(&installed,&renderer,time,time,&mut changes)?;
@@ -1685,13 +1691,13 @@ mod aim_tests {
         let mut valid = document.clone();
         valid["animation"][0]["tracks"][0]["keys"][0][1] = serde_json::json!([0,0,3]);
         let mut installed = renderer.install(vork_scene::v2::from_test_value(valid.clone())?, Path::new("."))?;
-        let mut slot = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut slot = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         installed.render_frame(&renderer, &mut slot, 0.)?;
         valid["render"]["motion_blur"] = serde_json::json!({"shutter":1,"position":"start"});
         valid["render"]["settings"] = serde_json::json!({"samples":1});
         valid["animation"][0]["tracks"][0]["keys"][1][1] = serde_json::json!([0,0,0]);
         let mut installed = renderer.install(vork_scene::v2::from_test_value(valid)?, Path::new("."))?;
-        let mut slot = installed.create_frame_slot(&renderer, Default::default())?;
+        let mut slot = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
         // Sampled motion blur does not evaluate unused shutter endpoints.
         installed.render_frame(&renderer, &mut slot, 0.)?;
         let error = installed.render_frame(&renderer, &mut slot, 1.).err().expect("coincident sampled pose");
@@ -1717,7 +1723,7 @@ mod aim_tests {
         let base=Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let mut installed=renderer.install(vork_scene::v2::from_test_value(input)?,&base)?;
         assert_eq!(installed.roots.len(),2);
-        let mut frame=installed.create_frame_slot(&renderer,Default::default())?;
+        let mut frame=installed.create_frame_slot(&renderer,crate::ReadbackPrecision::Float)?;
         for time in [0.,1.,0.25] {
             installed.render_frame(&renderer, &mut frame, time)?;
             for (object,root) in installed.roots.iter().enumerate() {
@@ -1825,23 +1831,23 @@ mod retained_selection_tests {
             input.render.settings.samples = 4;
         }
         let mut s = r.install(input, Path::new("."))?;
-        let mut slots = [s.create_frame_slot(&r, Default::default())?,s.create_frame_slot(&r, Default::default())?];
-        let mut first = [None,None];
+        let mut slots = [s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?,s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?];
+        let mut first: [Option<Vec<[f32;4]>>;2] = [None,None];
         for (slot,time,changes_camera) in [(0,0.,true),(1,0.5,true),(0,0.5,false),(1,0.,false),(0,1.,true),(1,0.5,false),(0,0.,true)] {
             let before = slots[slot].view.camera_cull.test_visits();
             let actual = s.render_frame(&r,&mut slots[slot],time)?;
             let after = slots[slot].view.camera_cull.test_visits();
             if !blur && changes_camera { assert!(after > before,"camera must prepare at {time}"); }
             else if !blur { assert_eq!(after,before,"shading-only time {time} rescanned objects"); }
-            let mut fresh = s.create_frame_slot(&r, Default::default())?;
+            let mut fresh = s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
             let expected = s.render_frame(&r,&mut fresh,time)?;
-            assert_eq!(actual.rgba,expected.rgba,"slot {slot} at {time}");
+            crate::test_linear::assert_linear_eq((actual).linear_rgba.as_ref().expect("linear readback"), (expected).linear_rgba.as_ref().expect("linear readback"));
             assert_eq!(actual.ids,expected.ids);
-            assert_eq!(actual.depth_u16,expected.depth_u16);
+            crate::test_linear::assert_depth_eq(actual.depth_f32.as_ref().expect("float depth readback"), expected.depth_f32.as_ref().expect("float depth readback"));
             assert!(actual.ids.iter().any(|&id|id!=0),"selected actor must remain visible");
             if let Some(prior) = first[slot].as_ref() {
-                if time == 0. && slot == 0 { assert_eq!(&actual.rgba,prior); }
-            } else { first[slot] = Some(actual.rgba); }
+                if time == 0. && slot == 0 { crate::test_linear::assert_linear_eq(actual.linear_rgba.as_ref().unwrap(),prior); }
+            } else { first[slot] = actual.linear_rgba; }
         }
         }
         Ok(())
@@ -1851,7 +1857,7 @@ mod retained_selection_tests {
     fn preparing_capture_staging_preserves_live_selection() -> Result<()> {
         let Some(r) = crate::test_renderer()? else { return Ok(()); };
         let s = r.install(scene()?, Path::new("."))?;
-        let frame = s.create_frame_slot(&r, Default::default())?;
+        let frame = s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         let cull = &frame.view.camera_cull;
         let vp = Mat4::perspective_rh(1., 1., 0.1, 100.);
         let mut changes = ChangeTracker::default();
@@ -1875,7 +1881,7 @@ mod retained_selection_tests {
     fn selection_observes_publications_bounds_and_capture_buffer_replacement() -> Result<()> {
         let Some(r) = crate::test_renderer()? else { return Ok(()); };
         let mut s = r.install(scene()?, Path::new("."))?;
-        let frame = s.create_frame_slot(&r, Default::default())?;
+        let frame = s.create_frame_slot(&r, crate::ReadbackPrecision::Float)?;
         // Exercise the CPU receiver contract with a producer-owned local bound.
         // No modified scene is rendered: ownership is supplied to selection here.
         s.draws[0].computed = true;

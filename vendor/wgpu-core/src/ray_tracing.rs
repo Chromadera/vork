@@ -234,6 +234,11 @@ pub enum ValidateAsActionsError {
     #[error(transparent)]
     DestroyedResource(#[from] DestroyedResourceError),
 
+    #[error("BLAS {0:?} update source changed after recording; record the build again")]
+    StaleBlasUpdate(ResourceErrorIdent),
+    #[error("TLAS {0:?} update source changed after recording; record the build again")]
+    StaleTlasUpdate(ResourceErrorIdent),
+
     #[error("Tlas {0:?} is used before it is built")]
     UsedUnbuiltTlas(ResourceErrorIdent),
 
@@ -248,7 +253,7 @@ impl WebGpuError for ValidateAsActionsError {
     fn webgpu_error_type(&self) -> ErrorType {
         match self {
             Self::DestroyedResource(e) => e.webgpu_error_type(),
-            Self::UsedUnbuiltTlas(..) | Self::UsedUnbuiltBlas(..) | Self::BlasNewerThenTlas(..) => {
+            Self::StaleTlasUpdate(..) | Self::StaleBlasUpdate(..) | Self::UsedUnbuiltTlas(..) | Self::UsedUnbuiltBlas(..) | Self::BlasNewerThenTlas(..) => {
                 ErrorType::Validation
             }
         }
@@ -302,18 +307,30 @@ pub struct TlasPackage<'a> {
 pub(crate) struct TlasBuild {
     pub tlas: Arc<Tlas>,
     pub dependencies: Vec<Arc<Blas>>,
+    pub refit: Option<(Option<core::num::NonZeroU64>, u32)>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AsBuild {
     pub blas_s_built: Vec<Arc<Blas>>,
+    pub blas_refits: Vec<BlasRefitBuild>,
     pub tlas_s_built: Vec<TlasBuild>,
+}
+
+/// Prospective update sources in one Queue::submit, in command order. Start
+/// from successfully submitted metadata and discard this ledger on failure;
+/// validation of an unsubmitted build must never authorize a later UPDATE.
+#[derive(Default)]
+pub(crate) struct AsUpdateValidation {
+    pub blas: crate::FastHashMap<crate::track::TrackerIndex, Option<Vec<ArcBlasTriangleGeometry>>>,
+    pub tlas: crate::FastHashMap<crate::track::TrackerIndex, Option<u32>>,
 }
 
 impl AsBuild {
     pub(crate) fn with_capacity(blas: usize, tlas: usize) -> Self {
         Self {
             blas_s_built: Vec::with_capacity(blas),
+            blas_refits: Vec::new(),
             tlas_s_built: Vec::with_capacity(tlas),
         }
     }
@@ -340,6 +357,37 @@ pub struct OwnedBlasTriangleGeometry<R: ReferenceType> {
 }
 
 pub type ArcBlasTriangleGeometry = OwnedBlasTriangleGeometry<ArcReferences>;
+
+/// Only published after HAL queue submission succeeds. Recording/discarding a
+/// command buffer must never make an AS eligible as an update source.
+#[derive(Debug, Clone)]
+pub(crate) struct SubmittedBlasRefit {
+    pub generation: core::num::NonZeroU64,
+    pub geometries: Vec<ArcBlasTriangleGeometry>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BlasRefitBuild {
+    pub blas: Arc<Blas>,
+    pub geometries: Vec<ArcBlasTriangleGeometry>,
+    pub source: Option<core::num::NonZeroU64>,
+}
+
+pub(crate) fn refit_compatible(a: &[ArcBlasTriangleGeometry], b: &[ArcBlasTriangleGeometry]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| {
+        let indices_match = match (&a.index_buffer, &b.index_buffer) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) && !b.usage.intersects(
+                wgt::BufferUsages::COPY_DST | wgt::BufferUsages::STORAGE | wgt::BufferUsages::MAP_WRITE),
+            _ => false,
+        };
+        a.size == b.size && indices_match
+            && a.first_vertex == b.first_vertex && a.first_index == b.first_index
+            && a.vertex_stride == b.vertex_stride
+            && a.transform_buffer.is_some() == b.transform_buffer.is_some()
+    })
+}
+
 pub type TraceBlasTriangleGeometry = OwnedBlasTriangleGeometry<IdReferences>;
 
 #[derive(Debug, Clone)]
@@ -386,6 +434,7 @@ pub struct OwnedTlasPackage<R: ReferenceType> {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]
 pub struct OwnedTlasInstanceBuffer<R: ReferenceType> {
+    pub force_rebuild: bool,
     pub buffer: R::Buffer,
     pub offset: u64,
     pub count: u32,

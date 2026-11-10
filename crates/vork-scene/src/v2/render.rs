@@ -102,6 +102,9 @@ pub struct Settings {
     /// Internal render-call intent; promotion may enable OIDN unless explicitly disabled.
     #[serde(skip)]
     pub promotion_denoise: Option<bool>,
+    /// Draft-only native secondary compilation strategy; never an authored scene knob.
+    #[serde(skip)]
+    pub bounded_secondary_compilation: bool,
     /// Internal blocking-look policy, retained when an effect needs ray camera visibility.
     pub previs: bool,
     /// Internal scene-linear spatial reconstruction; independent of optional OIDN.
@@ -124,10 +127,11 @@ impl Settings {
         let mut settings = Self::with_integrator(if level == 2 {
             Integrator::Path(PathIntegrator::default())
         } else { Integrator::Raster(RasterIntegrator::default()) });
-        settings.samples = match level { 3 => constants::PREVIS_SAMPLES, 0 => constants::DRAFT_SAMPLES, 1 => constants::FINAL_SAMPLES, _ => constants::MAX_RENDER_SAMPLES };
+        settings.samples = match level { 3 => constants::PREVIS_SAMPLES, 0 => constants::DRAFT_SAMPLES, 1 => constants::FINAL_SAMPLES, _ => constants::PATH_SAMPLES };
         if let Some(samples) = intent.samples { settings.samples = samples.get(); }
         settings.promotion_denoise = Some(intent.denoise);
         settings.seed = intent.seed;
+        settings.bounded_secondary_compilation = level == 0;
         settings.previs = level == 3;
         settings.reconstruct = level == 1 && !intent.denoise;
         match &mut settings.integrator {
@@ -164,7 +168,7 @@ impl Settings {
     }
     /// An integrator's settings with its default sample budget and aperture sampling.
     pub fn with_integrator(integrator: Integrator) -> Self {
-        Self { promotion_denoise: None, previs: false, reconstruct: false, seed: 0, samples: integrator.default_samples(), integrator }
+        Self { promotion_denoise: None, bounded_secondary_compilation: false, previs: false, reconstruct: false, seed: 0, samples: integrator.default_samples(), integrator }
     }
 }
 // Omitted `integrator` is raster; samples and aperture sampling default by integrator.
@@ -185,6 +189,7 @@ impl<'de> Deserialize<'de> for Settings {
         let defaults = Self::with_integrator(integrator);
         Ok(Self {
             promotion_denoise: Some(defaults.integrator.denoiser().is_some()),
+            bounded_secondary_compilation: false,
             previs,
             reconstruct,
             seed,
@@ -366,7 +371,7 @@ impl Default for RasterIntegrator {
 #[serde(rename_all = "snake_case")]
 pub enum SubsurfaceMethod { Thickness, RandomWalk }
 impl Integrator {
-    pub fn default_samples(&self) -> u32 { if self.is_path() {constants::MAX_RENDER_SAMPLES} else {constants::RENDER_SAMPLES} }
+    pub fn default_samples(&self) -> u32 { if self.is_path() {constants::PATH_SAMPLES} else {constants::RENDER_SAMPLES} }
     pub fn is_path(&self) -> bool {
         matches!(self, Self::Path(_))
     }
@@ -477,17 +482,6 @@ mod color_tests {
     }
 
     #[test]
-    fn white_balance_loads_as_an_inline_library_compositor() {
-        let scene = Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"}],
-            "render":{"compositor":[{"program":"post/white_balance",
-                "inputs":{"temperature":4300,"tint":-12}}]}}"#).unwrap();
-        scene.validate().unwrap();
-        assert_eq!(scene.render.compositor.len(), 1);
-        let material = &scene.materials[scene.render.compositor[0].material()];
-        assert_eq!(material.program, "post/white_balance");
-    }
-
-    #[test]
     fn retired_white_balance_uses_unknown_field_diagnostics() {
         for value in [serde_json::json!(null), serde_json::json!({"temperature":3200.,"tint":0.})] {
             let bytes = serde_json::to_vec(&serde_json::json!({"version":2,"render":{"white_balance":value}})).unwrap();
@@ -554,10 +548,10 @@ mod compositor_tests {
     fn graph_names_are_backward_and_local_and_extents_are_checked() {
         use serde_json::json;
         let scene = |entries: serde_json::Value| Scene::from_json(&serde_json::to_vec(&json!({
-            "version":2,"nodes":[{"type":"camera"}],
+            "version":2,"programs":{"copy_program":{"source":crate::v2::COPY_COMPOSITOR}},"nodes":[{"type":"camera"}],
             "render":{"resolution":[65,33],"compositor":entries},
-            "materials":{"copy":{"program":"post/white_balance"},
-                "read":{"program":"post/white_balance","inputs":{"source":{"node":"saved"}}}}
+            "materials":{"copy":{"program":"copy_program"},
+                "read":{"program":"copy_program","inputs":{"source":{"node":"saved"}}}}
         })).unwrap());
         let valid=scene(json!([{"material":"copy","name":"saved","resolution":0.5},"read"])).unwrap();
         assert_eq!(valid.render.compositor[0].extent([65,33]).unwrap(),[32,16]);
@@ -575,11 +569,11 @@ mod compositor_tests {
         assert!(serde_json::from_value::<Input>(json!({"pass":"saved"})).is_err());
     }
     #[test]
-    fn bloom_is_an_ordered_material_without_a_render_alias() {
+    fn authored_compositors_are_ordered_materials_without_render_aliases() {
         assert!(serde_json::from_str::<Render>(r#"{"glare":{}}"#).is_err());
         let mut scene: Scene = serde_json::from_value(serde_json::json!({
-            "version":2,"nodes":[{"type":"camera"}],
-            "materials":{"bloom":{"program":"std/bloom","inputs":{"original":{"channel":"color"},"source":{"channel":"color"}}},"grade":{"program":"post/white_balance"}},
+            "version":2,"programs":{"copy_program":{"source":crate::v2::COPY_COMPOSITOR}},"nodes":[{"type":"camera"}],
+            "materials":{"bloom":{"program":"copy_program","inputs":{"original":{"channel":"color"},"source":{"channel":"color"}}},"grade":{"program":"copy_program"}},
             "render":{"compositor":["bloom","grade"]}
         })).unwrap();
         scene.validate().unwrap();

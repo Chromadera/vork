@@ -53,7 +53,7 @@ fn edges(kind: &str) -> &'static [(&'static str, &'static str, bool)] {
             ("instances.count","buffers",true),("instances.attributes.*","buffers",true),
             ("skin.inverse_bind_matrices","buffers",true),("image","images",true),
             ("medium","materials",true),("material","materials",true)],
-        "geometry" => &[("ids","buffers",true),("count","buffers",true),("indices","buffers",true),("curve_vertex_counts","buffers",true),("widths","buffers",true),
+        "geometry" => &[("status.buffer","buffers",true),("ids","buffers",true),("count","buffers",true),("indices","buffers",true),("curve_vertex_counts","buffers",true),("widths","buffers",true),
             ("attributes.*","buffers",true),("morphs.*.POSITION","buffers",true),("morphs.*.NORMAL","buffers",true)],
         "materials" => &[("program","programs",true),("inputs.*","input",false)],
         "input" => &[("image","images",true),("grid","buffers",true)],
@@ -190,10 +190,10 @@ mod tests {
     #[test]
     fn display_inputs_lower_nested_inline_images() {
         let scene = Scene::from_json(&serde_json::to_vec(&serde_json::json!({
-            "version":2,"nodes":[{"type":"camera","name":"camera"}],
+            "version":2,"programs":{"copy_program":{"source":crate::v2::COPY_COMPOSITOR}},"nodes":[{"type":"camera","name":"camera"}],
             "render":{"display":{"program":"blender/filmic","inputs":{
                 "lut":{"image":{"render":{"camera":"camera","compositor":[{
-                    "program":"post/white_balance","inputs":{"texture":{"image":{"file":"lut.exr"}}}
+                    "program":"copy_program","inputs":{"texture":{"image":{"file":"lut.exr"}}}
                 }]}}}
             }}}
         })).unwrap()).unwrap();
@@ -219,20 +219,20 @@ mod tests {
     #[test]
     fn inline_render_images_lower_their_compositors_recursively() {
         let image = serde_json::json!({"render":{"camera":"capture","root":"empty",
-            "compositor":[{"program":"post/white_balance"}]}});
+            "compositor":[{"program":"copy_program"}]}});
         for document in [
-            serde_json::json!({"version":2,"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"}],
+            serde_json::json!({"version":2,"programs":{"copy_program":{"source":crate::v2::COPY_COMPOSITOR}},"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"}],
                 "materials":{"surface":{"inputs":{"base_color":{"image":image}}}}}),
-            serde_json::json!({"version":2,"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"},
+            serde_json::json!({"version":2,"programs":{"copy_program":{"source":crate::v2::COPY_COMPOSITOR}},"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"},
                 {"type":"light","shape":"environment","material":{"program":"std/environment_image","inputs":{"image":{"image":image}}}}]}),
-            serde_json::json!({"version":2,"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"}],
-                "render":{"compositor":[{"program":"post/white_balance","inputs":{"texture":{"image":image}}}]}}),
+            serde_json::json!({"version":2,"programs":{"copy_program":{"source":crate::v2::COPY_COMPOSITOR}},"nodes":[{"type":"camera","name":"capture"},{"type":"node","name":"empty"}],
+                "render":{"compositor":[{"program":"copy_program","inputs":{"texture":{"image":image}}}]}}),
         ] {
             let loaded = Scene::from_json(&serde_json::to_vec(&document).unwrap());
             let scene=loaded.unwrap();
             let image = scene.images.values().next().unwrap().render.as_ref().unwrap();
             assert_eq!(image.compositor.len(), 1);
-            assert_eq!(scene.materials[image.compositor[0].material()].program, "post/white_balance");
+            assert_eq!(scene.materials[image.compositor[0].material()].program, "copy_program");
         }
     }
     #[test]

@@ -10,8 +10,13 @@ pub(crate) struct Mesh {
     count: u32,
     timed: bool,
     point_vertices: u32,
+    point_template: Vec<u32>,
+    point_attributes: Option<wgpu::Buffer>,
 }
 impl Mesh {
+    fn output_size(&self)->u64 {if self.point_vertices==0 {u64::from(self.count)*40} else {self.point_template.len() as u64*4}}
+    fn history_size(&self)->u64 {u64::from(self.count/self.point_vertices.max(1))*80}
+
     pub(crate) fn new(
         r: &Renderer,
         geometry: &geometry::Geometry,
@@ -33,6 +38,21 @@ impl Mesh {
             })
             .collect();
         let point_vertices = if geometry.point_centers.is_empty() { 0 } else { (geometry.vertices.len() / geometry.point_centers.len()) as u32 };
+        let mut point_template=Vec::new();
+        let point_attributes=if point_vertices!=0 {
+            let capacity=geometry.point_centers.len();
+            point_template.extend([capacity as u32,point_vertices]);
+            point_template.resize(2+capacity*10,0);
+            for v in &geometry.vertices[..point_vertices as usize] {point_template.extend(v.NORMAL.into_iter().chain(v.TEXCOORD_0).map(f32::to_bits));}
+            let mut rows=Vec::new();
+            for (i,center) in geometry.point_centers.iter().enumerate() {
+                let v=&geometry.vertices[i*point_vertices as usize];
+                rows.extend(center.iter().copied());rows.extend([geometry.point_widths[i],0.,0.,0.]);
+                rows.extend(v.COLOR_0);
+                for name in attributes {rows.extend(geometry.attributes.get(name).map_or([0.;4],|a|a[i*point_vertices as usize]));}
+            }
+            Some(init(&r.device,"authored point attributes",bytemuck::cast_slice(&rows),wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::VERTEX|wgpu::BufferUsages::COPY_SRC))
+        } else {None};
         let mut values = Vec::new();
         for (i, v) in geometry.vertices.iter().enumerate().filter(|(i, _)| point_vertices == 0 || i % point_vertices as usize == 0) {
             values.push([v.TEXCOORD_0[0], v.TEXCOORD_0[1], 0., 0.]);
@@ -46,7 +66,7 @@ impl Mesh {
             }
         }
         let topology = if point_vertices != 0 {
-            geometry.point_centers.iter().flatten().map(|v| v.to_bits()).collect()
+            geometry.point_centers.iter().zip(&geometry.point_widths).flat_map(|(p,w)|p.iter().chain(std::iter::once(w))).map(|v|v.to_bits()).collect()
         } else {
             let mut incidents = vec![Vec::new(); count as usize];
             for (face, triangle) in geometry.indices.chunks_exact(3).enumerate() {
@@ -79,7 +99,7 @@ impl Mesh {
             topology: storage("displacement topology", bytemuck::cast_slice(&topology)),
             count,
             timed,
-            point_vertices,
+            point_vertices, point_template, point_attributes,
         }))
     }
 }
@@ -184,7 +204,7 @@ impl Pipeline {
             let prefix = key.clone();
             let receipt_path = crate::programs::native_input_receipt_path(
                 &|key| r.disk_cache.path("material-displacement", 1, key), &compiler,
-                &modules, "displacement", &[(entry, "compute")], &args, &native_programs.identities)?;
+                &modules, "displacement", &[(entry, "compute")], &args, &native_programs.identities, &native_programs.inputs)?;
             let code = crate::programs::native_code(&identity, prepared, &native_programs.inputs, &receipt_path, |identity| {
                 let mut key = prefix.clone();
                 key.update(identity);
@@ -275,7 +295,7 @@ pub(crate) fn page_layout(
             ranges.push(ranges[leader]);
             continue;
         }
-        let bytes = u64::from(mesh.count) * 40;
+        let bytes = mesh.output_size();
         ensure!(
             bytes <= capacity,
             "displaced geometry needs {} endpoint bytes; adapter page limit is {}",
@@ -316,6 +336,7 @@ pub(crate) fn resources(
                     usage: wgpu::BufferUsages::STORAGE
                         | wgpu::BufferUsages::VERTEX
                         | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST
                         | rt::geometry_usage(rays),
                     mapped_at_creation: false,
                 },
@@ -363,17 +384,21 @@ pub(crate) fn resources(
                 previous_offset,previous_size,&attributes, &topology, current, endpoints,evaluated,converters.get(&attributes).cloned()));
             for (slot, &i) in jobs.iter().enumerate() {
                 let (_, offset) = ranges[i].unwrap();
-                let size = u64::from(mesh.count) * 40;
+                let size = mesh.output_size();
+                if mesh.point_vertices!=0 {r.queue.write_buffer(current,offset,bytemuck::cast_slice(&mesh.point_template));}
+                let gpu_bounds=(mesh.point_vertices!=0).then(||gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {
+                    label:Some("point displacement bounds"),size:32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));
                 frames[i] = Some(Frame {
                     geometry: EvaluatedGeometry {
-                        attributes: None,
+                        point_poses: None, point_domain: (mesh.point_vertices!=0).then_some((mesh.count/mesh.point_vertices.max(1),mesh.point_vertices)), gpu_bounds,
+                        attributes: mesh.point_attributes.clone(),
                         previous_attributes: None,
                         output: geometry::VertexStream { buffer: current.clone(), offset, size },
                         previous_output: geometry::VertexStream {
-                            buffer: endpoints.clone(), offset: offset * 2, size: size * 2,
+                            buffer: endpoints.clone(), offset: offset * 2, size: mesh.history_size(),
                         },
                     },
-                    batch: batch.clone(), slot, job: i,
+                    batch: batch.clone(), slot, job: i, published:std::sync::atomic::AtomicBool::new(false),
                 });
             }
         }
@@ -401,6 +426,7 @@ pub(crate) struct Frame {
     batch: Arc<Batch>,
     slot: usize,
     job: usize,
+    published: std::sync::atomic::AtomicBool,
 }
 impl Frame {
     pub(crate) fn append_inputs(&self, changes: &values::ChangeTracker, inputs: &mut Vec<u8>) {
@@ -445,7 +471,7 @@ impl Batch {
                 entry(6, current.as_entire_binding()), entry(7, endpoints.as_entire_binding()),
             ],
         });
-        let count = mesh.count.div_ceil(constants::DEFORM_GROUP);
+        let count = (mesh.count/mesh.point_vertices.max(1)).div_ceil(constants::DEFORM_GROUP);
         let width = count.min(r.device.limits().max_compute_workgroups_per_dimension);
         Self { evaluated,attributes:attribute_input,bind, params, scratch, bounds_offset, readback, jobs: jobs.to_vec(), count: mesh.count,
             groups: [width, count.div_ceil(width)], timed: mesh.timed,
@@ -478,7 +504,7 @@ impl Canonical {
         let code=format!("@group(0) @binding(0) var<storage,read> bounds:array<u32>; @group(0) @binding(1) var<storage,read_write> errors:array<atomic<u32>>; @compute @workgroup_size(1) fn main() {{if(bounds[{}u]!=0u) {{atomicMax(&errors[0],{}u);atomicMin(&errors[1],{object}u);}}}}",batch.bounds_offset/4+6,vork_slang::registry::GEOMETRY_NONFINITE);
         let diagnostics=compute::pipeline_layout(r,&code,"canonical geometry diagnostics",&[Some(true),Some(false)],"main");
         Self {diagnostics,pipeline:[pipeline.initialize.clone(),pipeline.evaluate.clone(),pipeline.finish.clone()],batch,
-            geometry:EvaluatedGeometry {output:geometry::VertexStream {buffer:output,offset:0,size},
+            geometry:EvaluatedGeometry {point_poses:None,point_domain:None,gpu_bounds:None,output:geometry::VertexStream {buffer:output,offset:0,size},
                 previous_output:geometry::VertexStream {buffer:previous,offset:0,size:size*2},attributes:None,previous_attributes:None},
             material,object_header}
     }
@@ -580,7 +606,7 @@ pub(crate) fn evaluate(
             if let Some(materials)=materials {changes.append_buffer_inputs(&materials.records,&mut key);}
             changes.changed(values::ChangeKey::Displacement(i),&key)
         } else {changes.changed(values::ChangeKey::Displacement(i),bytemuck::cast_slice(&parameters[i]))};
-        active[i] = cached_bounds[i].is_none() || changed
+        active[i] = (if batch.point_vertices!=0 {!frame.published.load(std::sync::atomic::Ordering::Relaxed)} else {cached_bounds[i].is_none()}) || changed
             || skin.get(i).and_then(Option::as_ref).is_some_and(|skin|
                 changes.buffer_dirty(&skin.params) || changes.buffer_dirty(&skin.previous_params));
         if active[i] { changes.publish(values::ChangeKey::DisplacedPositions(i)); }
@@ -648,18 +674,26 @@ pub(crate) fn evaluate(
             pass.set_bind_group(2, &batch.bind, &[]);
             let initialize = std::ptr::eq(stage, &pipeline.initialize);
             let groups = if initialize { [1, 1] }
-                else if std::ptr::eq(stage, &pipeline.evaluate) && batch.point_vertices != 0 {
-                    let count = (batch.count / batch.point_vertices).div_ceil(constants::DEFORM_GROUP);
-                    [count.min(batch.groups[0]), count.div_ceil(batch.groups[0])]
-                } else { batch.groups };
+                else { batch.groups };
             pass.dispatch_workgroups(groups[0], groups[1], batch.jobs.len() as u32 * if initialize { 1 } else { 3 });
         }
     }
+    let mut receipts=Vec::new();
     for batch in &batches {
-        encoder.copy_buffer_to_buffer(&batch.scratch, batch.bounds_offset, &batch.readback, 0, batch.jobs.len() as u64 * 32);
+        if batch.point_vertices==0 {encoder.copy_buffer_to_buffer(&batch.scratch, batch.bounds_offset, &batch.readback, 0, batch.jobs.len() as u64 * 32);}
+        else {for (slot,&i) in batch.jobs.iter().enumerate().filter(|(_,i)|active[**i]) {
+            let frame=frames[i].as_ref().unwrap();
+            encoder.copy_buffer_to_buffer(&batch.scratch,batch.bounds_offset+slot as u64*32,frame.geometry.gpu_bounds.as_ref().unwrap(),0,32);
+            let receipt=gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {label:Some("point displacement validation"),size:4,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false});
+            encoder.copy_buffer_to_buffer(&batch.scratch,batch.bounds_offset+slot as u64*32+24,&receipt,0,4);
+            receipts.push((crate::graph::PublicationDiagnostic::PointDisplacement,receipt));frame.published.store(true,std::sync::atomic::Ordering::Relaxed);
+        }}
     }
     let submission = crate::command_finish::Segments::submit(&r.queue, encoder);
     r.errors.check()?;
+    if !receipts.is_empty() {s.transients.publication_checks.lock().unwrap().push((submission.clone(),receipts));}
+    let batches:Vec<_>=batches.into_iter().filter(|b|b.point_vertices==0).collect();
+    if batches.is_empty() {return Ok(bounds);}
     let (send, receive) = std::sync::mpsc::channel();
     for batch in &batches {
         let send = send.clone();

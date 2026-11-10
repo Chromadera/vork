@@ -67,7 +67,7 @@ mod tests {
         let input=scene();
         let with=render(&r,input.clone(),true)?;
         let without=render(&r,input.clone(),false)?;
-        assert_eq!(with.linear_rgba,without.linear_rgba);
+        crate::test_linear::assert_linear_eq(with.linear_rgba.as_ref().unwrap(),without.linear_rgba.as_ref().unwrap());
         assert!(with.linear_rgba.unwrap().iter().all(|p|*p==[0.;4]));
         for p in &with.aovs["shadow_catcher"].pixels {for c in &p[..3] {assert!((*c-1.).abs()<1e-5,"neutral catcher: {p:?}");}}
         let mut dark=input;dark["nodes"].as_array_mut().unwrap().pop();

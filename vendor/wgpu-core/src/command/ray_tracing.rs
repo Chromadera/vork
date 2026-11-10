@@ -24,7 +24,7 @@ use crate::{
         ArcTlasPackage, BlasBuildEntry, BlasGeometries, BuildAccelerationStructureError,
         OwnedBlasBuildEntry, OwnedTlasPackage, TlasPackage,
     },
-    resource::{Blas, BlasCompactState, Labeled, ParentDevice, StagingBuffer, Tlas},
+    resource::{Blas, BlasCompactState, Labeled, ParentDevice, StagingBuffer, Tlas, Trackable},
     scratch::ScratchBuffer,
     snatch::SnatchGuard,
 };
@@ -32,13 +32,40 @@ use crate::{lock::RwLockWriteGuard, resource::RawResourceAccess};
 
 use crate::id::{BlasId, TlasId};
 
+// A failed submission may have advanced validation's built index. It must
+// not authorize refitting a build that never reached the native queue.
+fn submitted_update_source(submitted: Option<NonZeroU64>, current: Option<NonZeroU64>) -> Option<NonZeroU64> {
+    submitted.filter(|generation| Some(*generation) == current)
+}
+
+#[cfg(test)]
+mod refit_generation_tests {
+    use super::submitted_update_source;
+    use core::num::NonZeroU64;
+
+    #[test]
+    fn only_matching_successful_submission_authorizes_update() {
+        let first = NonZeroU64::new(1);
+        let second = NonZeroU64::new(2);
+        // An absent/discarded initial build, or validation without submission.
+        assert_eq!(submitted_update_source(None, None), None);
+        assert_eq!(submitted_update_source(None, first), None);
+        assert_eq!(submitted_update_source(first, first), first);
+        // Failed/replaced builds must rebuild rather than reuse stale metadata.
+        assert_eq!(submitted_update_source(first, second), None);
+        assert_eq!(submitted_update_source(second, second), second);
+    }
+}
+
 struct BlasStore<'a> {
     blas: Arc<Blas>,
     entries: hal::AccelerationStructureEntries<'a, dyn hal::DynBuffer>,
     scratch_buffer_offset: u64,
+    update: bool,
 }
 
 struct UnsafeTlasStore<'a> {
+    force_rebuild: bool,
     tlas: Arc<Tlas>,
     entries: hal::AccelerationStructureEntries<'a, dyn hal::DynBuffer>,
     scratch_buffer_offset: u64,
@@ -108,6 +135,7 @@ impl Global {
         offset: u64,
         count: u32,
         blas_ids: &[BlasId],
+        force_rebuild: bool,
     ) -> Result<(), EncoderStateError> {
         let encoder = self.hub.command_encoders.get(encoder_id);
         let mut data = encoder.data.lock();
@@ -126,7 +154,7 @@ impl Global {
                     instances: Vec::new(),
                     lowest_unmodified: 0,
                     native_instances: Some(crate::ray_tracing::OwnedTlasInstanceBuffer {
-                        buffer: self.resolve_buffer_id(buffer_id)?, offset, count,
+                        buffer: self.resolve_buffer_id(buffer_id)?, offset, count, force_rebuild,
                         blas: dependencies,
                     }),
                 }],
@@ -165,7 +193,7 @@ impl Global {
                     let tlas = hub.tlas_s.get(*tlas).get()?;
                     build_command.tlas_s_built.push(TlasBuild {
                         tlas,
-                        dependencies: Vec::new(),
+                        dependencies: Vec::new(), refit: None,
                     });
                 }
 
@@ -289,9 +317,9 @@ pub(crate) fn build_acceleration_structures(
 
         let scratch_buffer_offset = scratch_buffer_tlas_size;
         scratch_buffer_tlas_size += align_to(
-            tlas.size_info.build_scratch_size as u32,
-            state.device.alignments.ray_tracing_scratch_buffer_alignment,
-        ) as u64;
+            max(tlas.size_info.build_scratch_size, tlas.size_info.update_scratch_size),
+            u64::from(state.device.alignments.ray_tracing_scratch_buffer_alignment),
+        );
 
         if let Some(native) = &package.native_instances {
             let buffer = &native.buffer;
@@ -321,9 +349,10 @@ pub(crate) fn build_acceleration_structures(
             }
             state.buffer_memory_init_actions.extend(buffer.initialization_status.read().create_action(
                 buffer, range, MemoryInitKind::NeedsInitializedMemory));
-            build_command.tlas_s_built.push(TlasBuild { tlas: tlas.clone(), dependencies: native.blas.clone() });
+            build_command.tlas_s_built.push(TlasBuild { tlas: tlas.clone(), dependencies: native.blas.clone(), refit: None });
             tlas_storage.push(TlasStore {
                 internal: UnsafeTlasStore {
+                    force_rebuild: native.force_rebuild,
                     tlas: tlas.clone(),
                     entries: hal::AccelerationStructureEntries::Instances(hal::AccelerationStructureInstances {
                         buffer: Some(buffer.try_raw(state.snatch_guard)?), offset: u32::try_from(native.offset).map_err(|_| BuildAccelerationStructureError::TlasInstanceOffsetTooLarge(native.offset))?, count: native.count,
@@ -381,6 +410,7 @@ pub(crate) fn build_acceleration_structures(
         build_command.tlas_s_built.push(TlasBuild {
             tlas: tlas.clone(),
             dependencies,
+            refit: None,
         });
 
         if instance_count > tlas.max_instance_count {
@@ -393,6 +423,7 @@ pub(crate) fn build_acceleration_structures(
 
         tlas_storage.push(TlasStore {
             internal: UnsafeTlasStore {
+                force_rebuild: false,
                 tlas: tlas.clone(),
                 entries: hal::AccelerationStructureEntries::Instances(
                     hal::AccelerationStructureInstances {
@@ -426,24 +457,33 @@ pub(crate) fn build_acceleration_structures(
 
     let mut tlas_descriptors = Vec::with_capacity(tlas_storage.len());
 
-    for &TlasStore {
+    for (build_index, &TlasStore {
         internal:
             UnsafeTlasStore {
+                force_rebuild,
                 ref tlas,
                 ref entries,
                 ref scratch_buffer_offset,
             },
         ..
-    } in &tlas_storage
+    }) in tlas_storage.iter().enumerate()
     {
-        if tlas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
-            log::warn!("build_acceleration_structures called with PreferUpdate, but only rebuild is implemented");
-        }
+        let hal::AccelerationStructureEntries::Instances(instances) = entries else { unreachable!() };
+        let source = if tlas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+            let source = tlas.submitted_refit.read().filter(|(_, count)| *count == instances.count).map(|(generation, _)| generation);
+            let source = submitted_update_source(source, *tlas.built_index.read()).filter(|_| {
+                if force_rebuild { return false; }
+                !state.as_actions.iter().any(|action| matches!(action, AsAction::Build(build)
+                    if build.tlas_s_built.iter().any(|entry| Arc::ptr_eq(&entry.tlas, tlas))))
+            });
+            build_command.tlas_s_built[build_index].refit = Some((source, instances.count));
+            source
+        } else { None };
         tlas_descriptors.push(hal::BuildAccelerationStructureDescriptor {
             entries,
-            mode: hal::AccelerationStructureBuildMode::Build,
+            mode: if source.is_some() { hal::AccelerationStructureBuildMode::Update } else { hal::AccelerationStructureBuildMode::Build },
             flags: tlas.flags,
-            source_acceleration_structure: None,
+            source_acceleration_structure: if source.is_some() {Some(tlas.try_raw(state.snatch_guard)?)} else {None},
             destination_acceleration_structure: tlas.try_raw(state.snatch_guard)?,
             scratch_buffer: scratch_buffer.raw(),
             scratch_buffer_offset: *scratch_buffer_offset,
@@ -574,6 +614,7 @@ impl CommandBufferMutable {
         &mut self,
         snatch_guard: &SnatchGuard,
         command_index_guard: &mut RwLockWriteGuard<CommandIndices>,
+        updates: &mut crate::ray_tracing::AsUpdateValidation,
     ) -> Result<(), ValidateAsActionsError> {
         profiling::scope!("CommandEncoder::[submission]::validate_as_actions");
         for action in &self.as_actions {
@@ -585,7 +626,23 @@ impl CommandBufferMutable {
                     .unwrap();
 
                     command_index_guard.next_acceleration_structure_build_command_index += 1;
+                    for refit in &build.blas_refits {
+                        let previous = updates.blas.entry(refit.blas.tracker_index()).or_insert_with(|| {
+                            refit.blas.submitted_refit.read().as_ref().map(|source| source.geometries.clone())
+                        });
+                        // Recording ahead can observe the same submitted source
+                        // in several buffers. Intervening compatible builds and
+                        // updates are legal; a changed generation alone is not
+                        // evidence that native UPDATE's topology changed.
+                        if refit.source.is_some() && !previous.as_ref().is_some_and(|geometries|
+                            crate::ray_tracing::refit_compatible(geometries, &refit.geometries)) {
+                            return Err(ValidateAsActionsError::StaleBlasUpdate(refit.blas.error_ident()));
+                        }
+                    }
                     for blas in build.blas_s_built.iter() {
+                        if blas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+                            updates.blas.insert(blas.tracker_index(), None);
+                        }
                         let mut state_lock = blas.compacted_state.lock();
                         *state_lock = match *state_lock {
                             BlasCompactState::Compacted => {
@@ -597,8 +654,22 @@ impl CommandBufferMutable {
                         };
                         *blas.built_index.write() = Some(build_command_index);
                     }
+                    for refit in &build.blas_refits {
+                        updates.blas.insert(refit.blas.tracker_index(), Some(refit.geometries.clone()));
+                    }
 
                     for tlas_build in build.tlas_s_built.iter() {
+                        if tlas_build.tlas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+                            let previous = updates.tlas.entry(tlas_build.tlas.tracker_index()).or_insert_with(|| {
+                                tlas_build.tlas.submitted_refit.read().map(|(_, count)| count)
+                            });
+                            if let Some((Some(_), count)) = tlas_build.refit {
+                                if *previous != Some(count) {
+                                    return Err(ValidateAsActionsError::StaleTlasUpdate(tlas_build.tlas.error_ident()));
+                                }
+                            }
+                            *previous = tlas_build.refit.map(|(_, count)| count);
+                        }
                         tlas_build.tlas.try_raw(snatch_guard)?;
                         for blas in &tlas_build.dependencies {
                             blas.try_raw(snatch_guard)?;
@@ -686,6 +757,20 @@ fn iter_blas<'snatch_guard: 'buffers, 'buffers>(
 
         match &entry.geometries {
             ArcBlasGeometries::TriangleGeometries(triangle_geometries) => {
+                let source = if blas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+                    blas.submitted_refit.read().as_ref().filter(|previous|
+                        crate::ray_tracing::refit_compatible(&previous.geometries, triangle_geometries)
+                    ).map(|previous| previous.generation)
+                } else { None };
+                let source = source.and_then(|generation| submitted_update_source(Some(generation), *blas.built_index.read())).filter(|_| {
+                    !state.as_actions.iter().any(|action| matches!(action, AsAction::Build(build)
+                        if build.blas_s_built.iter().any(|entry| Arc::ptr_eq(entry, blas))))
+                });
+                if blas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+                    build_command.blas_refits.push(crate::ray_tracing::BlasRefitBuild {
+                        blas: blas.clone(), geometries: triangle_geometries.clone(), source,
+                    });
+                }
                 let mut triangle_entries =
                     Vec::<hal::AccelerationStructureTriangles<dyn hal::DynBuffer>>::new();
 
@@ -977,13 +1062,14 @@ fn iter_blas<'snatch_guard: 'buffers, 'buffers>(
                 {
                     let scratch_buffer_offset = *scratch_buffer_blas_size;
                     *scratch_buffer_blas_size += align_to(
-                        blas.size_info.build_scratch_size as u32,
-                        state.device.alignments.ray_tracing_scratch_buffer_alignment,
-                    ) as u64;
+                        max(blas.size_info.build_scratch_size, blas.size_info.update_scratch_size),
+                        u64::from(state.device.alignments.ray_tracing_scratch_buffer_alignment),
+                    );
 
                     blas_storage.push(BlasStore {
                         blas: blas.clone(),
                         entries: hal::AccelerationStructureEntries::Triangles(triangle_entries),
+                        update: source.is_some(),
                         scratch_buffer_offset,
                     });
                 }
@@ -1013,10 +1099,8 @@ fn map_blas<'a>(
         blas,
         entries,
         scratch_buffer_offset,
+        update,
     } = storage;
-    if blas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
-        log::debug!("only rebuild implemented")
-    }
     let raw = blas.try_raw(snatch_guard)?;
 
     let state_lock = blas.compacted_state.lock();
@@ -1034,9 +1118,9 @@ fn map_blas<'a>(
     }
     Ok(hal::BuildAccelerationStructureDescriptor {
         entries,
-        mode: hal::AccelerationStructureBuildMode::Build,
+        mode: if *update { hal::AccelerationStructureBuildMode::Update } else { hal::AccelerationStructureBuildMode::Build },
         flags: blas.flags,
-        source_acceleration_structure: None,
+        source_acceleration_structure: update.then_some(raw),
         destination_acceleration_structure: raw,
         scratch_buffer,
         scratch_buffer_offset: *scratch_buffer_offset,
@@ -1067,8 +1151,8 @@ fn build_blas<'a>(
         unsafe {
             cmd_buf_raw.place_acceleration_structure_barrier(hal::AccelerationStructureBarrier {
                 usage: hal::StateTransition {
-                    from: hal::AccelerationStructureUses::BUILD_INPUT,
-                    to: hal::AccelerationStructureUses::BUILD_OUTPUT,
+                    from: hal::AccelerationStructureUses::BUILD_INPUT | hal::AccelerationStructureUses::BUILD_OUTPUT | hal::AccelerationStructureUses::SHADER_INPUT,
+                    to: hal::AccelerationStructureUses::BUILD_OUTPUT | hal::AccelerationStructureUses::BUILD_INPUT,
                 },
             });
 
@@ -1103,8 +1187,8 @@ fn build_blas<'a>(
         destination_usage |= hal::AccelerationStructureUses::BUILD_INPUT
     }
     if tlas_present {
-        source_usage |= hal::AccelerationStructureUses::SHADER_INPUT;
-        destination_usage |= hal::AccelerationStructureUses::BUILD_OUTPUT;
+        source_usage |= hal::AccelerationStructureUses::SHADER_INPUT | hal::AccelerationStructureUses::BUILD_OUTPUT;
+        destination_usage |= hal::AccelerationStructureUses::BUILD_OUTPUT | hal::AccelerationStructureUses::BUILD_INPUT;
     }
     unsafe {
         cmd_buf_raw.place_acceleration_structure_barrier(hal::AccelerationStructureBarrier {

@@ -43,6 +43,7 @@ void cloth_bend(uint k,float h) {
 }
 // Structural colours stay inside one workgroup; contacts use the whole GPU.
 void cloth_integrate(ComputeContext ctx,Inputs inputs) {
+ if(ctx.dt>0&&contact_status_load(0)>0)return;
  uint i=ctx.id.x;float h=ctx.dt;
  float3 p=h==0?geometry_POSITION_load(i):p_load(i),v=h==0?float3(0):velocity_load(i);
  old_store(i,p);
@@ -53,6 +54,7 @@ void cloth_integrate(ComputeContext ctx,Inputs inputs) {
  for(uint k=i;k<CLOTH_HINGES;k+=CLOTH_VERTICES)bend_lambda_store(k,0);
 }
 void cloth_solve(ComputeContext ctx,Inputs inputs) {
+ if(contact_status_load(0)>0)return;
  uint lane=ctx.id.x;bool has_contacts=false;
  if(lane==0)for(uint i=0;i<CLOTH_VERTICES;i++)if(contact_count_load(i)>0){has_contacts=true;break;}
  for(uint i=lane;i<CLOTH_VERTICES;i+=64)cloth_x[i]=p_load(i);

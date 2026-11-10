@@ -1,6 +1,9 @@
 """Author explicit bloom/glare graphs; no renderer-side graph expansion."""
 import copy
 import math
+from pathlib import Path
+
+BLOOM_SOURCE=(Path(__file__).parent/"compositor-effects/bloom.slang").read_text()
 
 COPY = {"program": {"source": "import vork; struct Inputs {}; float4 composite(CompositeContext c, Inputs i) { return compositor_sample(c.uv); }"}}
 
@@ -14,7 +17,7 @@ def bloom(inputs, resolution, prefix="bloom"):
     levels = max(1, int(math.log2(max(1, min(size) * radius))))
     graph = [{"name": prefix + ".original", "material": copy.deepcopy(COPY)}]
     def node(stage, scale, extra, name=None):
-        item = {"material": {"program": "std/bloom", "inputs": {**inputs, "stage": stage, "source": {"node": graph[-1]["name"]}, **extra}}, "resolution": scale}
+        item = {"material": {"program": {"source": BLOOM_SOURCE}, "inputs": {**inputs, "stage": stage, "source": {"node": graph[-1]["name"]}, **extra}}, "resolution": scale}
         item["name"] = name if name is not None else f"{prefix}.stage{len(graph)}"
         graph.append(item)
     # Absolute dimensions retain ceil-divided highlight size and floor mip extents,

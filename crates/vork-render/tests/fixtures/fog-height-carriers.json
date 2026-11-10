@@ -1,0 +1,267 @@
+{
+  "version": 2,
+  "render": {
+    "resolution": [16, 12],
+    "camera": "cam",
+    "display": {
+      "program": "std/agx",
+      "inputs": {
+        "exposure": -0.7,
+        "look": "punchy"
+      }
+    }
+  },
+  "programs": {
+    "fog": {
+      "source": "// Marine layer for stage 1 world fog: certified exponential-height form.\n// Extinction = coefficient * exp(-falloff * (y - base_height)); dense below base_height, thinning quickly above it.\n// Zero channels stay zero where the exponential would overflow.\nimport vork;\nstruct Inputs {\n    float3 scattering = float3(0.12);\n    float3 absorption = float3(0.0);\n    float base_height = 72.0;\n    float falloff = 0.09;\n    float anisotropy = 0.55;\n};\nfloat sc1(float c, float s) { return c == 0.0 ? 0.0 : c * s; }\nfloat3 sc3(float3 c, float s) { return float3(sc1(c.x, s), sc1(c.y, s), sc1(c.z, s)); }\nMediumCoefficients medium(MediumContext ctx, Inputs i) {\n    float s = exp(-i.falloff * (ctx.world_position.y - i.base_height));\n    MediumCoefficients m;\n    m.scattering = sc3(i.scattering, s);\n    m.absorption = sc3(i.absorption, s);\n    m.emission = float3(0.0);\n    m.anisotropy = i.anisotropy;\n    return m;\n}\n"
+    },
+    "haze": {
+      "source": "// Homogeneous coastal haze inside one large closed convex box carrier (aerial perspective on the hills and city).\nimport vork;\nstruct Inputs {\n    float3 scattering = float3(0.00012);\n    float3 absorption = float3(0.0);\n    float anisotropy = 0.5;\n};\nMediumCoefficients medium(MediumContext ctx, Inputs i) {\n    MediumCoefficients m;\n    m.scattering = i.scattering;\n    m.absorption = i.absorption;\n    m.emission = float3(0.0);\n    m.anisotropy = i.anisotropy;\n    return m;\n}\n"
+    },
+    "bank": {
+      "source": "// Homogeneous coastal haze inside one large closed convex box carrier (aerial perspective on the hills and city).\nimport vork;\nstruct Inputs {\n    float3 scattering = float3(0.00012);\n    float3 absorption = float3(0.0);\n    float anisotropy = 0.5;\n};\nMediumCoefficients medium(MediumContext ctx, Inputs i) {\n    MediumCoefficients m;\n    m.scattering = i.scattering;\n    m.absorption = i.absorption;\n    m.emission = float3(0.0);\n    m.anisotropy = i.anisotropy;\n    return m;\n}\n"
+    }
+  },
+  "materials": {
+    "fog": {
+      "program": "fog",
+      "inputs": {
+        "scattering": [0.02, 0.02, 0.02],
+        "absorption": [0.0, 0.0, 0.0],
+        "base_height": 75.0,
+        "falloff": 0.11,
+        "anisotropy": 0.78
+      }
+    },
+    "cam": {
+      "program": "std/camera",
+      "inputs": {
+        "lens": 24,
+        "clip_start": 0.5,
+        "clip_end": 60000.0
+      }
+    },
+    "haze": {
+      "program": "haze",
+      "inputs": {
+        "scattering": [4e-05, 4e-05, 4e-05],
+        "anisotropy": 0.5
+      }
+    },
+    "bank0": {
+      "program": "bank",
+      "inputs": {
+        "scattering": [0.035, 0.035, 0.035],
+        "anisotropy": 0.6
+      }
+    },
+    "bank1": {
+      "program": "bank",
+      "inputs": {
+        "scattering": [0.03, 0.03, 0.03],
+        "anisotropy": 0.6
+      }
+    }
+  },
+  "nodes": [
+    {
+      "type": "light",
+      "shape": "environment",
+      "energy": 0.5,
+      "color": [1, 1, 1],
+      "medium": "fog"
+    },
+    {
+      "type": "light",
+      "shape": "sun",
+      "name": "sun",
+      "energy": 14.0,
+      "color": [1.0, 0.62, 0.32],
+      "angle": 0.0093,
+      "rotation": [-0.07730808799086704, -0.45999152035595664, -0.040244043349200516, 0.8836354891620863],
+      "visible_camera": false
+    },
+    {
+      "type": "mesh",
+      "name": "hazebox",
+      "geometry": "hazebox",
+      "materials": [
+        "haze"
+      ],
+      "translation": [0, 740, 0],
+      "scale": [24000, 1500, 26000]
+    },
+    {
+      "type": "mesh",
+      "name": "bank0",
+      "geometry": "bank0",
+      "materials": [
+        "bank0"
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "bank1",
+      "geometry": "bank1",
+      "materials": [
+        "bank1"
+      ]
+    },
+    {
+      "type": "camera",
+      "name": "cam",
+      "material": "cam",
+      "translation": [-40.0, 100.0, 480.0],
+      "rotation": [0.0, 0.9951333266680702, -0.0, -0.09853761796664216]
+    }
+  ],
+  "geometry": {
+    "hazebox": {
+      "attributes": {
+        "POSITION": "box_position",
+        "NORMAL": "box_normal",
+        "TEXCOORD_0": "box_TEXCOORD_0"
+      },
+      "indices": "box_indices"
+    },
+    "bank0": {
+      "attributes": {
+        "POSITION": "bank0_p"
+      },
+      "indices": "bank0_i"
+    },
+    "bank1": {
+      "attributes": {
+        "POSITION": "bank1_p"
+      },
+      "indices": "bank1_i"
+    }
+  },
+  "buffers": {
+    "bank0_p": {
+      "type": "vec3",
+      "data": [
+        [-125.0, 58, 450.0],
+        [125.0, 58, 450.0],
+        [125.0, 58, 670.0],
+        [-125.0, 58, 670.0],
+        [-87.5, 104, 483.0],
+        [87.5, 104, 483.0],
+        [87.5, 104, 637.0],
+        [-87.5, 104, 637.0]
+      ]
+    },
+    "bank0_i": {
+      "type": "u32",
+      "data": [0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 6, 2, 6, 3, 3, 6, 7, 3, 7, 0, 0, 7, 4, 0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6]
+    },
+    "bank1_p": {
+      "type": "vec3",
+      "data": [
+        [-100.0, 58, 655.0],
+        [120.0, 58, 655.0],
+        [120.0, 58, 835.0],
+        [-100.0, 58, 835.0],
+        [-67.0, 100, 682.0],
+        [87.0, 100, 682.0],
+        [87.0, 100, 808.0],
+        [-67.0, 100, 808.0]
+      ]
+    },
+    "bank1_i": {
+      "type": "u32",
+      "data": [0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 6, 2, 6, 3, 3, 6, 7, 3, 7, 0, 0, 7, 4, 0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6]
+    },
+    "box_position": {
+      "type": "vec3",
+      "data": [
+        [0.5, -0.5, 0.5],
+        [0.5, -0.5, -0.5],
+        [0.5, 0.5, 0.5],
+        [0.5, 0.5, -0.5],
+        [-0.5, -0.5, -0.5],
+        [-0.5, -0.5, 0.5],
+        [-0.5, 0.5, -0.5],
+        [-0.5, 0.5, 0.5],
+        [-0.5, 0.5, 0.5],
+        [0.5, 0.5, 0.5],
+        [-0.5, 0.5, -0.5],
+        [0.5, 0.5, -0.5],
+        [-0.5, -0.5, -0.5],
+        [0.5, -0.5, -0.5],
+        [-0.5, -0.5, 0.5],
+        [0.5, -0.5, 0.5],
+        [-0.5, -0.5, 0.5],
+        [0.5, -0.5, 0.5],
+        [-0.5, 0.5, 0.5],
+        [0.5, 0.5, 0.5],
+        [0.5, -0.5, -0.5],
+        [-0.5, -0.5, -0.5],
+        [0.5, 0.5, -0.5],
+        [-0.5, 0.5, -0.5]
+      ]
+    },
+    "box_normal": {
+      "type": "vec3",
+      "data": [
+        [1, 0, 0],
+        [1, 0, 0],
+        [1, 0, 0],
+        [1, 0, 0],
+        [-1, 0, 0],
+        [-1, 0, 0],
+        [-1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, 1, 0],
+        [0, 1, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, -1, 0],
+        [0, -1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, 1],
+        [0, 0, 1],
+        [0, 0, 1],
+        [0, 0, -1],
+        [0, 0, -1],
+        [0, 0, -1],
+        [0, 0, -1]
+      ]
+    },
+    "box_TEXCOORD_0": {
+      "type": "vec2",
+      "data": [
+        [0, 1],
+        [1, 1],
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+        [0, 0],
+        [1, 0]
+      ]
+    },
+    "box_indices": {
+      "type": "u32",
+      "data": [0, 1, 3, 0, 3, 2, 4, 5, 7, 4, 7, 6, 8, 9, 11, 8, 11, 10, 12, 13, 15, 12, 15, 14, 16, 17, 19, 16, 19, 18, 20, 21, 23, 20, 23, 22]
+    }
+  }
+}

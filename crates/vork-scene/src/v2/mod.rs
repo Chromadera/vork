@@ -94,6 +94,10 @@ pub struct Scene {
     #[serde(default)]
     #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "scene.programs", "x-help" = "{name:program}"))]
     pub programs: Table<Program>,
+    /// Ordered geometry lowerings; compute contains ordinary geometry programs.
+    #[serde(default = "constants::geometry_stages")]
+    #[schemars(extend("x-source" = "vork geometry chain", "x-help-path" = "scene.geometry_stages", "x-help" = "(deform|compute|displace)[]; ordered, each at most once; default [deform,compute,displace]"))]
+    pub geometry_stages: Vec<GeometryStage>,
     /// Fixed-clock retained compute state, independent of output FPS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-source" = "vork simulation contract", "x-help-path" = "scene.simulation", "x-help" = "simulation|null; fixed-clock ordered retained compute"))]
@@ -105,6 +109,14 @@ pub struct Scene {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-source" = "vork authored propagation", "x-help-path" = "scene.propagation", "x-help" = "{program,bounds}|null; authored straight ray segments inside world-space bounds"))]
     pub propagation: Option<Propagation>,
+}
+/// Native deformation (including subdivision), geometry compute, and displacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GeometryStage { Deform, Compute, Displace }
+impl GeometryStage {
+    pub const DEFAULT: [Self;3] = [Self::Deform,Self::Compute,Self::Displace];
+    pub fn name(self)-> &'static str {match self {Self::Deform=>"deform",Self::Compute=>"compute",Self::Displace=>"displace"}}
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -126,6 +138,13 @@ impl Scene {
     }
     /// Decode expanded geometry while retaining the original document's locations.
     pub fn from_json_with_source(bytes: &[u8], authored: &[u8], file: Option<&Path>) -> Result<Self> {
+        Self::decode_with_source(bytes,authored,file,true)
+    }
+    /// Offline asset consumer: validate content without requiring a render camera.
+    pub fn from_json_for_export(bytes:&[u8],authored:&[u8],file:Option<&Path>)->Result<Self> {
+        Self::decode_with_source(bytes,authored,file,false)
+    }
+    fn decode_with_source(bytes:&[u8],authored:&[u8],file:Option<&Path>,require_camera:bool)->Result<Self> {
         let bytes = diagnostics::without_bom(bytes);
         let mut value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| diagnostics::decode_error(bytes, error))?;
@@ -143,7 +162,7 @@ impl Scene {
         ensure!(!scene.materials.keys().any(|name| name.starts_with("__vork_")),
             "material names starting with __vork_ are reserved for the renderer");
         scene.origins = origins;
-        scene.validate().map_err(|error| scene.authored_error(error))?;
+        scene.validate_content(require_camera).map_err(|error| scene.authored_error(error))?;
         Ok(scene)
     }
     /// Add authored users to errors without changing normalized resource identity.
@@ -155,7 +174,8 @@ impl Scene {
         diagnostics::authored_error(&self.origins, error)
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> { self.validate_content(true) }
+    fn validate_content(&self,require_camera:bool)->Result<()> {
         if let Some(p) = &self.propagation {
             ensure!(self.programs.contains_key(&p.program), "unknown propagation program {}", p.program);
             ensure!(p.bounds.iter().flatten().all(|v|v.is_finite()) && (0..3).all(|i|p.bounds[0][i]<p.bounds[1][i]), "propagation.bounds must have finite ordered endpoints");
@@ -224,7 +244,7 @@ impl Scene {
             Ok(())
         }
         visit(&self.nodes, &mut names, &mut groups, &mut cameras, &mut has_assets)?;
-        ensure!(cameras > 0 || has_assets, "scene requires at least one camera");
+        ensure!(!require_camera || cameras > 0 || has_assets, "scene requires at least one camera");
         fn validate_links(nodes: &[Node], groups: &std::collections::HashSet<&str>) -> Result<()> {
             for node in nodes {
                 if let NodeKind::Light {
@@ -278,7 +298,7 @@ impl Scene {
             );
         }
         self.validate_image_sources(&names)?;
-        self.validate_resources(&names)
+        self.validate_resources(&names,require_camera)
     }
 }
 
@@ -623,3 +643,28 @@ mod launch_api_tests {
         assert!(!schema.contains("\"volume\""));
     }
 }
+
+#[cfg(test)]
+mod geometry_stage_tests {
+    use super::*;
+    #[test]
+    fn stage_list_default_order_roundtrip_and_errors() {
+        let empty=serde_json::json!({"version":2,"nodes":[{"type":"camera"}]});
+        let baseline=Scene::from_json(&serde_json::to_vec(&empty).unwrap()).unwrap();
+        assert_eq!(baseline.geometry_stages,GeometryStage::DEFAULT);
+        for names in [vec!["deform","compute","displace"],vec!["displace","deform","compute"],vec![]] {
+            let mut value=empty.clone();value["geometry_stages"]=serde_json::json!(names);
+            let scene=Scene::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(scene).unwrap()["geometry_stages"],value["geometry_stages"]);
+        }
+        let mut value=empty.clone();value["geometry_stages"]=serde_json::json!(["compute","compute"]);
+        let error=format!("{:#}",Scene::from_json(&serde_json::to_vec(&value).unwrap()).unwrap_err());
+        assert!(error.contains("geometry_stages[1]") && error.contains("remove the duplicate"),"{error}");
+        value["geometry_stages"]=serde_json::json!(["skin"]);
+        let error=format!("{:#}",Scene::from_json(&serde_json::to_vec(&value).unwrap()).unwrap_err());
+        assert!(error.contains("deform") && error.contains("compute") && error.contains("displace"),"{error}");
+    }
+}
+
+#[cfg(test)]
+pub(crate) const COPY_COMPOSITOR: &str = "struct Inputs {Image original;Image source;Image texture;}; float4 composite(CompositeContext c,Inputs i){return compositor_sample(c.uv);}";

@@ -122,7 +122,7 @@ try:
         # Verify both package-manager extractions, including every dylib and slangc.
         for root in [project / 'node_modules/@voyager-so', project / '.venv']:
             for file in root.rglob('*'):
-                if file.is_file() and 'runtime' in file.relative_to(root).parts and (file.name in ('vork', 'slangc') or file.suffix == '.dylib'):
+                if file.is_file() and 'runtime' in file.relative_to(root).parts and (file.name in ('vork', 'vork-slang-filesystem', 'slangc') or file.suffix == '.dylib'):
                     run(['codesign', '--verify', '--strict', '--verbose=2', file])
                     identity = subprocess.run(['codesign', '-dv', '--verbose=4', str(file)], capture_output=True, text=True, check=True)
                     print(identity.stderr, flush=True)

@@ -40,6 +40,10 @@ impl Device {
             self.require_features(Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN)?;
         }
 
+        let mut flags = blas_desc.flags;
+        if blas_desc.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+            flags |= wgt::AccelerationStructureFlags::ALLOW_UPDATE;
+        }
         let size_info = match &sizes {
             wgt::BlasGeometrySizeDescriptors::Triangles { descriptors } => {
                 if descriptors.len() as u32 > self.limits.max_blas_geometry_count {
@@ -112,7 +116,7 @@ impl Device {
                     self.raw().get_acceleration_structure_build_sizes(
                         &hal::GetAccelerationStructureBuildSizesDescriptor {
                             entries: &hal::AccelerationStructureEntries::Triangles(entries),
-                            flags: blas_desc.flags,
+                            flags,
                         },
                     )
                 }
@@ -161,9 +165,10 @@ impl Device {
             device: self.clone(),
             size_info,
             sizes,
-            flags: blas_desc.flags,
+            flags,
             update_mode: blas_desc.update_mode,
             handle,
+            submitted_refit: RwLock::new(rank::BLAS_BUILT_INDEX, None),
             label: blas_desc.label.to_string(),
             built_index: RwLock::new(rank::BLAS_BUILT_INDEX, None),
             tracking_data: TrackingData::new(self.tracker_indices.blas_s.clone()),
@@ -202,6 +207,10 @@ impl Device {
             self.require_features(Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN)?;
         }
 
+        let mut flags = desc.flags;
+        if desc.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate {
+            flags |= wgt::AccelerationStructureFlags::ALLOW_UPDATE;
+        }
         let size_info = unsafe {
             self.raw().get_acceleration_structure_build_sizes(
                 &hal::GetAccelerationStructureBuildSizesDescriptor {
@@ -212,7 +221,7 @@ impl Device {
                             count: desc.max_instances,
                         },
                     ),
-                    flags: desc.flags,
+                    flags,
                 },
             )
         };
@@ -245,9 +254,10 @@ impl Device {
             raw: Snatchable::new(raw),
             device: self.clone(),
             size_info,
-            flags: desc.flags,
+            flags,
             update_mode: desc.update_mode,
             built_index: RwLock::new(rank::TLAS_BUILT_INDEX, None),
+            submitted_refit: RwLock::new(rank::TLAS_BUILT_INDEX, None),
             dependencies: RwLock::new(rank::TLAS_DEPENDENCIES, Vec::new()),
             instance_buffer: ManuallyDrop::new(instance_buffer),
             label: desc.label.to_string(),

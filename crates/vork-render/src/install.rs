@@ -37,20 +37,6 @@ pub(crate) fn medium_use_sites(nodes: &[Node], media: &std::collections::BTreeSe
 #[derive(Default, Clone, Copy)]
 pub(crate) struct TransportFacts {pub media:bool,pub hair:bool}
 
-// Subsurface chord/random-walk queries use a different traversal service and
-// are not covered by stage 1's medium ledger. Reject possible activation too:
-// an initially zero animated/texture weight must not reopen that service later.
-fn admit_fog_subsurface(scene:&Scene)->Result<()> {
-    let animated=materials::animated_inputs(scene)?;
-    for (name,material) in &scene.materials {
-        if material.program!="std/openpbr" {continue;}
-        let record=materials::openpbr_values(scene,Some(name),animated.get(name).unwrap_or(&Default::default()),|_|Ok(0))?;
-        ensure!(!record.capabilities.subsurface,
-            "stage 1 fog does not support subsurface scattering (material {name:?}); set subsurface_weight to zero and remove its texture/animation binding, or render the fog and subsurface shot externally");
-    }
-    Ok(())
-}
-
 pub(crate) fn admit_delivery_effects(r:&Renderer,scene:&Scene,base:&Path,allow_media:bool)->Result<(std::collections::BTreeMap<String,programs::Stages>, TransportFacts)> {
     let stages=programs::mesh_stages(r,scene,base)?;
     let mut hair_materials=std::collections::BTreeSet::new();
@@ -123,7 +109,6 @@ pub(crate) fn admit_delivery_effects(r:&Renderer,scene:&Scene,base:&Path,allow_m
         Ok(())
     }
     visit(&scene.nodes,scene,base,&stages,&mut documents,&mut environments,&mut refused,&mut 0,allow_media,&mut facts,&hair_materials)?;
-    if scene.delivery && facts.media {admit_fog_subsurface(scene)?;}
     if let Some(first)=environments.first() {
         for extra in &environments[1..] {
             refused.insert(format!("{extra}: additional environment lights are unavailable; combine its contribution with {first} in one environment program or precomposite the environment maps"));
@@ -209,6 +194,7 @@ impl MaterialBindings {
 #[derive(Clone)]
 pub(crate) struct ImplicitField {
     pub source: String,
+    pub statuses: Vec<(String, wgpu::Buffer, u64)>,
     pub dims: [u32;3],
     pub acceleration: std::sync::Arc<crate::implicit_acceleration::Acceleration>,
     pub spans: Vec<(wgpu::Buffer, buffers::AttributeSpan)>,
@@ -229,6 +215,8 @@ pub(crate) struct Draw {
     /// geometry is not retained.
     pub(crate) open_edges: Option<std::sync::Arc<crate::passes::path::OpenEdges>>,
     pub(crate) indices: wgpu::Buffer,
+    /// Immutable topology for validated BLAS refits; shared across frame slots.
+    pub(crate) refit_indices: Option<wgpu::Buffer>,
     /// Shared static page; evaluated-layout and compute geometry own their buffers.
     pub(crate) geometry_page: Option<usize>,
     pub(crate) vertex_offset: u64,
@@ -296,6 +284,8 @@ impl MeshRoot {
 
 /// Structural choices fixed for one install, independent of other installs.
 pub struct InstallOptions {
+    /// Host loops must refuse promotion before allocating path views.
+    pub(crate) raster_only: bool,
     /// Internal lowering declaration; scene authoring is exposed separately.
     pub(crate) geometry_stages: Option<Vec<crate::geometry_chain::Kind>>,
     /// Initial requested scene time in seconds, used for pose and camera initialization.
@@ -319,6 +309,8 @@ pub struct InstallOptions {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_convex_media: bool,
     #[cfg(any(test, feature = "test-support"))]
+    pub(crate) test_force_general_media: bool,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_convex_work_limit: Option<u32>,
     /// Qualification-only cap; absent from scene content and release policy.
     #[cfg(any(test, feature = "test-support"))]
@@ -327,6 +319,7 @@ pub struct InstallOptions {
 impl Default for InstallOptions {
     fn default() -> Self {
         Self {
+            raster_only: false,
             geometry_stages: None,
             initial_time: vork_time::Request::Numeric(0.),
             render: None,
@@ -343,6 +336,8 @@ impl Default for InstallOptions {
             test_volume_bounces: 0,
             #[cfg(any(test, feature = "test-support"))]
             test_convex_media: false,
+            #[cfg(any(test, feature = "test-support"))]
+            test_force_general_media: false,
             #[cfg(any(test, feature = "test-support"))]
             test_convex_work_limit: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -516,13 +511,13 @@ impl InstalledScene {
         scope: &'scope std::thread::Scope<'scope, '_>,
     ) -> Result<Self> {
         let InstallOptions { readback, ref variants, reservations, .. } = *options;
-        let geometry_stages = options.geometry_stages.clone().unwrap_or_else(||crate::geometry_chain::Kind::DEFAULT.to_vec());
+        let geometry_stages = options.geometry_stages.clone().unwrap_or_else(||scene.geometry_stages.iter().copied().map(crate::geometry_chain::Kind::from_scene).collect());
         for (index,kind) in geometry_stages.iter().enumerate() {
             ensure!(!geometry_stages[..index].contains(kind),"geometry stages[{index}] repeats {kind:?}; remove the duplicate built-in stage");
         }
         let compositor = compositor::install(r, &scene, base)?;
         let (mut output_dependencies, _) = compositor::dependencies(&compositor, &scene.render.compositor);
-        if !options.gpu_color && !readback.color && !readback.float.color {output_dependencies=Default::default();}
+        if !options.gpu_color && !readback.color && !readback.color16 && !readback.float.color {output_dependencies=Default::default();}
         output_dependencies.depth |= readback.depth_ids || readback.float.depth;
         output_dependencies.ids |= readback.depth_ids;
         output_dependencies.normals |= readback.normals || readback.float.normals;
@@ -787,18 +782,20 @@ impl InstalledScene {
         #[cfg(not(any(test, feature = "test-support")))]
         let qualified_media = true;
         if qualified_media && medium.is_some() {
-            ensure!(input.propagation.is_none(), "stage 1 fog does not support authored propagation; use straight rays or render the fog externally");
-            ensure!(input.materials.iter().all(|(name, material)| !stages.get(name).is_some_and(|stage| stage.surface) || material.program == "std/openpbr"), "stage 1 fog does not support custom surface callbacks; use std/openpbr surfaces or render the fog externally");
-            ensure!(!stages.values().any(|stage| stage.displacement), "stage 1 fog does not support displacement callbacks; bake the displaced mesh first");
+            ensure!(input.materials.iter().all(|(name, material)| !stages.get(name).is_some_and(|stage| stage.surface) || material.program == "std/openpbr"), "fog with custom surface callbacks is not yet supported; use std/openpbr until the cold-compile plug-in design is implemented");
             ensure!(!stages.values().any(|stage| stage.medium && stage.surface), "stage 1 fog does not support combined surface/medium programs; overlap an independent fog carrier with std/openpbr glass");
             if let Some(medium) = medium.as_mut() {
                 ensure!(medium.native.homogeneous || environment.settings.medium.as_deref().is_some_and(|world|medium.certified_world_exponential(world)), "stage 1 fog does not support varying finite media or arbitrary world density; use homogeneous coefficient programs for carriers and homogeneous or certified exponential-height world fog");
-                medium.native.convex = true;
+                // Select a boundary representation after geometry is available; neither
+                // representation imposes shape/count admission.
+                medium.native.convex = false;
+                #[cfg(any(test, feature = "test-support"))]
+                if options.test_convex_media {medium.native.convex=true;}
                 medium.native.work_limit = Some(131072);
                 #[cfg(any(test, feature = "test-support"))]
-                if options.test_convex_media {medium.native.work_limit = options.test_convex_work_limit;}
+                if options.test_convex_media || options.test_convex_work_limit.is_some() {medium.native.work_limit = options.test_convex_work_limit;}
                 if let Some(limit) = medium.native.work_limit {medium.native.identity.extend_from_slice(&limit.to_le_bytes());}
-                medium.native.identity.extend_from_slice(b"decision-d-convex-1");
+                medium.native.identity.extend_from_slice(b"decision-d-path-cap-2");
             }
         }
 
@@ -822,6 +819,7 @@ impl InstalledScene {
         let mut ray_shadows = light_shadow_rays || ray_refraction || effects.probes || promoted_transport || program_trace || compute_trace;
         let mut slang = crate::slang_forward::SlangScene {
                 program_trace,
+                bounded_secondary_compilation: render.settings.bounded_secondary_compilation,
                 propagation: propagation.clone(),
                 camera: camera_native,
                 environment: environment.primary.clone(),
@@ -831,7 +829,7 @@ impl InstalledScene {
                 textures: 1, samplers: 1,
                 ray_refraction,
                 connection_transmission, surface_coverage:false, attribute_coverage:false, shadow_capacity:0,
-                no_shadow_containment: false, no_boundary_transactions: false,
+                no_shadow_containment: false, no_boundary_transactions: false, no_points: false,
                 probes: effects.probes,
                 fibre: effects.fibre,
                 denoise: effects.denoise,
@@ -1221,6 +1219,7 @@ impl InstalledScene {
                         exit_bvh: source.exit_bvh.clone(),
                         open_edges: source.open_edges.clone(),
                         indices: source.indices.clone(),
+                        refit_indices: source.refit_indices.clone(),
                         geometry_page: source.geometry_page,
                         vertex_offset: source.vertex_offset,
                         index_offset: source.index_offset,
@@ -1669,6 +1668,7 @@ impl InstalledScene {
         }
         // This is the lowered/compiled proof, including imported and program alpha.
         // Resolve it before choosing the shared opaque pipeline registry.
+        slang.no_points = !draws.iter().any(|draw|draw.exit_geometry.as_ref().is_some_and(|g|!g.point_centers.is_empty()));
         slang.surface_coverage = draws.iter().any(|draw|materials[draw.material].surface_coverage());
         slang.attribute_coverage = attributes != 0 && draws.iter().any(|draw|materials[draw.material].attribute_coverage());
         slang.connection_transmission = rays && (draws.iter().any(|draw|materials[draw.material].transmissive) || input.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit)));
@@ -1723,6 +1723,13 @@ impl InstalledScene {
             || (effects.fibre && rays);
         if let Some(medium)=&mut medium {
             medium.native.mesh_sources=medium_sources;
+            if qualified_media {
+                #[cfg(not(any(test, feature="test-support")))]
+                let force_general=false;
+                #[cfg(any(test, feature="test-support"))]
+                let force_general=options.test_force_general_media;
+                medium.select_boundary_format(&draws,&native_ids,force_general);
+            }
             slang.medium=Some(std::sync::Arc::new(medium.native.clone()));
         }
         // Imported assets reserve possible light connections before their contents
@@ -1744,7 +1751,9 @@ impl InstalledScene {
             "scene needs {} material samplers; device max_binding_array_sampler_elements_per_shader_stage={}",slang.samplers,limits.max_binding_array_sampler_elements_per_shader_stage);
         ensure!(descriptor_elements <= u64::from(limits.max_binding_array_elements_per_shader_stage),
             "scene material/ray tables need {descriptor_elements} descriptors; device max_binding_array_elements_per_shader_stage={}", limits.max_binding_array_elements_per_shader_stage);
-        let builtin=propagation.is_none() && !spectral && camera_programs.is_empty() && slang.environment.is_none() && programs.is_none() && medium.is_none()
+        // The shared builtin registry is point-capable. Preserve the no-point
+        // proof by using the scene-keyed registry for its lean hit variants.
+        let builtin=!slang.no_points && propagation.is_none() && !spectral && camera_programs.is_empty() && slang.environment.is_none() && programs.is_none() && medium.is_none()
             && !ray_shadows && !slang.ray_refraction && !slang.connection_transmission && !slang.surface_coverage && !effects.denoise && !effects.probes && render.aovs.is_empty()
             && slang.attributes==0 && slang.textures==vork_slang::registry::MATERIAL_TEXTURE_CAPACITY && slang.samplers==vork_slang::registry::MATERIAL_SAMPLER_CAPACITY;
         let pipelines = if builtin {r.cached_pipelines(raster_samples)} else {r.program_pipelines(programs.as_ref().map_or("", |p| p.identity.as_str()),
@@ -1973,7 +1982,7 @@ impl InstalledScene {
             image.per_sample=sampled_media.contains(name);
             image.final_compositor=final_media.contains(name);
         }
-        let material_table = textures.table(&mat_layout, record_bytes)?;
+        let material_table = textures.table(&mat_layout, record_bytes, shadow_solids.count>crate::passes::path::INLINE_BOUNDARIES)?;
         let mut materials: Vec<_> = materials
             .into_iter()
             .map(materials::PendingMaterial::finish)
@@ -2196,8 +2205,17 @@ impl InstalledScene {
             let demand=nodes.iter().any(|n| crate::compute::places_instances(input,&n.node));
             crate::probes::placement::Field::in_frame(&volume,&draws,&objects,&eyes,demand,probe_frame.unwrap_or_default(),&r.device)
         }).transpose()?;
+        let mut refit_topology = std::collections::HashMap::new();
         for draw in &mut draws {
+            // A program can fold its displacement away. Such points retain the
+            // installed vertex streams and must not select compact vertex pulling.
+            if !draw.computed && draw.displacement.is_none() {draw.layout.points=false;}
             if let Some(geometry) = draw.exit_geometry.take() {
+                if rays && draw.evaluated() && !draw.layout.points {
+                    draw.refit_indices = Some(refit_topology.entry(draw.indices.clone()).or_insert_with(|| {
+                        init(&r.device, "immutable BLAS topology", bytemuck::cast_slice(&geometry.indices), wgpu::BufferUsages::BLAS_INPUT)
+                    }).clone());
+                }
                 if materials[draw.material].solid_transmission
                     && !ray_refraction
                     && needs_raster_solid_exit[roots[draw.object as usize].node]
@@ -2208,7 +2226,7 @@ impl InstalledScene {
                         .or_insert_with(|| crate::transmission::mesh(&r.device, draw, &geometry))
                         .clone());
                 }
-                if draw.computed { draw.exit_geometry=Some(geometry); }
+                if draw.computed || !geometry.point_centers.is_empty() { draw.exit_geometry=Some(geometry); }
             }
         }
         let mut jobs = std::collections::HashMap::new();
@@ -2301,10 +2319,26 @@ impl InstalledScene {
                     let spans:Vec<_>=pages.bindings[name].spans.iter().map(|s|(pages.storage[s.page as usize].clone(),s.clone())).collect();
                     if !implicit_fields.contains_key(name) {
                         let acceleration=std::sync::Arc::new(crate::implicit_acceleration::Acceleration::new(r,dims,&spans,field_objects[name])?);
-                        implicit_fields.insert(name.clone(),ImplicitField {source:name.clone(),dims,spans,acceleration});
+                        implicit_fields.insert(name.clone(),ImplicitField {source:name.clone(),statuses:Vec::new(),dims,spans,acceleration});
+                    }
+                    if let Some(status)=&geometry.status {
+                        let binding=&pages.bindings[&status.buffer];
+                        ensure!(binding.count==1 && binding.width==1,"geometry.status requires one u32 element");
+                        let span=&binding.spans[0];
+                        implicit_fields.get_mut(name).unwrap().statuses.push((
+                            format!("node {:?}: {}",node.name,status.message),
+                            pages.storage[span.page as usize].clone(),u64::from(span.offset)*4));
                     }
                     for object in draw.instances.clone() {objects[object as usize].metadata[1] |= vork_slang::registry::OBJECT_IMPLICIT;}
                     draw.implicit=Some(implicit_fields[name].clone());
+                }
+            }
+        }
+        if options.geometry_stages.is_none() {
+            for draw in &draws {
+                let name=&nodes[roots[draw.object as usize].node].node.name;
+                for (stage,active) in [(vork_scene::v2::GeometryStage::Deform,draw.deform.is_some()),(vork_scene::v2::GeometryStage::Compute,draw.computed),(vork_scene::v2::GeometryStage::Displace,draw.displacement.is_some())] {
+                    ensure!(!active || input.geometry_stages.contains(&stage),"geometry_stages omits {} required by node {:?}; add \"{}\" to geometry_stages",stage.name(),name,stage.name());
                 }
             }
         }
@@ -2629,6 +2663,12 @@ impl InstalledScene {
         let rays = rays
             .then(|| crate::rt::Rays::new(r, &draws, &instances, &objects, &plan.casters.instances[0], ray_refraction || crate::rt::other_hit_surfaces(&scene) || program_coverage || program_trace, &materials, &render.settings.integrator, &solids.boundaries, &solids.owners, &subsurface_ids, &occupancy_solids, medium_sources))
             .transpose()?;
+        // Point shape construction and immutable compute-query snapshots need
+        // the retained source topology. Only computed publications keep it after
+        // their installation lowerings have acquired the shared shape.
+        for draw in &mut draws {
+            if !draw.computed && draw.exit_geometry.as_ref().is_some_and(|g|!g.point_centers.is_empty()) {draw.exit_geometry=None;}
+        }
         let capture_controls = input.materials.values().any(|m| {
             m.program != "std/openpbr"
                 && m.program != "std/fog"
@@ -2784,7 +2824,7 @@ impl InstalledScene {
 
     /// Render one frame, growing frame storage on the same installation if needed.
     pub fn render_frame(&mut self, r: &Renderer, slot: &mut FrameSlot, time: f32) -> Result<crate::FrameOutput> {
-        if slot.probe_generation != self.reservations.probe_pages {
+        if slot.probe_generation != self.reservations.probe_pages || slot.dielectric_spill_reservation != self.reservations.dielectric_spill {
             self.refresh_frame_slot(r, slot)?;
         }
         loop {
@@ -2989,29 +3029,3 @@ fn group_draws(
 
 #[cfg(all(test, vork_private_tests))]
 include!("install_material_binding_tests_private.rs");
-
-#[cfg(test)]
-mod fog_scope_tests {
-    use super::*;
-    #[test]
-    fn fog_subsurface_admission_rejects_possible_activation() -> Result<()> {
-        let scene=|inputs:serde_json::Value,animated:bool|->Result<Scene> {
-            let mut value=serde_json::json!({"version":2,"nodes":[{"type":"camera"}],
-                "images":{"weight":{"file":"not-read-by-admission.png","color_space":"Non-Color"}},
-                "materials":{"skin":{"inputs":inputs}}});
-            if animated {value["animation"]=serde_json::json!([{"tracks":[{
-                "path":["materials","skin","inputs","subsurface_weight"],"keys":[[0,0],[1,1]]}]}]);}
-            Ok(serde_json::from_value(value)?)
-        };
-        admit_fog_subsurface(&scene(serde_json::json!({"subsurface_weight":0}),false)?)?;
-        for input in [serde_json::json!({"subsurface_weight":0.5}),
-            serde_json::json!({"subsurface_weight":0.5,"geometry_thin_walled":true}),
-            serde_json::json!({"subsurface_weight":{"image":"weight"}})] {
-            let error=admit_fog_subsurface(&scene(input,false)?).unwrap_err().to_string();
-            assert!(error.contains("subsurface scattering") && error.contains("skin") && error.contains("externally"),"{error}");
-        }
-        let error=admit_fog_subsurface(&scene(serde_json::json!({"subsurface_weight":0}),true)?).unwrap_err().to_string();
-        assert!(error.contains("texture/animation binding"),"{error}");
-        Ok(())
-    }
-}

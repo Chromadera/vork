@@ -375,8 +375,15 @@ struct AssetBindings {
     transforms: Vec<(usize, AssetTarget, bool)>,
     visibility: Vec<(usize, usize)>,
 }
+struct LiveValues {
+    generation: u64,
+    values: std::collections::BTreeMap<usize, Vec<f32>>,
+}
 #[derive(Clone, Default)]
 pub(crate) struct Plan {
+    // Absent in offline plans. Clones retained by imported animation share the
+    // publication, while each frame still samples into its own storage.
+    live: std::sync::Arc<std::sync::OnceLock<std::sync::RwLock<LiveValues>>>,
     pub layers: Vec<CompiledLayer>,
     reset_bindings: Vec<NodeBinding>,
     asset_bindings: Vec<AssetBindings>,
@@ -388,6 +395,41 @@ pub(crate) struct Plan {
     discrete_tracks: bool,
 }
 impl Plan {
+    /// Resolve host inputs after all imported channels and material bindings
+    /// have finalized. Targets were declared as varying before installation.
+    pub(crate) fn bind_live(&self, targets: &[v2::TrackTarget], initial: &[Vec<f32>]) -> Result<Vec<usize>> {
+        let mut indices = Vec::new();
+        for target in targets {
+            let matching: Vec<_> = self.layers.iter().flat_map(|l| &l.tracks).enumerate()
+                .filter(|(_, track)| track.target.as_ref() == Some(target)).collect();
+            ensure!(matching.len() == 1, "live input must have exactly one prepared binding; remove other tracks for {target:?}");
+            let (index, track) = matching[0];
+            ensure!(matches!(track.channel, Channel::Numeric(_)), "live input must be numeric: {target:?}");
+            indices.push(index);
+        }
+        self.live.set(std::sync::RwLock::new(LiveValues {
+            generation: 0,
+            values: indices.iter().copied().zip(initial.iter().cloned()).collect(),
+        }))
+            .map_err(|_| anyhow::anyhow!("live inputs already bound"))?;
+        Ok(indices)
+    }
+
+    pub(crate) fn publish_live<'a>(&self, updates: impl Iterator<Item = (usize, &'a [f32])>) {
+        let mut values = self.live.get().expect("prepared live inputs").write().expect("live values lock poisoned");
+        let mut changed = false;
+        for (index, value) in updates {
+            values.values.get_mut(&index).expect("prepared live binding").copy_from_slice(value);
+            changed = true;
+        }
+        if changed { values.generation += 1; }
+    }
+
+    /// Time alone does not identify a pose when the host can publish values.
+    pub(crate) fn live_generation(&self) -> u64 {
+        self.live.get().map_or(0, |values| values.read().expect("live values lock poisoned").generation)
+    }
+
     #[cfg(test)]
     pub fn compile(scene: &v2::Scene, base: &std::path::Path) -> Result<Self> {
         Self::compile_with_buffers(scene, base, None)
@@ -558,6 +600,7 @@ impl Plan {
             }
         }
         Ok(Self {
+            live: Default::default(),
             layers,
             camera_tracks,
             discrete_tracks,
@@ -936,6 +979,7 @@ impl Plan {
         samples: &mut Samples,
         wanted: impl Fn(&PropertyTrack) -> bool,
     ) -> Result<()> {
+        let live = self.live.get().map(|values| values.read().expect("live values lock poisoned"));
         for (value, binding) in samples
             .material_values
             .iter_mut()
@@ -988,6 +1032,10 @@ impl Plan {
                                 [upper.unwrap_or_else(||times.partition_point(|t| *t <= local)).saturating_sub(1)]
                             .clone();}
                         }
+                    }
+                    if let Some(value) = live.as_ref().and_then(|values| values.values.get(&index)) {
+                        let Sample::Numeric(sample) = &mut samples.values[index] else { unreachable!() };
+                        sample.clone_from(value);
                     }
                     for &target in track.material_targets.iter().flatten() {
                         blend_sample(
@@ -1151,6 +1199,31 @@ impl Plan {
                 index += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    #[test]
+    fn live_publication_replaces_sampling_in_cloned_plans_without_rebinding() -> Result<()> {
+        let scene = v2::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera","name":"camera"}],
+            "animation":[{"tracks":[{"path":["nodes","camera","translation"],"keys":[[0,[-10,-10,-10]],[1,[10,10,10]]]}]}]}"#)?;
+        let plan = Plan::compile(&scene, std::path::Path::new("."))?;
+        let imported_copy = plan.clone();
+        let target = scene.track_targets()?.remove(0);
+        let binding = plan.bind_live(&target, &[vec![1.,2.,3.]])?[0];
+        assert_eq!(imported_copy.live_generation(), 0);
+        let mut samples = imported_copy.samples();
+        imported_copy.sample_into(0.75, &mut samples);
+        assert_eq!(samples.values[0], Sample::Numeric(vec![1.,2.,3.]));
+        plan.publish_live([(binding, &[4.,5.,6.][..])].into_iter());
+        assert_eq!(imported_copy.live_generation(), 1);
+        plan.publish_live(std::iter::empty());
+        assert_eq!(imported_copy.live_generation(), 1);
+        imported_copy.sample_into(0.25, &mut samples);
+        assert_eq!(samples.values[0], Sample::Numeric(vec![4.,5.,6.]));
+        Ok(())
     }
 }
 pub(super) fn numeric_buffer(

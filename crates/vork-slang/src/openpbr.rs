@@ -362,8 +362,10 @@ mod replay_tests {
         let program = Compiler::discover().compile_surface(&abi,
             "struct Inputs {}; Blend surface(ShadingContext ctx, Inputs inputs) { return add(unlit(float3(.2)), unlit(float3(.4))); }",
             Path::new("outlined-blend.slang"), "outlinedblend")?;
-        assert!(program.slang.contains("[noinline]\n#endif\npublic void vork_surface_outlinedblend("), "{}",program.slang);
-        assert_eq!(program.slang.matches("surface(ctx, inputs)").count(), 2);
+        let (outlined, ordinary) = program.slang.split_once("#else\npublic void vork_surface_outlinedblend(").expect("outlined and ordinary native boundaries");
+        assert!(outlined.contains("[noinline]\nvork_surface_outlinedblend_result vork_surface_outlinedblend("), "{}",program.slang);
+        assert_eq!(outlined.matches("surface(ctx, inputs)").count(), 2);
+        assert_eq!(ordinary.matches("surface(ctx, inputs)").count(), 2);
         // Pin the ordering, including the first surface evaluation: moving the
         // reset after it would invalidate per-wrapper scratch localization.
         assert!(program.slang.contains(concat!(

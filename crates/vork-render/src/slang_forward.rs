@@ -36,6 +36,8 @@ pub(crate) struct SlangScene {
     pub(crate) attribute_coverage: bool,
     pub(crate) shadow_capacity: u32,
     pub(crate) no_shadow_containment: bool,
+    /// Installed geometry contains no point domains; omit compact hit decoding.
+    pub(crate) no_points: bool,
     pub(crate) no_boundary_transactions: bool,
     /// The irradiance volume (probes.slang) replaces world diffuse light.
     pub(crate) probes: bool,
@@ -43,12 +45,14 @@ pub(crate) struct SlangScene {
     pub(crate) fibre: bool,
     pub(crate) denoise: bool,
     pub(crate) field_controls: bool,
+    pub(crate) bounded_secondary_compilation: bool,
     pub(crate) medium: Option<Arc<crate::medium::Native>>,
 }
 
 pub(crate) struct SlangForward {
     device: wgpu::Device,
     metal: bool,
+    check_only: bool,
     ray_shadows: bool,
     msaa: bool,
     /// The camera vertex stage, shared by depth and forward (bit-identical depth).
@@ -85,6 +89,7 @@ impl SlangForward {
         let store = r.disk_cache.clone();
         let mut this = Self {
             device: r.device.clone(),
+            check_only: r.check_only,
             metal: r.adapter_info.backend == wgpu::Backend::Metal,
             ray_shadows,
             msaa,
@@ -194,6 +199,14 @@ impl SlangForward {
         &self, main:&str, text:Option<&str>, entry:(&str,&str), threads:(u32,u32,u32), label:&str,
         kernel:Option<crate::pipelines::ProgramKernel>, program:Option<u32>, probe:bool,
     )->anyhow::Result<Lookup<wgpu::ShaderModule>> {
+        // Authored stages and their effect proofs were validated before this
+        // backend link. The check-only renderer cannot execute this module and
+        // never writes a native artifact or marks a cache entry as compiled.
+        if self.check_only {
+            return Ok(if probe { Lookup::Stored } else {
+                Lookup::Built(native::module(&self.device, label, None, Some(""), threads))
+            });
+        }
         use crate::pipelines::{ProgramKernel, ShadeStage};
         let diagnostic=kernel.and_then(ProgramKernel::camera_label);
         let label=diagnostic.as_deref().unwrap_or(label);
@@ -218,6 +231,7 @@ impl SlangForward {
             }
         }
         if !self.scene.field_controls && !matches!(kernel,Some(ProgramKernel::Path {..})) {kernel_defines.push("-DVORK_NO_IMPLICIT".into());}
+        if self.scene.no_points {kernel_defines.push("-DVORK_NO_POINTS".into());}
         if self.scene.no_shadow_containment {kernel_defines.push("-DVORK_NO_SHADOW_CONTAINMENT".into());}
         if self.scene.no_boundary_transactions && matches!(kernel,Some(ProgramKernel::Path {..})) {kernel_defines.push("-DVORK_NO_BOUNDARY_TRANSACTIONS".into());}
         if !self.scene.connection_transmission {kernel_defines.push("-DVORK_NO_CONNECTION_TRANSMISSION".into());}
@@ -225,12 +239,18 @@ impl SlangForward {
         // with field outlining makes the NVIDIA driver expand nested closures.
         if self.scene.field_controls && self.scene.medium.is_none() {kernel_defines.push("-DVORK_FIELD_OUTLINE".into());}
         if self.scene.field_controls && matches!(entry.0,"controls_fs"|"transparent_controls_fs") {kernel_defines.push("-DVORK_IMPLICIT_CONTROLS".into());}
+        #[cfg(any(test, feature="test-support"))]
+        if matches!(kernel,Some(ProgramKernel::Path {..})) {
+            if let Ok(mode)=std::env::var("VORK_TEST_POISON_PATH_SAMPLE") {
+                kernel_defines.push(format!("-DVORK_TEST_POISON_PATH_SAMPLE={}",if mode=="all" {2}else{1}));
+            }
+        }
         if let Some(ProgramKernel::Path {media:Some(count),..})=kernel {
             let native=path_medium.expect("installed path medium");
             if native.convex {
                 kernel_defines.push("-DVORK_MEDIUM_CONVEX".to_owned());
-                if let Some(limit)=native.work_limit {kernel_defines.push(format!("-DVORK_MEDIUM_WORK_LIMIT={limit}"));kernel_defines.push(format!("-DVORK_MEDIUM_POINT_WORK={}",native.point_work));}
             }
+            if let Some(limit)=native.work_limit {kernel_defines.push(format!("-DVORK_MEDIUM_WORK_LIMIT={limit}"));}
             if !native.homogeneous && native.scattering_free && native.emission_free {kernel_defines.push("-DVORK_MEDIUM_ABSORPTION_ONLY".to_owned());}
             kernel_defines.extend(["-DVORK_PATH_MEDIA".to_owned(),format!("-DVORK_PATH_MEDIUM_BOUNDS={count}"),format!("-DVORK_PATH_HETEROGENEOUS={}",u8::from(!native.homogeneous))]);
         }
@@ -246,14 +266,18 @@ impl SlangForward {
             if stage.composes() && self.msaa {kernel_defines.push("-DVORK_RASTER_MSAA".into());}
         }
 
-        // Bound the lighting graph for triangle-only Vulkan GI and the path graph
-        // on both native backends. Vulkan restores driver inlining at the
-        // SPIR-V handoff; Metal keeps these boundaries.
+        // Preserve final's compiler inputs: O2 changes secondary sample results.
+        // Draft permits the bounded material/lighting graphs that admit large scenes.
         let surface_outlining = !self.metal && !self.scene.field_controls && self.scene.medium.is_none()
-            && matches!(kernel, Some(ProgramKernel::Gi {..}));
+            && (matches!(kernel, Some(ProgramKernel::Gi {..}))
+                || (self.scene.bounded_secondary_compilation && matches!(kernel, Some(ProgramKernel::Reflections {..}))));
         if surface_outlining {kernel_defines.push("-DVORK_SURFACE_SLANG_OUTLINE".into());}
-        let path_outlining = matches!(kernel, Some(ProgramKernel::Path {..}));
-        if path_outlining {
+        let transport_outlining = matches!(kernel, Some(ProgramKernel::Path {..}))
+            || (surface_outlining && self.scene.bounded_secondary_compilation);
+        // Camera kernels otherwise duplicate the implicit grid walk at every
+        // classify/evaluate call site. Keep their existing Slang boundaries.
+        let camera_outlining = !self.metal && matches!(kernel, Some(ProgramKernel::Decoupled {..}));
+        if transport_outlining {
             kernel_defines.extend([NATIVE_OPTIMIZATION.to_owned(), "-DVORK_PATH_SLANG_OUTLINE".into()]);
         }
         if path_medium.is_some() {
@@ -337,7 +361,7 @@ impl SlangForward {
         if let Some(camera)=&self.scene.camera {include.extend(camera.include.iter().map(|p|p.display().to_string()));}
         if let Some(native)=path_medium {include.extend(native.includes.iter().map(|p|p.display().to_string()));}
         let query_defines:Vec<_> = if self.metal && entry.1=="vertex" {
-            vec!["-DVORK_MATERIAL_WORDS_REGISTER=t2","-DVORK_FRAME_LIGHTS_REGISTER=t30"]
+            vec!["-DVORK_MATERIAL_WORDS_REGISTER=t3","-DVORK_FRAME_LIGHTS_REGISTER=t30","-DVORK_FRAME_CLUSTERS_REGISTER=b29","-DVORK_POINT_WORDS_REGISTER=t2"]
         }else{Vec::new()};
         let kernel_module = match main {
             "gi_programs" => "gi_ray",
@@ -382,8 +406,9 @@ impl SlangForward {
             programs::native_input_identity(self.cache.as_ref(),&compiler,&modules,main,&[entry],&args,&identities,inputs)?
         };
         let mut hash = blake3::Hasher::new();
-        if path_outlining && !self.metal {hash.update(b"path-local-blend-state-v1");}
+        if transport_outlining && !self.metal {hash.update(b"path-local-blend-state-v1");}
         if self.scene.field_controls {hash.update(b"field-driver-inline-v1");}
+        if camera_outlining {hash.update(b"camera-driver-outline-v1");}
         hash.update(&[u8::from(self.ray_shadows),u8::from(self.msaa),u8::from(denoise),u8::from(main=="decoupled_programs" && self.scene.ray_refraction),u8::from(self.scene.connection_transmission)]);
         for part in [target, main, entry.0, &define, text.unwrap_or("")] {
             hash.update(part.as_bytes());
@@ -402,7 +427,7 @@ impl SlangForward {
         hash.update(&identity.identity);
         let path = (self.cache)(hash.finalize());
         if probe {return Ok(if disk_cache::read(&path).is_some() {Lookup::Stored} else {Lookup::Absent});}
-        let receipt_path = programs::native_input_receipt_path(self.cache.as_ref(), &compiler, &modules, main, &[entry], &args, &identities)?;
+        let receipt_path = programs::native_input_receipt_path(self.cache.as_ref(), &compiler, &modules, main, &[entry], &args, &identities, inputs)?;
         let code = programs::native_code(&identity, prepared, inputs, &receipt_path, |identity| {
             let mut hash = prefix.clone();
             hash.update(identity);
@@ -410,16 +435,22 @@ impl SlangForward {
         }, || compiler.prepare_identified_modules(&modules, main, &[entry], &args, &identities), |prepared| {
             let start = std::time::Instant::now();
             let mut code = prepared.compile()?;
-            if path_outlining && !self.metal {code=compiler.localize_native_blends(&code)?;}
+            crate::timing::creation(&self.device,label,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
+            if transport_outlining && !self.metal {
+                let start = std::time::Instant::now();
+                code=compiler.localize_native_blends(&code)?;
+                crate::timing::creation(&self.device,label,"SPIR-V optimization",start.elapsed().as_secs_f64()*1000.,0.);
+            }
             if self.metal && matches!(kernel,Some(ProgramKernel::Decoupled {stage:ShadeStage::Evaluate,..})) {
                 code=crate::camera_native::inline_metal_functions(&code);
             }
-            if (self.scene.field_controls || surface_outlining || path_outlining) && !self.metal { allow_driver_inlining(&mut code)?; }
-            crate::timing::creation(&self.device,label,"Slang",start.elapsed().as_secs_f64()*1000.,0.);
+            if (self.scene.field_controls || surface_outlining || transport_outlining) && !self.metal && !camera_outlining { allow_driver_inlining(&mut code)?; }
             Ok(code)
         })?;
         Ok(Lookup::Built(if self.metal {
-            native::module(&self.device, label, None, Some(&String::from_utf8(code)?), threads)
+            let source=String::from_utf8(code)?;
+            vork_slang::metal_source::validate(&source)?;
+            native::module(&self.device, label, None, Some(&source), threads)
         } else {
             native::module(&self.device, label, Some(&code), None, (0, 0, 0))
         }))

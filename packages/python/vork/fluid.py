@@ -5,25 +5,40 @@ Callbacks use solver coordinates (world metres / scale); time is seconds.
 See `vork help fluid --all` for the Slang callback contract and numerical limits.
 """
 import math
+from collections.abc import Sequence
 
 
-def build(*, callbacks, extent, particle_budget, scale=1., gravity=9.81,
-          surface_tension=0.0728, density=1000., spacing=None, origin=(0., 0., 0.),
-          grid=(96, 32, 96), surface_grid=None, bins=None, film_grid=None,
+def build(*, callbacks, extent: Sequence[float], particle_budget: int | Sequence[int], scale=1., gravity=9.81,
+          surface_tension=0.0728, density=1000., spacing=None, origin: Sequence[float] = (0., 0., 0.),
+          grid: Sequence[int] = (96, 32, 96), surface_grid: Sequence[int] | None = None,
+          bins: Sequence[int] | None = None, film_grid: Sequence[int] | None = None,
           dt=None, speed=1., flip=0., whitewater_budget=0, seed=7,
           film_diffusivity=5e-5, pressure_iterations=50):
     """Build one fluid state. Merge returned maps into the author's scene.
 
-    particle_budget may be a count or 3D lattice shape (available to initial_marker).
-    scale is metres per solver unit; extent is domain half-size in metres.
+    Dimension sequences accept lists or tuples; each has exactly three X, Y, Z
+    entries. extent contains positive finite domain half-sizes in metres; origin
+    contains finite world coordinates in metres. scale is metres per solver unit.
+    grid, surface_grid and bins contain positive integer counts with cubic physical
+    cells: 2*extent[i]/counts[i] must agree across axes for each grid. Resolutions
+    may differ between grids; rectangular domains need proportionate axis counts.
+    Only None selects derived defaults: surface_grid uses twice grid per axis;
+    bins uses grid. Empty sequences and other falsy values are not defaults.
+    film_grid contains positive integer counts (X, 1, Z), with square physical XZ
+    cells: extent[0]/X == extent[2]/Z. It defaults to (grid[0], 1, grid[2]).
+    Supplied film dimensions are validated even when film_accept disables wetting.
+    The output film_surface instead has three Y samples for height encoding.
+    particle_budget is a positive integer count or positive integer (X, Y, Z)
+    lattice shape, preserved for initial_marker indexing; a count becomes (count,
+    1, 1). The particle lattice need not match the domain or grid aspect ratio.
     spacing is rest particle spacing in metres. speed bounds expected m/s for dt.
     dt can be explicitly tightened; it must obey advective/capillary stability.
     flip=0 uses APIC; flip=1 uses FLIP. Intermediate values blend both transfers.
     """
     shape = [particle_budget, 1, 1] if isinstance(particle_budget, int) else list(particle_budget)
-    surface_grid = list(surface_grid or [2*x for x in grid])
-    bins = list(bins or grid)
-    film_grid = list(film_grid or [grid[0], 1, grid[2]])
+    surface_grid = list([2*x for x in grid] if surface_grid is None else surface_grid)
+    bins = list(grid if bins is None else bins)
+    film_grid = list([grid[0], 1, grid[2]] if film_grid is None else film_grid)
     for name, dims in [('particles', shape), ('grid', grid), ('surface', surface_grid), ('bins', bins), ('film', film_grid)]:
         if len(dims) != 3 or any(type(x) is not int or x <= 0 for x in dims):
             raise ValueError(name + ' needs three positive integer dimensions')
@@ -74,7 +89,8 @@ def build(*, callbacks, extent, particle_budget, scale=1., gravity=9.81,
     buffer('density_boundary','f32',[1 if math.prod(surface_grid)>=2*pressure_cells else 2*pressure_cells,1,1])
     buffer('mass_blocks','u32',[(count+255)//256,1,1])
     buffer('film_surface','f32',[max(3,film_grid[0]),3,max(3,film_grid[2])])
-    buffer('correction', 'f32', data=[0,0,0,0,0,0])
+    buffer('correction', 'f32', data=[0,0,0,0,0,0,0])
+    buffer('fluid_status', 'u32', data=[0])
     for name in ('wetness', 'wet_next'):
         buffer(name, 'f32', film_grid)
     def reductions(name, kind, dims):
@@ -123,20 +139,28 @@ def build(*, callbacks, extent, particle_budget, scale=1., gravity=9.81,
     stages = {'init':0,'transfer_velocity':1,'divergence':2,'pressure_red':3,'pressure_black':4,'project':5,
               'volume':9,'correct':10,'reset_correction':11,'marker_init':14,'marker_advect':15,
               'bin_clear':16,'bin_fill':17,'marker_surface':19,'marker_publish':20,'pressure_surface':21,
-              'reduce_volume':22,'reduce_total':23,'wet_spread':24,'wet_publish':25,'film_reduce':26,'film_total':27,'mass':30,'density_mask':31,'density_mask_expand':32,'density_mask_publish':33}
-    dispatches = dict(mass=(count+255)//256,volume=surface_grid[0]*surface_grid[2], correct=1,reset_correction=1,
+              'reduce_volume':22,'reduce_total':23,'wet_spread':24,'wet_publish':25,'film_reduce':26,'film_total':27,'mass':30,'density_mask':31,'density_mask_expand':32,'density_mask_publish':33,'distance_surface':34,'distance_reset':35,'capacity':37,'capacity_check':38}
+    dispatches = dict(mass=(count+255)//256,volume=surface_grid[0]*surface_grid[2], correct=1,reset_correction=1,distance_reset=1,distance_surface=surface_grid[0]*surface_grid[2],capacity=surface_grid[0]*surface_grid[2],capacity_check=1,
                       marker_init=count, marker_advect=count, bin_clear=max(math.prod(bins),count,7),bin_fill=count,
                       marker_surface=math.prod(surface_grid),marker_publish=math.prod(surface_grid),
                       reduce_volume=math.prod(buffers['volume_partial']['dims']),reduce_total=math.prod(buffers['volume_total']['dims']),
                       wet_spread=math.prod(film_grid),wet_publish=math.prod(film_grid),film_reduce=f,film_total=(f+255)//256)
     for name, stage in stages.items():
-        add(name, 'solver', dispatches.get(name,math.prod(grid)), stage)
+        add(name, 'reconstruction' if stage in (34,35,37,38) else 'solver', dispatches.get(name,math.prod(grid)), stage)
     add('fit', 'surface', count)
     add('film_publish','film',math.prod(buffers['film_surface']['dims']))
-    publication = ['bin_clear','bin_fill','wet_spread','wet_publish','film_publish','film_reduce','film_total','fit','marker_surface','reset_correction']+['volume','reduce_volume','reduce_total','correct']*40+['marker_publish','pressure_surface']
+    publication = ['bin_clear','bin_fill','wet_spread','wet_publish','film_publish','film_reduce','film_total','fit','marker_surface','reset_correction']+['volume','reduce_volume','reduce_total','correct']+['capacity','reduce_volume','reduce_total','capacity_check','distance_surface','distance_reset']+['volume','reduce_volume','reduce_total','correct']*40+['marker_publish','pressure_surface']
     init = ['init','marker_init','mass']+publication
     steps = ['transfer_velocity','density_mask','density_mask_expand','density_mask_publish','divergence']+['pressure_red','pressure_black']*pressure_iterations+['project','marker_advect']+publication
     geometry = dict(water=dict(topology='implicit', attributes=dict(phi='surface')),floor_film=dict(topology='implicit',attributes=dict(phi='film_surface')))
+    geometry['water']['status'] = dict(buffer='fluid_status', message=
+        'fluid surface reconstruction failed: 1 marker outside domain (enlarge extent or reduce dt); '
+        '2 rest volume exceeds distance-band capacity (increase surface_grid or enlarge free container); '
+        '3 volume solve did not converge (increase surface_grid); '
+        '4 nonfinite fluid state (check boundary callbacks and reduce dt); '
+        '5 unresolved zero cell (increase surface_grid); '
+        '6 film exceeds domain height (increase extent.y)')
+    geometry['floor_film']['status'] = dict(geometry['water']['status'])
     if whitewater_budget:
         for name,stage,dispatch in [
             ('white_init',0,whitewater_budget),('white_normals',1,count),('white_step',2,whitewater_budget),

@@ -12,6 +12,9 @@ an sRGB picker value must be converted to linear before storing it.
 Std extrude supports inward rounded rims: bevel_depth (metres), bevel_resolution
 (quarter-circle steps). Total depth/bounds stay fixed.
 Missing NORMAL attributes use face normals; authored NORMAL values control smoothing.
+Std builders emit UVs but no TANGENT attribute.
+Anisotropy uses TANGENT or material geometry_tangent; without either it uses a
+fallback frame, not the UV direction.
 Text size is the font em in metres, not visible cap height. Finite pixel/shutter
 sampling can leave small strokes and bevel highlights unresolved; extra bevel
 segments and denoising do not guarantee recovery. Samples cannot add missing geometry.
@@ -34,3 +37,16 @@ Ordinary mesh materials shade the surface, including OpenPBR transmission.
 Use surface materials without subsurface shading or displacement on implicit geometry.
 
 Std builders expand in the author loader before scene decoding. Expanded geometry uses buffers; CPU expansion usage and coverage: `vork help std --all`.
+
+GEOMETRY STAGE ORDER
+scene.geometry_stages defaults to ["deform","compute","displace"]. Each named
+stage may occur once. deform includes native morphs/skin and the existing fused
+subdivision path; compute runs ordinary geometry programs, including cloth;
+displace runs material displacement. For displacement before a solver, use
+["deform","displace","compute"]. Canonical solver inputs sample their ordered
+stateless predecessor prefix at each fixed-clock tick, including replay.
+This does not admit compute-produced subdivision cages or computed colliders;
+use native fixed triangles or a native collider proxy as diagnostics request.
+Every stage required by an authored mesh must be listed; otherwise the error
+names the node and the stage to add. Unused stages may be omitted, including an
+empty list for scenes without geometry effects.

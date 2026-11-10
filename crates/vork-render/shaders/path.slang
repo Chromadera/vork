@@ -28,6 +28,8 @@ import forward;
 import subsurface_transport;
 import path_boundary;
 import sample_clamp;
+// Invocation-local: all main/catcher transport belongs to this camera sample.
+static bool path_sample_nonfinite=false;
 import dielectric_scene;
 import implicit_scene;
 import path_subsurface;
@@ -51,21 +53,12 @@ struct PathMoment { float4 mean; float4 variance; uint2 settled; uint stopped; u
 #else
 [[vk::binding(0,3)]] StructuredBuffer<uint> path_hit_buffers[REG_RAY_HIT_BUFFERS];
 #endif
-uint path_hit_buffers_load(uint buffer,uint index) {
-#ifdef VORK_METAL
-    return path_hit_buffers.buffers[buffer][index];
-#else
-    return path_hit_buffers[NonUniformResourceIndex(buffer)][index];
-#endif
-}
-struct PathGeometry : IHitGeometry {
-    static uint word(uint index) {return path_words[index];}
-    static uint load(uint buffer,uint index) {return path_hit_buffers_load(buffer,index);}
-};
+
+typedef RayGeometry PathGeometry;
 #ifdef VORK_PROGRAM_TRACE
 import geometric_trace;
 export TraceHit native_geometric_trace(float3 origin,float3 direction,float minimum,float maximum,uint mask,uint object) {
-    return geometric_trace<PathGeometry>(path_scene,origin,direction,minimum,maximum,mask,object);
+    return geometric_trace<PathGeometry>(PathGeometry(path_words,path_hit_buffers),path_scene,origin,direction,minimum,maximum,mask,object);
 }
 #endif
 
@@ -142,7 +135,7 @@ DielectricHit trace<V:IVariant,P:IProgram>(float3 origin, float3 direction, floa
 #ifdef VORK_MEDIUM_WORK_LIMIT
         // Stage 1 admits builtin surface callbacks only. One candidate and its
         // bounded coverage/closure evaluation consume a separate credit.
-        if(!medium_work_reserve(medium_work,1u,7u,0u)) {break;}
+        if(!medium_work_step(medium_work)) {break;}
 #endif
         if (query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE) {continue;}
         if (!catcher_keeps(query.CandidateInstanceID())) {continue;}
@@ -154,7 +147,7 @@ DielectricHit trace<V:IVariant,P:IProgram>(float3 origin, float3 direction, floa
 #ifdef VORK_MEDIUM_WORK_LIMIT
         if(!medium_alpha_reserve(medium_work,1u,candidate.instance_custom_data)) {break;}
 #endif
-        let accepted=candidate_accepts<P,PathGeometry>(path_words,candidate,query.CandidateWorldToObject3x4(),direction,float2(2./float(width),2./float(height)));
+        let accepted=candidate_accepts<P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),path_words,candidate,query.CandidateWorldToObject3x4(),direction,float2(2./float(width),2./float(height)));
         if (accepted) {query.CommitNonOpaqueTriangleHit();}
     }
     DielectricHit h={};h.t=-1.;
@@ -162,7 +155,7 @@ DielectricHit trace<V:IVariant,P:IProgram>(float3 origin, float3 direction, floa
         h.t=query.CommittedRayT();h.instance=query.CommittedInstanceIndex();h.primitive=query.CommittedPrimitiveIndex();
         h.object=query.CommittedInstanceID();h.barycentrics=query.CommittedTriangleBarycentrics();h.world_to_object=query.CommittedWorldToObject3x4();
     }
-    h=merge_field_hits<P,PathGeometry>(h,path_fields<V>().xy,origin,direction,distance,mask);
+    h=merge_field_hits<P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),h,path_fields<V>().xy,origin,direction,distance,mask);
     return h;
 }
 #define VORK_PATH_CONTEXT
@@ -172,6 +165,30 @@ import path_medium;
 import vork_medium_point;
 import vork_medium_domain;
 export Frame medium_frame() {return frame;}
+#ifdef VORK_MEDIUM_WORK_LIMIT
+// This measures only radiance already evaluated and then discarded. The
+// untraced continuation is unknowable without finishing the path; report it
+// as unknown, never as zero. Include absolute signed-spectral contributions.
+void record_medium_discarded_radiance(float3 value) {
+    if(!all(isfinite(value))) {return;}
+    let amount=dot(abs(value),REG_LUMINANCE);
+    if(amount<=0.) {return;}
+    var expected=shader_errors[REG_DISCARDED_MEDIUM_RADIANCE_WORD];
+    for(;;) {
+        let sum=min(asfloat(expected)+amount,REG_FP32_MAX);
+        uint observed;
+        InterlockedCompareExchange(shader_errors[REG_DISCARDED_MEDIUM_RADIANCE_WORD],expected,asuint(sum),observed);
+        if(observed==expected) {break;}
+        expected=observed;
+    }
+}
+static uint medium_boundary_steps=0u;
+static bool medium_boundary_capped=false;
+export bool medium_boundary_step() {
+    if(medium_boundary_steps>=VORK_MEDIUM_WORK_LIMIT) {medium_boundary_capped=true;return false;}
+    medium_boundary_steps++;return true;
+}
+#endif
 export uint medium_word(uint index) {return material_words[index];}
 import path_medium_scene;
 // The interval is a per-path occupancy snapshot. Additive participating media
@@ -260,7 +277,7 @@ void medium_sum(inout PathMediumInterval interval,bool derive_bound=false) {
 #if VORK_PATH_HETEROGENEOUS
 PathMediumInterval medium_at(PathMediumInterval interval,float3 position VORK_WORK_PARAMETER) {
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    if(!medium_work_reserve(medium_work,1u+(VORK_PATH_MEDIUM_BOUNDS+1u)*VORK_MEDIUM_POINT_WORK,5u,0u)) {interval.valid=false;return interval;}
+    if(!medium_work_step(medium_work)) {interval.valid=false;return interval;}
 #endif
     for(var i=0u;i<VORK_PATH_MEDIUM_BOUNDS+1u;i++) {
         let id=interval.programs[i];if(id==0xffffffffu || path_medium_homogeneous(id)) {continue;}
@@ -283,7 +300,7 @@ PathMediumInterval medium_at(PathMediumInterval interval,float3 position VORK_WO
 }
 float medium_candidate(float cursor,float majorant,inout uint rng VORK_WORK_PARAMETER) {
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    if(!medium_work_reserve(medium_work,1u,6u,0u)) {return REG_FP32_MAX;}
+    if(!medium_work_step(medium_work)) {return REG_FP32_MAX;}
 #endif
     let step=-log(1.-path_random(rng))/majorant;
     // IEEE progress when a free-flight step is below the accumulated distance's
@@ -295,10 +312,10 @@ float medium_candidate(float cursor,float majorant,inout uint rng VORK_WORK_PARA
 float medium_interval_candidate(PathMediumInterval medium,float3 origin,float3 direction,float cursor,inout uint rng VORK_WORK_PARAMETER) {
     if(!medium.exponential) {return medium_candidate(cursor,medium.majorant,rng VORK_WORK_ARGUMENT);}
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    // Mixed constant/exponential inversion halves a positive FP32 interval.
-    // 512 subdivisions conservatively cover its exponent and significand range;
-    // the world-only inverse is closed form. Reserve before either executes.
-    if(!medium_work_reserve(medium_work,medium.majorant>0. ? 513u : 1u,6u,0u)) {return REG_FP32_MAX;}
+    // One free-flight event, independent of optical depth. The summed
+    // constant/exponential inverse converges to adjacent FP32 endpoints;
+    // its numerical subdivisions are not transport steps.
+    if(!medium_work_step(medium_work)) {return REG_FP32_MAX;}
 #endif
     float3 a,b,g;path_world_exponential(a,b,g);
     let amplitude=medium_sample_majorant(path_spectrum(a),path_spectrum(b));
@@ -321,12 +338,10 @@ float3 medium_finite_extinction(PathMediumInterval medium) {
 PathMediumInterval medium_interval(float3 origin,float3 direction,float after,float limit,bool camera_ray VORK_WORK_PARAMETER) {
     PathMediumInterval result={};result.end=limit;
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    // Two domain scans, each bounded to 32 faces per admitted convex carrier,
-    // plus one bounded coefficient callback per domain. Reserve interval and
-    // continuation work together, before either executes. Shadow intervals
-    // conservatively pay the continuation unit too.
-    let domains=volume_domain_count();
-    if(!medium_work_reserve(medium_work,2u+domains*(64u+VORK_MEDIUM_POINT_WORK)+((frame.medium.w&1u)!=0u ? VORK_MEDIUM_POINT_WORK : 0u),1u,0u)) {return result;}
+    // Count the interval actually visited. Boundary traversal has its own
+    // per-iteration watchdog; never precharge hypothetical carrier/triangle
+    // or coefficient instruction maxima against path continuation.
+    if(!medium_work_step(medium_work)) {return result;}
 #endif
 #if VORK_PATH_HETEROGENEOUS
     result.valid=true;
@@ -480,7 +495,7 @@ bool advance_medium(float3 origin,float3 direction,float limit,PathBoundary opti
         if(medium.scattering_power>0.) {
             let ux=path_random(rng);let uy=path_random(rng);
             let flight=medium_free_flight(medium.extinction,length,float2(ux,uy),infinite);
-            if(flight.event && !isfinite(flight.distance)) {path_boundary_error(REG_PATH_MEDIUM_DISTANCE,0u);throughput=float3(0.);return false;}
+            if(flight.event && !isfinite(flight.distance)) {path_sample_nonfinite=true;throughput=float3(0.);return false;}
             throughput*=flight.weight*boundary_attenuation(optical,flight.distance);
             if(flight.event) {distance=cursor+flight.distance;vertex=medium;return true;}
         }else{throughput*=attenuation*boundary_attenuation(optical,length);}
@@ -529,19 +544,25 @@ float3 straight_shadow_transmittance<V:IVariant,P:IProgram>(float3 origin, float
 #ifdef VORK_MEDIUM_WORK_LIMIT
         // Stage 1 admits builtin surface callbacks only. One candidate and its
         // bounded coverage/closure evaluation consume a separate credit.
-        if(!medium_work_reserve(medium_work,1u,7u,0u)) {break;}
+        if(!medium_work_step(medium_work)) {break;}
 #endif
         if (query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE) {continue;}
         let object=query.CandidateInstanceID();
+#ifdef VORK_PATH_MEDIA
+        // Independent fog boundaries have no surface closure. Their attenuation
+        // is already integrated by participating_transmittance; do not evaluate
+        // them as alpha surfaces or spend the separate coverage watchdog.
+        if((material_records[material_record(object)].tag.z&REG_FLAG_MEDIUM_BOUNDARY)!=0u) {continue;}
+#endif
         if (!catcher_keeps(object)) {continue;}
         if (!all_casters && !links_intersect(objects[object].metadata.x,groups)) {continue;}
         let hit=RayIntersection(query.CandidateInstanceIndex(),object,query.CandidatePrimitiveIndex(),query.CandidateTriangleBarycentrics());
         uint width,height;path_output.GetDimensions(width,height);
-        if (!connection_owns_hit<PathGeometry>(hit,query.CandidateWorldToObject3x4(),direction)) {continue;}
+        if (!connection_owns_hit<PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit,query.CandidateWorldToObject3x4(),direction)) {continue;}
 #ifdef VORK_MEDIUM_WORK_LIMIT
         if(!medium_alpha_reserve(medium_work,2u,object)) {return float3(0.);}
 #endif
-        let crossing=connection_candidate_transmittance<P,PathGeometry>(path_words,hit,query.CandidateWorldToObject3x4(),direction,float2(2./float(width),2./float(height)),origin,uint(frame.temporal.x),incident_ior,V.has_transmission);
+        let crossing=connection_candidate_transmittance<P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),path_words,hit,query.CandidateWorldToObject3x4(),direction,float2(2./float(width),2./float(height)),origin,uint(frame.temporal.x),incident_ior,V.has_transmission);
         if (!any(crossing.transmittance>float3(0.))) {return float3(0.);}
         if (crossing.transparent_crossings!=0u && transparent++>=path_settings.limits.z) {return float3(0.);}
         transmittance*=path_spectrum(crossing.transmittance);
@@ -552,7 +573,7 @@ float3 straight_shadow_transmittance<V:IVariant,P:IProgram>(float3 origin, float
         if(!catcher_keeps(object) || collapsed_endpoint(objects[object].model) || (objects[object].metadata.y&REG_RAY_SHADOW)==0u || (!all_casters && (objects[object].metadata.x&groups)==0u)) continue;
         var minimum=0.;
         for(;;) {
-            let root=field_intersection<PathGeometry>(path_words[at+2u],object,origin,direction,minimum,distance);
+            let root=field_intersection<PathGeometry>(PathGeometry(path_words,path_hit_buffers),path_words[at+2u],object,origin,direction,minimum,distance);
             if(!root.found) break;
             let h=field_surface<V,P>(object,root,direction,float2(0.),Lobe(0u,0.));
             if(!h.s.discarded) {
@@ -599,7 +620,7 @@ VORK_PATH_HELPER
 Closure path_closure<V:IVariant,P:IProgram>(DielectricHit hit, float3 direction, float u, uint seed, out float3 geometric, out bool entering, out float weight, out HitSurface shading) {
     // One output pixel in clip units: the camera footprint hits are filtered with.
     uint width,height;path_output.GetDimensions(width,height);
-    var h=dielectric_surface<V,P,PathGeometry>(hit,direction,float2(2./float(width),2./float(height)),Lobe(select(P.lobes,LOBE_PICK,0u),u));
+    var h=dielectric_surface<V,P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit,direction,float2(2./float(width),2./float(height)),Lobe(select(P.lobes,LOBE_PICK,0u),u));
     if (P.lit && P.lit_material(h.v)) {h.s=lit_surface<V,PathShadows<V,P>,P>(h.v,h.entering,h.k,h.s,hit_site(h.v,h.k,h.face,uint2(seed,pixel_hash(seed)),uint(frame.temporal.x),true));}
     shading=h;geometric=h.face;entering=h.entering;weight=h.s.weight;
     var c=h.s.closure;
@@ -653,23 +674,30 @@ struct PathShadows<V:IVariant,P:IProgram> : IShadows {
         let flags=lights[light].shadow_offsets[REG_LIGHT_RAY_WORD];
         var rng=pixel_hash(index^pixel_hash(light)^pixel_hash(asuint(world.x))^pixel_hash(asuint(world.y))^pixel_hash(asuint(world.z)));
 #ifdef VORK_MEDIUM_WORK_LIMIT
-        path_boundary_error(REG_PATH_MEDIUM_WORK,0xff000000u);return float3(0.);
-#else
+        PathMediumWork medium_work={VORK_MEDIUM_WORK_LIMIT,64u,false};
+#endif
         let attenuation=participating_transmittance(world,direction,distance,rng VORK_WORK_ARGUMENT);
 #ifndef VORK_PROPAGATION
-        if ((flags&REG_LIGHT_RAY_SHADOWED)==0u) {return attenuation;}
+        if ((flags&REG_LIGHT_RAY_SHADOWED)==0u) {
+#ifdef VORK_MEDIUM_WORK_LIMIT
+            if(medium_work.failed) {medium_boundary_capped=true;}
+#endif
+            return attenuation;}
 #endif
         let origin=surface_ray_origin(world,position_error,normal,direction);
         let connection=surface_ray_connection(origin,world,direction,distance);
-        return attenuation*path_shadow_transmittance<V,P>(origin,connection.xyz,connection.w,lights[light].shadow_offsets[REG_LIGHT_RAY_LINK_WORD],(flags&REG_LIGHT_RAY_SHADOWED_BY_ALL)!=0u,0u,1.,(flags&REG_LIGHT_RAY_SHADOWED)!=0u VORK_WORK_ARGUMENT);
+        let result=attenuation*path_shadow_transmittance<V,P>(origin,connection.xyz,connection.w,lights[light].shadow_offsets[REG_LIGHT_RAY_LINK_WORD],(flags&REG_LIGHT_RAY_SHADOWED_BY_ALL)!=0u,0u,1.,(flags&REG_LIGHT_RAY_SHADOWED)!=0u VORK_WORK_ARGUMENT);
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(medium_work.failed) {medium_boundary_capped=true;}
 #endif
+        return result;
     }
     static const bool subsurface=true;
     static float thickness(uint object,float3 world,float3 direction) {return subsurface_exit(path_scene,object,world,direction);}
 };
 float3 connection_attenuation(DielectricInterface media,float3 geometric,float3 direction,float distance,float3 world,inout uint rng VORK_WORK_PARAMETER) {
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    if(!medium_work_reserve(medium_work,1u+path_settings.limits.z,3u,0u)) {return float3(0.);}
+    if(!medium_work_step(medium_work)) {return float3(0.);}
 #endif
     return segment_attenuation(dot(geometric,direction)<0. ? media.transmitted : media.incident,distance)*participating_transmittance(world,direction,distance,rng VORK_WORK_ARGUMENT);
 }
@@ -708,7 +736,7 @@ float3 next_event<V:IVariant,P:IProgram>(HitSurface shading, Closure c, float3 v
         && !(transport_null_event(c,media.incident.ior,sample))) {
         let optical=dot(shading.s.geometric,sample.direction)<0. ? media.transmitted : media.incident;
         let weight=sample.pdf>0. ? mis_power(sample.pdf,segment_light_pdf<V>(l,world,sample.direction)) : 1.;
-        bsdf_endpoint=sample.weight*(weight/probability)*segment_analytic<V,P>(path_origin(shading,world,error,sample.direction),sample.direction,i,transparent,optical,optical_length,rng);
+        bsdf_endpoint=sample.weight*(weight/probability)*segment_analytic<V,P>(path_origin(shading,world,error,sample.direction),sample.direction,i,transparent,optical,optical_length,rng VORK_WORK_ARGUMENT);
     }
     if(!source.delta) {
         float launch_pdf;let launch=segment_light_direction<V>(l,world,source.direction,source.pdf,rng,launch_pdf);
@@ -720,7 +748,7 @@ float3 next_event<V:IVariant,P:IProgram>(HitSurface shading, Closure c, float3 v
         }
         if(!any(response>float3(0.))) return bsdf_endpoint;
         let optical=dot(shading.s.geometric,launch)<0. ? media.transmitted : media.incident;
-        return bsdf_endpoint+response/(probability*launch_pdf)*segment_analytic<V,P>(path_origin(shading,world,error,launch),launch,i,transparent,optical,optical_length,rng);
+        return bsdf_endpoint+response/(probability*launch_pdf)*segment_analytic<V,P>(path_origin(shading,world,error,launch),launch,i,transparent,optical,optical_length,rng VORK_WORK_ARGUMENT);
     }
 #endif
     let light_pdf=source.pdf;
@@ -821,11 +849,11 @@ float3 environment_direction(float2 u, out float pdf) {
 // the largest density avoids overflow for tiny or nearly edge-on emitters.
 uint mesh_emitters() {return asuint(path_settings.adaptive.y);}
 float mesh_pdf<V:IVariant>(DielectricHit hit, float3 from, float3 point, float3 face) {
-    if(hit.field) {return field_emitter_pdf<PathGeometry>(path_fields<V>(),hit.instance,from);}
+    if(hit.field) {return field_emitter_pdf<PathGeometry>(PathGeometry(path_words,path_hit_buffers),path_fields<V>(),hit.instance,from);}
     let base=mesh_emitters();
     if (path_words[base]==0u || path_words[base+3u+hit.instance]==0xffffffffu) {return 0.;}
-    let area=hit_emitter<PathGeometry>(hit.instance,hit.primitive,hit.object,hit.world_to_object,hit.barycentrics).area;
-    return emitter_mesh_pdf<PathGeometry>(base,hit.instance,area,from,point,face)*emitter_mesh_probability<PathGeometry>(base,hit.instance,hit.primitive,path_emitter_weights);
+    let area=hit_emitter<PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit.instance,hit.primitive,hit.object,hit.world_to_object,hit.barycentrics).area;
+    return emitter_mesh_pdf<PathGeometry>(PathGeometry(path_words,path_hit_buffers),base,hit.instance,area,from,point,face)*emitter_mesh_probability<PathGeometry>(PathGeometry(path_words,path_hit_buffers),base,hit.instance,hit.primitive,path_emitter_weights);
 }
 uint continuation_mask(uint bounce, uint diffuse, uint glossy, uint transmission) {
     if (bounce>=path_settings.bounces.x) {return 0u;}
@@ -840,7 +868,7 @@ uint continuation_mask(uint bounce, uint diffuse, uint glossy, uint transmission
 // not hide emission that a diffuse continuation can reach (and vice versa).
 float3 mesh_connection<V:IVariant,P:IProgram>(float3 origin, float3 direction, float distance, uint event, uint transparent, float incident_ior, inout uint rng VORK_WORK_PARAMETER) {
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    if(!medium_work_reserve(medium_work,1u+path_settings.limits.z,3u,0u)) {return float3(0.);}
+    if(!medium_work_step(medium_work)) {return float3(0.);}
 #endif
     var remaining=distance;var transmittance=float3(1.);
     for (;;) {
@@ -864,13 +892,13 @@ ImplicitSourceSample implicit_source<V:IVariant,P:IProgram>(float3 world,PathSam
     ImplicitSourceSample result={};let count=path_fields<V>().w;
     if(count==0u) {return result;}
     let u=path_triangle(sampler);
-    let selected=field_emitter<PathGeometry>(path_fields<V>(),min(uint(u.x*float(count)),count-1u));
+    let selected=field_emitter<PathGeometry>(PathGeometry(path_words,path_hit_buffers),path_fields<V>(),min(uint(u.x*float(count)),count-1u));
     if(!catcher_keeps(selected.object) || collapsed_endpoint(objects[selected.object].model)) {return result;}
-    float density;let direction=field_emitter_direction<PathGeometry>(selected,world,u.yz,density);
+    float density;let direction=field_emitter_direction<PathGeometry>(PathGeometry(path_words,path_hit_buffers),selected,world,u.yz,density);
     if(density<=0.) {return result;}
     var minimum=0.;
     for(;;) {
-        let root=field_intersection<PathGeometry>(selected.descriptor,selected.object,world,direction,minimum,REG_FP32_MAX);
+        let root=field_intersection<PathGeometry>(PathGeometry(path_words,path_hit_buffers),selected.descriptor,selected.object,world,direction,minimum,REG_FP32_MAX);
         if(!root.found) {return result;}
         let source=field_surface<V,P>(selected.object,root,direction,float2(0.),Lobe(0u,0.));
         if(!source.s.discarded && source.s.closure.geometry_opacity>0.) {
@@ -928,16 +956,16 @@ float3 mesh_next_event<V:IVariant,P:IProgram>(HitSurface receiver, Closure c, fl
     // The fiber sampler has no solid-angle density yet; keep its existing
     // emitter-hit estimator until it can participate in the same contract.
     if (count==0u || receiver.s.is_hair) {return float3(0.);}
-    let selected=emitter_mesh_sample<PathGeometry>(base,path_triangle(sampler),path_emitter_weights);
+    let selected=emitter_mesh_sample<PathGeometry>(PathGeometry(path_words,path_hit_buffers),base,path_triangle(sampler),path_emitter_weights);
     if (!catcher_keeps(selected.object)) {return float3(0.);}
     DielectricHit hit={};hit.instance=selected.instance;hit.object=selected.object;hit.primitive=selected.primitive;
     hit.world_to_object=(float3x4)object_normal(hit.object);hit.barycentrics=selected.barycentrics;
-    let geometry=hit_emitter<PathGeometry>(hit.instance,hit.primitive,hit.object,hit.world_to_object,hit.barycentrics);
+    let geometry=hit_emitter<PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit.instance,hit.primitive,hit.object,hit.world_to_object,hit.barycentrics);
     let point=geometry.point;let delta=point-world;let distance=length(delta);
     if (distance<=0.) {return float3(0.);}
     let axis=delta/distance;let source_face=geometry.face;
     let pdf=mesh_pdf<V>(hit,world,point,source_face);if (pdf<=0.) {return float3(0.);}
-    let source=dielectric_surface<V,P,PathGeometry>(hit,axis,float2(0.),Lobe(0u,0.));
+    let source=dielectric_surface<V,P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit,axis,float2(0.),Lobe(0u,0.));
     if(source.s.discarded) {return float3(0.);}
     let emitted=path_spectrum(emitter_mesh_radiance<V,P>(source),true)*source.s.closure.geometry_opacity;
     if (max(emitted.x,max(emitted.y,emitted.z))<=0.) {return float3(0.);}
@@ -959,7 +987,7 @@ float3 mesh_next_event<V:IVariant,P:IProgram>(HitSurface receiver, Closure c, fl
 #ifdef VORK_PATH_MEDIA
 float3 phase_connection<V:IVariant,P:IProgram>(float3 world,float3 direction,float distance,uint transparent,PathBoundary optical,inout uint rng VORK_WORK_PARAMETER) {
 #ifdef VORK_MEDIUM_WORK_LIMIT
-    if(!medium_work_reserve(medium_work,1u+path_settings.limits.z,3u,0u)) {return float3(0.);}
+    if(!medium_work_step(medium_work)) {return float3(0.);}
 #endif
     var value=float3(1.);
     value*=mesh_connection<V,P>(world,direction,distance,REG_RAY_VOLUME,transparent,optical.ior,rng VORK_WORK_ARGUMENT);
@@ -994,12 +1022,12 @@ float3 phase_analytic<V:IVariant,P:IProgram>(PathMediumInterval medium,PathPhase
     if(!source.delta) {
         float launch_pdf;let launch=segment_light_direction<V>(l,world,source.direction,source.pdf,rng,launch_pdf);
         if(launch_pdf>0.) value+=medium.linked_phase(dot(incident,launch),contribution,lights[i].shadow_offsets[REG_LIGHT_LINK_WORD])*(mis_power(launch_pdf,medium.pdf(dot(incident,launch)))/launch_pdf)
-            *segment_analytic<V,P>(world,launch,i,transparent,path_segment(optical),optical_length,rng);
+            *segment_analytic<V,P>(world,launch,i,transparent,path_segment(optical),optical_length,rng VORK_WORK_ARGUMENT);
     }
     if(!source.delta && phase.measure>0.) {
         let weight=phase.pdf>0. ? mis_power(phase.pdf,segment_light_pdf<V>(l,world,phase.direction)) : 1.;
         value+=medium.linked_phase(phase.cosine,contribution,lights[i].shadow_offsets[REG_LIGHT_LINK_WORD],phase.pdf==0.)*(weight/phase.measure)
-            *segment_analytic<V,P>(world,phase.direction,i,transparent,path_segment(optical),optical_length,rng);
+            *segment_analytic<V,P>(world,phase.direction,i,transparent,path_segment(optical),optical_length,rng VORK_WORK_ARGUMENT);
     }
 #else
     let endpoint=emitter_eval_li<V>(l,world,phase.direction);
@@ -1013,17 +1041,17 @@ float3 phase_analytic<V:IVariant,P:IProgram>(PathMediumInterval medium,PathPhase
 }
 float3 phase_mesh<V:IVariant,P:IProgram>(PathMediumInterval medium,float3 incident,float3 world,bool continuation,uint transparent,PathBoundary optical,PathSampler sampler,float optical_length, inout uint rng VORK_WORK_PARAMETER) {
     let base=mesh_emitters();if(path_words[base]==0u) {return float3(0.);}
-    let candidate=emitter_mesh_sample<PathGeometry>(base,path_triangle(sampler),path_emitter_weights);
+    let candidate=emitter_mesh_sample<PathGeometry>(PathGeometry(path_words,path_hit_buffers),base,path_triangle(sampler),path_emitter_weights);
     if((objects[candidate.object].metadata.y&REG_RAY_VOLUME)==0u) {return float3(0.);}
     let object=object_model(candidate.object);let inverse=transpose(object_normal(candidate.object));
-    let geometry=hit_emitter<PathGeometry>(candidate.instance,candidate.primitive,candidate.object,(float3x4)transpose(inverse),candidate.barycentrics);
+    let geometry=hit_emitter<PathGeometry>(PathGeometry(path_words,path_hit_buffers),candidate.instance,candidate.primitive,candidate.object,(float3x4)transpose(inverse),candidate.barycentrics);
     let point=geometry.point;let delta=point-world;let distance=length(delta);if(distance<=0.) {return float3(0.);}
     let axis=delta/distance;var face=geometry.face;
     if (!catcher_keeps(candidate.object)) {return float3(0.);}
     DielectricHit hit={};hit.instance=candidate.instance;hit.object=candidate.object;hit.primitive=candidate.primitive;hit.barycentrics=candidate.barycentrics;hit.world_to_object=(float3x4)transpose(inverse);
-    let pdf=emitter_mesh_pdf<PathGeometry>(base,hit.instance,geometry.area,world,point,face)*candidate.probability;
+    let pdf=emitter_mesh_pdf<PathGeometry>(PathGeometry(path_words,path_hit_buffers),base,hit.instance,geometry.area,world,point,face)*candidate.probability;
     if(pdf<=0.) {return float3(0.);}
-    let source=dielectric_surface<V,P,PathGeometry>(hit,axis,float2(0.),Lobe(0u,0.));
+    let source=dielectric_surface<V,P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit,axis,float2(0.),Lobe(0u,0.));
     if(source.s.discarded) {return float3(0.);}
     let emitted=path_spectrum(emitter_mesh_radiance<V,P>(source),true)*source.s.closure.geometry_opacity;
     let end=origin_offset(hit.object,point,source.face,-axis);let connection=end-world;let length_to_source=length(connection);
@@ -1113,7 +1141,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
     var escaped=false;var previous_distance=0.;var work=0u;
     for(var bounce=0u;bounce<=path_settings.bounces.x;sampler.vertex++) {
 #ifdef VORK_MEDIUM_WORK_LIMIT
-        if(!medium_work_reserve(medium_work,1u+path_settings.limits.z,4u,0u)) {break;}
+        if(!medium_work_step(medium_work)) {break;}
 #endif
         if(!preserve_segment) {pending_segment=0.;escaped=false;previous_distance=0.;work=0u;}
         preserve_segment=false;var absorbed=false;
@@ -1188,7 +1216,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
             for(uint component=0u;component<VORK_PATH_MEDIUM_BOUNDS+1u;component++) {
                 let m=medium.components[component];
                 let response=m.scattering*medium_phase(m.anisotropy,dot(direction,axis));
-                if(any(response>float3(0.))) direct+=response/pdf*segment_connection<V,P>(world,axis,REG_RAY_VOLUME,medium.component_groups[component],transparent,path_segment(optical),optical_length,mis_power(pdf,phase_pdf),rng);
+                if(any(response>float3(0.))) direct+=response/pdf*segment_connection<V,P>(world,axis,REG_RAY_VOLUME,medium.component_groups[component],transparent,path_segment(optical),optical_length,mis_power(pdf,phase_pdf),rng VORK_WORK_ARGUMENT);
             }
 #else
             var direct=phase_analytic<V,P>(medium,phase,direction,world,groups,transparent,optical,sampler,optical_length,rng VORK_WORK_ARGUMENT);
@@ -1199,7 +1227,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
             radiance+=clamp_sample(throughput*direct,bounce==0u ? path_settings.clamp.x : path_settings.clamp.y,dropped_light_samples);
             if(!continuation) {break;}
             throughput*=phase.weight;
-            if(!all(isfinite(throughput))) {path_boundary_error(REG_RADIANCE_NONFINITE,hit.object);break;}
+            if(!all(isfinite(throughput))) {path_sample_nonfinite=true;break;}
             if(max(throughput.x,max(throughput.y,throughput.z))<=0.) {break;}
             if(bounce>=REG_PATH_ROULETTE_START) {
                 let survive=path_survival(throughput,N>0u ? occupancy.ior()/camera_ior : 1.);
@@ -1236,7 +1264,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         HitSurface shading;
         var c=path_closure<V,P>(hit,direction,u,seed,geometric,entering,weight,shading);world=shading.v.world;
         optical_length+=length(world-physical_origin)*occupancy.ior();physical_origin=world;
-        if (N>0u && occupancy.count>0u) {reconcile_occupancy<PathGeometry,N>(occupancy,world,instance_solid<PathGeometry>(hit.instance,path_settings.boundaries.xw),path_settings.boundaries.xw);}
+        if (N>0u && occupancy.count>0u) {reconcile_occupancy<PathGeometry,N>(PathGeometry(path_words,path_hit_buffers),occupancy,world,instance_solid<PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit.instance,path_settings.boundaries.xw),path_settings.boundaries.xw);}
         // One bound for this reconstructed vertex. Every outgoing direction
         // still chooses its own signed offset and outward ULP rounding.
         var error=surface_position_error(hit.object,world);
@@ -1249,19 +1277,19 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         throughput*=occupancy.attenuation(hit.t-visibility_minimum);
 #endif
         let solid=N>0u && !c.geometry_thin_walled && c.transmission_weight>0.;
-        var boundary=solid ? boundary_descriptor<V,P,PathGeometry>(hit,direction,shading,path_settings.boundaries.xw,float2(2.)/float2(path_image_size())) : path_boundary(0xffffffffu,c);
+        var boundary=solid ? boundary_descriptor<V,P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),hit,direction,shading,path_settings.boundaries.xw,float2(2.)/float2(path_image_size())) : path_boundary(0xffffffffu,c);
         // Resolve the interface once; emitter connections only need its segments.
         let incident=occupancy.current();
         BoundaryEvent<N> boundary_changes={};
-        if(path_boundary_transactions && solid) boundary_changes=boundary_event<V,P,PathGeometry,N>(path_scene,origin,direction,hit,world,error,geometric,boundary,entering,occupancy,path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),ray_event VORK_WORK_ARGUMENT);
+        if(path_boundary_transactions && solid) boundary_changes=boundary_event<V,P,PathGeometry,N>(PathGeometry(path_words,path_hit_buffers),path_scene,origin,direction,hit,world,error,geometric,boundary,entering,occupancy,path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),ray_event VORK_WORK_ARGUMENT);
 #ifdef VORK_LIGHT_PATHS
         if(!path_boundary_transactions && solid) {
             boundary.color=path_spectrum(boundary.color);
             boundary.ior=spectral_ior(boundary.ior,vork_path_wavelength,boundary.dispersion_scale,boundary.dispersion_abbe);
         }
-        for(uint i=0u;i<boundary_changes.count;i++) {
-            if(boundary_changes.kind_at(i)!=2u) continue;
-            let slot=occupancy.find(boundary_changes.object_at(i));var b=occupancy.at(slot);
+        for(uint slot=0u;slot<occupancy.count;slot++) {
+            if(occupancy.tag(slot)!=2u) continue;
+            var b=occupancy.at(slot);
             b.color=path_spectrum(b.color);
             b.ior=spectral_ior(b.ior,vork_path_wavelength,b.dispersion_scale,b.dispersion_abbe);
             occupancy.set(slot,b);
@@ -1406,13 +1434,13 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         }
         if (!all(isfinite(sample.direction)) || !all(isfinite(sample.weight)) || !isfinite(sample.pdf)) {
             if(path_boundary_transactions && solid) boundary_changes.finish(occupancy,false);
-            path_boundary_error(REG_RADIANCE_NONFINITE,hit.object);break;
+            path_sample_nonfinite=true;break;
         }
         if(path_boundary_transactions && solid) boundary_changes.finish(occupancy,!shading.s.is_hair && sample.event==REG_RAY_TRANSMISSION
             && (transport_null_event(c,media.incident.ior,sample) || path_event_hemisphere(c,sample.event,sample.direction,geometric,shading.s.geometric)));
 #ifdef VORK_PROPAGATION
         radiance+=clamp_sample(throughput*next_event<V,P>(shading,c,-direction,world,error,geometric,groups,transparent,media,subsurface_thickness,prepared,sample,sampler,optical_length,rng VORK_WORK_ARGUMENT),select(bounce==0u,path_settings.clamp.x,path_settings.clamp.y),dropped_light_samples);
-        radiance+=clamp_sample(throughput*segment_next_event<V,P>(shading,c,-direction,world,error,geometric,media,groups,continuation_mask(bounce,diffuse,glossy,transmission),transparent,prepared,sampler,optical_length,rng),select(bounce==0u,path_settings.clamp.x,path_settings.clamp.y),dropped_light_samples);
+        radiance+=clamp_sample(throughput*segment_next_event<V,P>(shading,c,-direction,world,error,geometric,media,groups,continuation_mask(bounce,diffuse,glossy,transmission),transparent,prepared,sampler,optical_length,rng VORK_WORK_ARGUMENT),select(bounce==0u,path_settings.clamp.x,path_settings.clamp.y),dropped_light_samples);
 #else
         radiance+=clamp_sample(throughput*next_event<V,P>(shading,c,-direction,world,error,geometric,groups,transparent,media,subsurface_thickness,prepared,sample,sampler,optical_length,rng VORK_WORK_ARGUMENT),select(bounce==0u,path_settings.clamp.x,path_settings.clamp.y),dropped_light_samples);
         radiance+=clamp_sample(throughput*environment_next_event<V,P>(shading,c,-direction,world,error,geometric,media,groups,continuation_mask(bounce,diffuse,glossy,transmission),transparent,prepared,sampler,rng VORK_WORK_ARGUMENT),select(bounce==0u,path_settings.clamp.x,path_settings.clamp.y),dropped_light_samples);
@@ -1423,7 +1451,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         if (!shading.s.is_hair && transport_null_event(c,media.incident.ior,sample)) {
             if (transparent++>=path_settings.limits.z) {break;}
             throughput*=sample.weight;
-            if (!all(isfinite(throughput))) {path_boundary_error(REG_RADIANCE_NONFINITE,hit.object);break;}
+            if (!all(isfinite(throughput))) {path_sample_nonfinite=true;break;}
             if (!any(throughput>float3(0.))) {break;}
             origin=path_origin(shading,world,error,direction);groups=incident_groups;
             pending_segment=max(0.,pending_segment-length(origin-world));preserve_segment=true;
@@ -1444,7 +1472,7 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         if (!shading.s.is_hair && !path_event_hemisphere(c,event,sample.direction,geometric,shading.s.geometric)) {break;}
         if(!path_boundary_transactions && solid && event==REG_RAY_TRANSMISSION && !shading.s.is_hair) plain_path_cross(occupancy,boundary,entering);
         throughput*=sample.weight;
-        if (!all(isfinite(throughput))) {path_boundary_error(REG_RADIANCE_NONFINITE,hit.object);break;}
+        if (!all(isfinite(throughput))) {path_sample_nonfinite=true;break;}
         if (max(throughput.x,max(throughput.y,throughput.z))<=0.) {break;}
         if (bounce>=REG_PATH_ROULETTE_START) {
             // Radiance eta^-2 changes the measure, not path survival energy.
@@ -1458,7 +1486,11 @@ float3 integrate<let spatial_subsurface:bool,V:IVariant,P:IProgram,let N:uint>(f
         direction=sample.direction;origin=path_origin(shading,world,error,direction);bounce++;
     }
     record_dropped_light_samples(shader_errors,dropped_light_samples);
-    return radiance*frame.radiance.w;
+    // Leave accumulated radiance available for watchdog loss diagnostics.
+    // The camera invocation zeroes failed samples immediately before film write.
+    let result=radiance*frame.radiance.w;
+    if(!all(isfinite(result))) {path_sample_nonfinite=true;}
+    return path_sample_nonfinite ? float3(0.) : result;
 }
 // Scenes with programs compile their own entries with their Programs (SlangForward::path_module).
 // Separable 1.5 px Blackman–Harris inverse CDF, prepared once on the host.
@@ -1573,15 +1605,14 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
         let primary=trace<V,P>(control_origin,control_direction,max(0.,camera_max-camera_min),REG_RAY_CAMERA VORK_WORK_ARGUMENT);
         float2 depth=float2(1.);float4 normal=float4(0.);uint id=0u;
         if(primary.t>=0.) {
-            let h=dielectric_surface<V,P,PathGeometry>(primary,control_direction,float2(2.)/float2(width,height),Lobe(0u,0.));
-            let clip=mul(float4(h.v.world,1.),frame.vp);let distance=length(h.v.world-camera_origin);depth=float2((frame.camera_program.z&2u)!=0u ? distance/(distance+1.) : clip.z/clip.w);
+            let h=dielectric_surface<V,P,PathGeometry>(PathGeometry(path_words,path_hit_buffers),primary,control_direction,float2(2.)/float2(width,height),Lobe(0u,0.));
+            let clip=camera_world_clip(h.v.world,frame);let distance=length(h.v.world-camera_origin);depth=float2((frame.camera_program.z&2u)!=0u ? distance/(distance+1.) : clip.z/clip.w);
             normal=float4(normalize(h.v.NORMAL),0.);id=uint(objects[primary.object].opacity.y);
         }
         field_depth[gid.xy]=depth;field_normals[gid.xy]=normal;field_ids[gid.xy]=id;
     }
 #endif
-    let occupancy_initial=camera_occupancy<V,P,PathGeometry,N>(path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_fields<V>().x,path_fields<V>().y VORK_WORK_ARGUMENT);
-    var occupancy=occupancy_initial;
+    var occupancy=camera_occupancy<V,P,PathGeometry,N>(PathGeometry(path_words,path_hit_buffers),path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_fields<V>().x,path_fields<V>().y VORK_WORK_ARGUMENT);
 #ifdef VORK_LIGHT_PATHS
     for(var k=0u;k<occupancy.count;k++) {
         var b=occupancy.at(k);b.color=path_spectrum(b.color);b.ior=spectral_ior(b.ior,vork_path_wavelength,b.dispersion_scale,b.dispersion_abbe);occupancy.set(k,b);
@@ -1593,8 +1624,9 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
     uint camera_flags;let initial_rng=rng;
     float4 primary_position;float4 primary_normal;
     var value=float4(integrate<spatial_subsurface,V,P,N>(origin,direction,camera_origin,camera_min,camera_max,occupancy,sampler,rng,alpha,aovs,guide_albedo,guide_normal,camera_flags,primary_position,primary_normal VORK_WORK_ARGUMENT),alpha);
+    occupancy.clear();
 #ifdef VORK_PROPAGATION
-    let primary_clip=mul(primary_position,frame.vp);
+    let primary_clip=camera_world_clip(primary_position.xyz,frame);
     let primary_distance=length(primary_position.xyz-camera_origin);
     field_depth[gid.xy]=primary_position.w>0. ? float2((frame.camera_program.z&2u)!=0u ? primary_distance/(primary_distance+1.) : primary_clip.z/primary_clip.w) : float2(1.);
     field_normals[gid.xy]=float4(primary_normal.xyz,0.);field_ids[gid.xy]=uint(primary_normal.w);
@@ -1603,13 +1635,15 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
     value.rgb*=ray.weight;
     if((frame.camera_program.z&1u)!=0u) {guide_albedo.w=1.;guide_normal.w=-1.;}
 #endif
+    if(!all(isfinite(value)) || !all(isfinite(guide_albedo)) || !all(isfinite(guide_normal))) {path_sample_nonfinite=true;}
+    if(VORK_AOV_CHANNELS!=0u) for(var a=0u;a<path_settings.environment.z;a++) {if(!all(isfinite(aovs[a]))) {path_sample_nonfinite=true;}}
     if(catchers) {
         var lit=float4(0.);var baseline=float4(0.,0.,0.,camera_flags==0u ? 1. : 0.);var background=float4(0.,0.,0.,1.);
         if((camera_flags&REG_OBJECT_CATCHER)!=0u) {
             lit=float4(value.rgb,1.);
             catcher_without_cg=true;rng=initial_rng;
             // Rebuild camera containment after removing CG, including implicit solids.
-            var reference_occupancy=camera_occupancy<V,P,PathGeometry,N>(path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_fields<V>().x,path_fields<V>().y VORK_WORK_ARGUMENT);
+            var reference_occupancy=camera_occupancy<V,P,PathGeometry,N>(PathGeometry(path_words,path_hit_buffers),path_scene,origin,float3(1.,0.,0.),path_settings.boundaries.xw,float2(2.)/float2(path_image_size()),path_fields<V>().x,path_fields<V>().y VORK_WORK_ARGUMENT);
 #ifdef VORK_LIGHT_PATHS
             for(var k=0u;k<reference_occupancy.count;k++) {
                 var boundary=reference_occupancy.at(k);boundary.color=path_spectrum(boundary.color);boundary.ior=spectral_ior(boundary.ior,vork_path_wavelength,boundary.dispersion_scale,boundary.dispersion_abbe);reference_occupancy.set(k,boundary);
@@ -1618,6 +1652,7 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
             float reference_alpha;float4 reference_aovs[VORK_AOV_SLOTS];uint reference_flags;float4 reference_albedo;float4 reference_normal;
             float4 reference_position;float4 reference_primary_normal;
             baseline.rgb=integrate<spatial_subsurface,V,P,N>(origin,direction,camera_origin,camera_min,camera_max,reference_occupancy,sampler,rng,reference_alpha,reference_aovs,reference_albedo,reference_normal,reference_flags,reference_position,reference_primary_normal VORK_WORK_ARGUMENT);
+            reference_occupancy.clear();
 #ifdef VORK_LIGHT_PATHS
             baseline.rgb*=ray.weight;
 #endif
@@ -1625,12 +1660,40 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
             value=float4(0.);baseline.w=1.;guide_albedo=float4(0.);guide_normal=float4(0.);
             background.rgb=frame.environment.w==0. ? frame.background.rgb : path_environment(direction,REG_RAY_CAMERA,0u,camera_origin);
         }
+        if(!all(isfinite(lit)) || !all(isfinite(baseline)) || !all(isfinite(background))) {path_sample_nonfinite=true;}
+        bool drop_catcher_sample=path_sample_nonfinite;
+#ifdef VORK_MEDIUM_WORK_LIMIT
+        if(medium_work.failed || medium_boundary_capped) {
+            record_medium_discarded_radiance(lit.rgb);
+            record_medium_discarded_radiance(baseline.rgb);
+            drop_catcher_sample=true;
+        }
+#endif
+        if(drop_catcher_sample) {lit=float4(0.);baseline=float4(0.);background=float4(0.);}
         if(index>0u) {lit+=path_catcher[pixel*3u];baseline+=path_catcher[pixel*3u+1u];background+=path_catcher[pixel*3u+2u];}
         path_catcher[pixel*3u]=lit;path_catcher[pixel*3u+1u]=baseline;path_catcher[pixel*3u+2u]=background;
         let ratio=select(baseline.rgb!=float3(0.),lit.rgb/select(baseline.rgb!=float3(0.),baseline.rgb,float3(1.)),float3(1.));
         let coverage=lit.w/max(baseline.w,1.);
         let result=lerp(float3(1.),ratio,coverage);
         for(var c=0u;c<3u;c++) {path_pixels[(path_settings.matte.x+c)*width*height+pixel]=asuint(result[c]);}
+    }
+#ifdef VORK_MEDIUM_WORK_LIMIT
+    if(medium_work.failed || medium_boundary_capped) {
+        record_medium_discarded_radiance(value.rgb);
+        value=float4(0.);guide_albedo=float4(0.);guide_normal=float4(0.);aovs={};
+        uint previous;InterlockedAdd(shader_errors[REG_TERMINATED_MEDIUM_PATHS_WORD],1u,previous);
+        if(previous==0xffffffffu) {InterlockedAdd(shader_errors[REG_TERMINATED_MEDIUM_PATHS_WORD+1u],1u);}
+    }
+#endif
+#ifdef VORK_TEST_POISON_PATH_SAMPLE
+    if(VORK_TEST_POISON_PATH_SAMPLE==2 || (pixel==0u && index==0u)) {value.x=asfloat(0x7fc00000u);}
+#endif
+    if(!all(isfinite(value)) || !all(isfinite(guide_albedo)) || !all(isfinite(guide_normal))) {path_sample_nonfinite=true;}
+    if(VORK_AOV_CHANNELS!=0u) for(var a=0u;a<path_settings.environment.z;a++) {if(!all(isfinite(aovs[a]))) {path_sample_nonfinite=true;}}
+    if(path_sample_nonfinite) {
+        value=float4(0.);guide_albedo=float4(0.);guide_normal=float4(0.);aovs={};
+        uint previous;InterlockedAdd(shader_errors[REG_DROPPED_PATH_SAMPLES_WORD],1u,previous);
+        if(previous==0xffffffffu) {InterlockedAdd(shader_errors[REG_DROPPED_PATH_SAMPLES_WORD+1u],1u);}
     }
     if(path_settings.environment.w!=0u) {
         if(index>0u) {
@@ -1641,7 +1704,6 @@ void path_pixel<let adaptive:bool,let spatial_subsurface:bool,V:IVariant, P:IPro
         path_guides[pixel*2u]=guide_albedo;path_guides[pixel*2u+1u]=guide_normal;
     }
     if (VORK_AOV_CHANNELS!=0u) for(var a=0u;a<path_settings.environment.z;a++) {path_aovs[pixel*path_settings.environment.z+a]=aovs[a];}
-    if (!all(isfinite(value))) {path_boundary_error(REG_RADIANCE_NONFINITE,pixel);}
     let delta=value-moment.mean;moment.mean+=delta/float(index+1u);moment.variance+=delta*(value-moment.mean);
     // Field writes leave the settled slots, which neighbours read, untouched.
     if (adaptive) {path_moments[pixel].mean=moment.mean;path_moments[pixel].variance=moment.variance;}

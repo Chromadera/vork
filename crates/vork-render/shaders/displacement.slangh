@@ -42,7 +42,7 @@ uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
 #endif
 #endif
     material_instance_attributes(evaluation.object_header.x);
-    let p=evaluation.point_vertices!=0u ? asfloat(uint3(topology[vertex*3u],topology[vertex*3u+1u],topology[vertex*3u+2u])) : source_vector(vertex*10u,pose);
+    let p=evaluation.point_vertices!=0u ? asfloat(uint3(topology[vertex*4u],topology[vertex*4u+1u],topology[vertex*4u+2u])) : source_vector(vertex*10u,pose);
     let n=evaluation.point_vertices!=0u ? float3(0.) : source_vector(vertex*10u+3u,pose);
     let local_position=mul(float4(p,1.),evaluation.from_stream).xyz;
     let local_normal=mul(float4(n,0.),transpose(evaluation.to_stream)).xyz;
@@ -58,7 +58,25 @@ uint attribute_stride() {return 1u+VORK_ATTRIBUTES;}
 }
 [shader("compute")][numthreads(REG_DEFORM_GROUP,1,1)] void finish(uint3 id:SV_DispatchThreadID) {
     evaluation=evaluations[id.z];if(evaluation.object_header.y==0u)return;
-    let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation.count || pose>=3u)return;
+    let vertex=id.x+id.y*evaluation.dispatch_width;let pose=evaluation.pose;if(vertex>=evaluation_count() || pose>=3u)return;
+    if(evaluation.point_vertices!=0u) {
+        let center=asfloat(uint3(topology[vertex*4u],topology[vertex*4u+1u],topology[vertex*4u+2u]))+position(vertex,pose);
+        let diameter=asfloat(topology[vertex*4u+3u]);let radius=diameter*0.5;
+        let lo=center-radius;let hi=center+radius;
+        let valid=all((asuint(lo)&uint3(0x7f800000u))!=uint3(0x7f800000u)) && all((asuint(hi)&uint3(0x7f800000u))!=uint3(0x7f800000u));
+        if(!valid) {uint ignored;InterlockedOr(evaluation_scratch[evaluation.addresses.w+6],1u,ignored);}
+        if(pose==0u) {
+            for(uint a=0u;a<3u;a++) {uint ignored;InterlockedMin(evaluation_scratch[evaluation.addresses.w+a],float_key(lo[a]),ignored);InterlockedMax(evaluation_scratch[evaluation.addresses.w+a+3u],float_key(hi[a]),ignored);}
+            for(uint a=0u;a<10u;a++) current_output[evaluation.addresses.y+2u+vertex*10u+a]=0.;
+            for(uint a=0u;a<3u;a++) current_output[evaluation.addresses.y+2u+vertex*10u+a]=valid ? center[a] : 0.;
+            current_output[evaluation.addresses.y+2u+vertex*10u+3u]=valid ? diameter : 0.;
+        } else {
+            for(uint a=0u;a<10u;a++) previous_output[evaluation.addresses.y*2u+vertex*20u+(pose-1u)*10u+a]=0.;
+            for(uint a=0u;a<3u;a++) previous_output[evaluation.addresses.y*2u+vertex*20u+(pose-1u)*10u+a]=valid ? center[a] : 0.;
+            previous_output[evaluation.addresses.y*2u+vertex*20u+(pose-1u)*10u+3u]=valid ? diameter : 0.;
+        }
+        return;
+    }
     let p=evaluation.point_vertices!=0u ? source_vector(vertex*10u,pose)+position(vertex/max(evaluation.point_vertices,1u),pose) : position(vertex,pose);
     if(any((asuint(p)&uint3(0x7f800000u))==uint3(0x7f800000u))) {uint ignored;InterlockedOr(evaluation_scratch[evaluation.addresses.w+6],1u,ignored);}
     if(evaluation.point_vertices!=0u && pose==0u) {

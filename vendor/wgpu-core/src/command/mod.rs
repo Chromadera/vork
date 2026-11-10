@@ -828,7 +828,7 @@ pub struct CommandBufferMutable {
     buffer_memory_init_actions: Vec<BufferInitTrackerAction>,
     texture_memory_actions: CommandBufferTextureMemoryActions,
 
-    as_actions: Vec<AsAction>,
+    pub(crate) as_actions: Vec<AsAction>,
     temp_resources: Vec<TempResource>,
 
     indirect_draw_validation_resources: crate::indirect_validation::DrawResources,

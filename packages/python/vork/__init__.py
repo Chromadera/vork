@@ -63,6 +63,10 @@ def _external_buffers(scene: dict, file: str) -> Optional[bytes]:
             continue
         if buffer.get('file') or (buffer.get('offset') or 0) != 0 or buffer.get('count') is not None:
             raise ValueError(f'buffer {name}: inline data cannot have file, offset or count')
+        dims = buffer.get('dims')
+        if dims is not None and (len(dims) != 3 or any(type(n) is not int or n <= 0 for n in dims)
+                                 or dims[0] * dims[1] * dims[2] != len(data)):
+            raise ValueError(f'buffer {name}: data length must match positive dims product')
         kind = buffer['type']
         code = {'u32': 'I', 'uvec4': 'I', 'i32': 'i'}.get(kind, 'f')
         packed = bytearray()
@@ -330,3 +334,27 @@ def sky(*, name: str = 'sky', sun_elevation: float = 0.261799, sun_rotation: flo
     return std('sky', dict(name=name, sun_elevation=sun_elevation, sun_rotation=sun_rotation,
                           altitude=altitude, air_density=air_density, aerosol_density=aerosol_density,
                           ozone_density=ozone_density, sun_size=sun_size, sun_intensity=sun_intensity))
+
+
+def export_asset(scene: str, out: str, *, root: Optional[str] = None,
+                 at: Optional[Union[float, str]] = None,
+                 frame_start: Optional[int] = None, frame_end: Optional[int] = None,
+                 allow_losses: Optional[Sequence[str]] = None) -> dict:
+    """Export an evaluated glTF/GLB snapshot or frame-range clip and return NAME.export.json.
+
+    Each allowed loss names one diagnostic code; unsupported stages still fail.
+    """
+    args = ['export', str(scene), '--out', str(out)]
+    if root is not None:
+        args += ['--root', root]
+    if at is not None:
+        args += ['--at', str(at)]
+    if frame_start is not None:
+        args += ['--frame-start', str(frame_start)]
+    if frame_end is not None:
+        args += ['--frame-end', str(frame_end)]
+    for code in allow_losses or []:
+        args += ['--allow-loss', code]
+    _run_engine(args, check=True)
+    with open(os.path.splitext(out)[0] + '.export.json', encoding='utf-8') as file:
+        return json.load(file)

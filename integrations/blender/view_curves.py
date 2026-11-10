@@ -105,8 +105,8 @@ def display_source(program, *, curves=None, white_balance=None):
         helpers += curve_source(curves)
         operations += '    ctx.color = blender_curves(ctx.color);\n'
     if white_balance is not None:
-        wb = (root / 'post/white_balance.slang').read_text().split('public float4 composite(')[0]
-        helpers += wb.replace('Inputs', 'BlenderWhiteBalanceInputs')
+        wb = (root / 'blender/white_balance.slang').read_text()
+        helpers += wb.replace('WhiteBalanceInputs', 'BlenderWhiteBalanceInputs')
         temperature, tint = white_balance
         operations += f'    BlenderWhiteBalanceInputs wb; wb.temperature = {float(temperature)!r}; wb.tint = {float(tint)!r};\n    ctx.color = white_balance(ctx.color, wb);\n'
     entry = 'public float3 display(DisplayContext ctx, Inputs inputs) {'

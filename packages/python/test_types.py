@@ -46,7 +46,7 @@ class GeneratedTypes(unittest.TestCase):
             self.assertFalse(hasattr(types, name), name)
 
     def test_std_uses_shared_cli(self):
-        self.assertEqual(std('sphere', name='ball')['geometry']['ball']
+        self.assertEqual(std('rounded_box', name='ball')['geometry']['ball']
                          ['attributes']['POSITION'], 'ball_position')
 
     def test_removed_render_aliases_fail(self):

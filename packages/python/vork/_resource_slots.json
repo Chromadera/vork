@@ -50,6 +50,13 @@
               "file": true
             }
           }
+        },
+        {
+          "properties": {
+            "file": {
+              "file": true
+            }
+          }
         }
       ]
     },
@@ -119,6 +126,13 @@
                 "ref": "Morph"
               }
             },
+            "status": {
+              "branches": [
+                {
+                  "ref": "GeometryStatus"
+                }
+              ]
+            },
             "widths": {
               "branches": [
                 {
@@ -129,6 +143,13 @@
           }
         }
       ]
+    },
+    "GeometryStatus": {
+      "properties": {
+        "buffer": {
+          "ref": "NameOr3"
+        }
+      }
     },
     "GridBinding": {
       "properties": {

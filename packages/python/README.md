@@ -10,11 +10,11 @@ exposes the scene type, the shared CLI engines and scene writing:
 ```python
 from vork import Scene, std, write_scene
 
-shape = std('sphere', name='ball', radius=1)
+shape = std('rounded_box', name='block', size=[2,1,1], radius=0.1)
 scene: Scene = {'version': 2, **shape,
-                'nodes': [{'type': 'mesh', 'geometry': 'ball'},
+                'nodes': [{'type': 'mesh', 'geometry': 'block'},
                           {'type': 'camera', 'translation': [3, 2, 5], 'target': [0, 0, 0]}]}
-write_scene(scene, 'ball.json')  # ball.json + its immutable buffer sidecar
+write_scene(scene, 'block.json')  # block.json + its immutable buffer sidecar
 ```
 
 `write_scene(scene, path, base_dir=None)` mirrors the TypeScript `writeScene`: resource paths

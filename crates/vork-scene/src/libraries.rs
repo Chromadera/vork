@@ -39,7 +39,7 @@ macro_rules! modules {
 }
 
 /// Blender AgX samples owned by the std display program.
-const AGX_LUT: &[u8] = include_bytes!("../../../libraries/blender/agx.exr");
+const AGX_LUT: &[u8] = include_bytes!("../../../libraries/std/agx.exr");
 
 pub const LIBRARIES: &[Library] = &[
     // Fundamental and hard to write correctly. `vork setup` prebuilds its programs.
@@ -48,9 +48,9 @@ pub const LIBRARIES: &[Library] = &[
         help: include_str!("../../../libraries/std/HELP.txt"),
         modules: modules!("std":
             "openpbr_core" false, "texture" false, "normal_filter" false, "hair" true, "hair_bsdf" false,
-            "camera" true, "sky" true, "environment_image" true, "grid" false, "pnanovdb" false, "vector" false,
-            "color" false, "procedurals" false, "particles" false,
-            "bloom" true, "agx" true, "standard" true, "display" false),
+            "camera" true, "sky" true, "environment_image" true, "grid" false, "pnanovdb" false,
+            "color" false,
+            "agx" true, "standard" true, "display" false),
         profiles: &[
             ("std/previs", include_str!("../../../libraries/std/profiles/previs.json")),
             ("std/draft", include_str!("../../../libraries/std/profiles/draft.json")),
@@ -64,15 +64,15 @@ pub const LIBRARIES: &[Library] = &[
         name: "blender",
         help: include_str!("../../../libraries/blender/HELP.txt"),
         modules: modules!("blender":
-            "nodes" false, "volume" false,
-            "texture_coordinate" false, "color" false, "procedurals" false, "filmic" true, "display_lut" false),
+            "nodes" false, "volume" false, "white_balance" false,
+            "texture_coordinate" false, "color" false, "vector" false, "procedurals" false, "filmic" true, "display_lut" false),
         profiles: &[],
         images: &[("blender/filmic", "lut", ProgramImage::File("libraries/blender/filmic.exr"))],
     },
     Library {
         name: "fluid",
         help: include_str!("../../../libraries/fluid/HELP.txt"),
-        modules: modules!("fluid": "config" false, "solver" false, "surface" false, "whitewater" false, "film" false),
+        modules: modules!("fluid": "config" false, "solver" false, "surface" false, "whitewater" false, "film" false, "particles" false, "volume" false, "reconstruction" false),
         profiles: &[],
         images: &[],
     },
@@ -83,14 +83,7 @@ pub const LIBRARIES: &[Library] = &[
         profiles: &[],
         images: &[],
     },
-    // Optional photographic and lens looks.
-    Library {
-        name: "post",
-        help: include_str!("../../../libraries/post/HELP.txt"),
-        modules: modules!("post": "white_balance" true),
-        profiles: &[],
-        images: &[],
-    },
+
 
 ];
 
@@ -119,7 +112,7 @@ pub fn library(name: &str) -> Option<&'static Library> {
 }
 /// Every bundled module of every library.
 pub fn modules() -> impl Iterator<Item = &'static Module> {
-    LIBRARIES.iter().flat_map(|library| library.modules).chain(test_modules())
+    LIBRARIES.iter().flat_map(|library| library.modules).chain(compatibility_modules()).chain(test_modules())
 }
 pub fn module_source(name: &str) -> Option<&'static str> {
     modules().find(|module| module.name == name).map(|module| module.source)
@@ -145,4 +138,21 @@ fn test_modules() -> impl Iterator<Item = &'static Module> {
     #[cfg(not(feature = "test-support"))]
     let blender: &[Module] = &[];
     modules.iter().chain(blender)
+}
+
+// Undocumented compatibility through 0.5.x. Never include these in library help or setup.
+pub const COMPATIBILITY_MODULES: &[&str] = &["std/bloom", "post/white_balance", "std/procedurals", "std/vector", "std/particles"];
+fn compatibility_modules() -> impl Iterator<Item = &'static Module> {
+    modules!("std": "bloom" true, "procedurals" false, "vector" false, "particles" false).iter()
+        .chain(modules!("post": "white_balance" true))
+}
+
+#[cfg(test)]
+#[test]
+fn compatibility_expires_in_06() {
+    let version: Vec<u32> = env!("CARGO_PKG_VERSION").split('.').take(2).map(|n| n.parse().unwrap()).collect();
+    if version.as_slice() >= [0, 6].as_slice() {
+        let remaining: Vec<_> = COMPATIBILITY_MODULES.iter().filter(|name| module_source(name).is_some()).collect();
+        assert!(remaining.is_empty(), "remove expired 0.4 compatibility modules: {remaining:?}");
+    }
 }

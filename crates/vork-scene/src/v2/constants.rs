@@ -7,6 +7,8 @@ pub const RENDER_SAMPLES: u32 = 64;
 /// Shipped camera budgets with OIDN denoising.
 pub const DRAFT_SAMPLES: u32 = 4;
 pub const FINAL_SAMPLES: u32 = 8;
+/// Usable level-2 camera budget, independent of denoising.
+pub const PATH_SAMPLES: u32 = 64;
 /// Budgets when no fast GPU denoiser exists: more samples replace OIDN's cleanup.
 pub const DRAFT_SAMPLES_WITHOUT_DENOISER: u32 = 16;
 pub const FINAL_SAMPLES_WITHOUT_DENOISER: u32 = 32;
@@ -86,3 +88,6 @@ pub(super) fn subdivision_limit() -> bool { true }
 
 pub(super) fn spot_blend() -> f32 { SPOT_BLEND }
 pub(super) fn spot_size() -> f32 { SPOT_SIZE }
+
+/// The geometry chain default; absence preserves existing scene behavior.
+pub fn geometry_stages()->Vec<super::GeometryStage> {super::GeometryStage::DEFAULT.to_vec()}

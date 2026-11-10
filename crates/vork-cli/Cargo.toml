@@ -26,5 +26,6 @@ path = "../vork-scene"
 features = ["test-support"]
 
 [build-dependencies]
+vork-scene = { path = "../vork-scene" }
 vork-std = { path = "../vork-std" }
 vork-slang = { path = "../vork-slang" }

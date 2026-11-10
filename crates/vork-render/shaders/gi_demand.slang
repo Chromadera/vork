@@ -9,11 +9,13 @@ import vork_prelude;
 [[vk::binding(3,0)]] StructuredBuffer<float> response : register(t1);
 [[vk::binding(4,0)]] Texture2D<uint> input_mask : register(t2);
 [[vk::binding(5,0)]] [[vk::image_format("r32ui")]] RWTexture2D<uint> output_mask : register(u3);
-struct DemandStep {uint4 value;};
+struct DemandStep {uint4 value;uint4 tile;};
 [[vk::binding(6,0)]] ConstantBuffer<DemandStep> step : register(b2);
 
 [shader("compute")][numthreads(8,8,1)]
 void build(uint3 id:SV_DispatchThreadID) {
+    if(any(id.xy>=step.tile.zw)) return;
+    id.xy+=step.tile.xy;
     uint w,h;output_mask.GetDimensions(w,h);
     if(any(id.xy>=uint2(w,h))) return;
     uint occupied=0u;

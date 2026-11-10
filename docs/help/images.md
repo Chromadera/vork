@@ -1,6 +1,7 @@
 IMAGES
 Use color_space Non-Color for data PNGs. Nested camera textures inherit shot profile
 and timing.
+16-bit integer and floating-point image inputs avoid block compression but use half-float texture precision; exact source integer codes are not preserved.
 
 <!-- all -->
 ANIMATED TEXTURE REFERENCE

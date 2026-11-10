@@ -195,3 +195,15 @@ fn ctrl_break_closes_sequence_and_reports_saved_output() {
     assert!(log.contains("output files closed cleanly"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn png16_requires_a_png_colour_destination() {
+    for args in [vec!["--out", "movie.mp4"], vec!["--out", "frame%06d.exr"],
+        vec!["--out", "frame.png", "--channels", "depth"],
+        vec!["--out", "frame.png", "--no-write", "--diagnostics"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vork"))
+            .args(["render", "missing.json", "--png-depth", "16"]).args(args).output().unwrap();
+        assert_eq!(output.status.code(),Some(2),"{}",String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires PNG colour output"));
+    }
+}

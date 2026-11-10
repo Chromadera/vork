@@ -1,5 +1,38 @@
 UPGRADE
-Breaking changes, newest release first. Rewrite scenes/scripts; no aliases.
+Breaking changes, newest release first. Rewrite scenes/scripts; the temporary shim below expires in 0.6.
+
+0.5.0 (from 0.4.0)
+- Depth now stays on the nearest visible triangle at folded-mesh edges instead
+  of averaging disconnected surfaces that share an object ID (BB109).
+- Known limitation (BB108): CPU depth and object-ID outputs can report isolated
+  hits outside nearly edge-on, subpixel triangles, with depth outside the
+  triangle’s range. Do not use affected CPU control pixels as surface distances;
+  verify these outputs on a hardware GPU or against the source geometry.
+- Fluid scenes authored on 0.4.0 may omit the fluid_status compute binding.
+  Throughout 0.4.x, absent receipts retain the 0.4.0 correction and failure
+  publication path without diagnostic writes. Existing explicit
+  status bindings retain their error reporting. To adopt status reporting, use
+  the current water example’s status bindings, geometry.status references and
+  seven-element correction buffer; see vork help fluid.
+- Box, sphere, grid, cylinder, cone, torus, capsule and revolve are first-class
+  std builders again, with the same geometry as 0.4.0. No migration is needed
+  for these eight names; see vork help std --all. They have no removal deadline.
+- Find std/bloom, post/white_balance, std.procedurals and std.vector references
+  (slash program names or dot Slang imports). These remain available in
+  0.5.x with structured compatibility warnings and are removed in 0.6. Rewrite
+  bloom as an authored compositor pyramid, white balance as a chromatic-adaptation
+  matrix, and procedural noise/bump as authored Slang; Blender-specific imports
+  can use blender.procedurals and blender.vector. See vork help compositor.
+- Find std.particles imports. They keep loading with a compatibility warning
+  throughout 0.5.x; before 0.6 rewrite the import as fluid.particles. The particle
+  surface mathematics is unchanged.
+- Find color_ramp and RGB/HSV/HSL conversion calls imported from std.color.
+  These helpers moved to blender.color in 0.5.0 and have no compatibility shim.
+  Rewrite the imports to blender.color or author the colour maths. std.color
+  retains blackbody and wavelength.
+- std/path profile version 2 defaults to 64 samples instead of 4096, with or
+  without denoising. Custom level-2 profiles without settings.samples also use
+  64. --set samples=4096 restores the old budget. Explicit budgets are unchanged.
 
 0.4 (from 0.3)
 - std/medium_constant and std/medium_height are removed. Author a medium program

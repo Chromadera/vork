@@ -45,6 +45,7 @@ struct Copy {
 #[derive(Clone, Copy)]
 enum Sink {
     Color,
+    Color16,
     DepthIds,
     Normal,
     Motion,
@@ -59,6 +60,7 @@ impl Sink {
         match self {
             Self::Aov => outputs.aovs,
             Self::Color => outputs.color,
+            Self::Color16 => outputs.color16,
             Self::DepthIds => outputs.depth_ids,
             Self::Normal => outputs.normals,
             Self::Motion => outputs.motion,
@@ -78,6 +80,8 @@ impl Entry {
         float: bool,
         outputs: crate::ReadbackOutputs,
         aovs: usize,
+        // First display staging plane of a camera view; RGBA16 colour occupies two.
+        display_base: Option<u32>,
     ) -> Self {
         use crate::constants::*;
         let planes = if float {
@@ -102,6 +106,12 @@ impl Entry {
                     _ => Sink::FloatMotion,
                 },
             })
+            .chain(display_base.map(|base| Copy {
+                source: pixels.clone(),
+                offset: u64::from(base) * plane_bytes,
+                size: 2 * plane_bytes,
+                sink: Sink::Color16,
+            }))
             .filter(|copy| copy.sink.enabled(outputs))
             .collect::<Vec<_>>();
         let size = copies
@@ -168,7 +178,7 @@ mod tests {
             "nodes":[{"type":"camera","translation":[0,0,5],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2}}},{"type":"mesh","geometry":"quad","materials":["color"]}]
         }))?;
         let mut s = r.install(scene, Path::new("."))?;
-        let mut slot = s.create_frame_slot(&r, Default::default())?;
+        let mut slot = s.create_frame_slot(&r, ReadbackPrecision::Float)?;
         let external = r.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("external redo output"), size: extent(8,8), mip_level_count:1,
             sample_count:1, dimension:wgpu::TextureDimension::D2, format:r.output_format(),
@@ -200,16 +210,17 @@ mod tests {
         }
         for _ in 1..constants::OUTPUT_RING_DEPTH {
             slot.spare_ring.push_back(super::Entry::new(&r.device, &slot.view.post.pixels,
-                8 * 8 * 4, false, s.readback, 0));
+                8 * 8 * 4, slot.view.float_output, s.readback, 0, slot.view.post.display_base));
         }
         slot.submit(&s, &r, 0.)?;
-        let red = slot.collect(&r)?.rgba;
+        let red = slot.collect(&r)?;
         let red_texture = read_output(&r,&external)?;
         slot.submit(&s, &r, 1.)?;
-        let green = slot.collect(&r)?.rgba;
+        let green = slot.collect(&r)?;
         let green_texture = read_output(&r,&external)?;
         assert_ne!(red_texture,green_texture,"external texture must receive each colour");
-        assert_ne!(red, green, "fixture must change colour");
+        assert_ne!(red.linear_rgba, green.linear_rgba, "fixture must change colour");
+        crate::test_display::assert_display_ne(&red.rgba, &green.rgba);
         s.redo_frame(&r, std::slice::from_mut(&mut slot), Reservations {
             visibility_pool:65536,transparent_fragments:65536,shading_evaluations:65536,..Default::default()
         }, 1)?;
@@ -218,7 +229,12 @@ mod tests {
             for _ in 0..constants::OUTPUT_RING_DEPTH {
                 slot.advance_ring();
                 slot.submit(&s, &r, time)?;
-                assert_eq!(slot.collect(&r)?.rgba, if time == 0. { &red } else { &green }.clone());
+                let actual = slot.collect(&r)?;
+                let expected = if time == 0. { &red } else { &green };
+                crate::test_linear::assert_linear_eq(actual.linear_rgba.as_ref().unwrap(), expected.linear_rgba.as_ref().unwrap());
+                // The float plane cannot detect a stale displayed CPU readback;
+                // the external texture below is a separate output sink too.
+                crate::test_display::assert_display_eq(&actual.rgba, &expected.rgba);
                 assert_eq!(read_output(&r,&external)?,if time == 0. { &red_texture } else { &green_texture }.clone());
             }
         }

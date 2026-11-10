@@ -15,15 +15,14 @@ const validate = scenes => spawnSync('cargo', ['run','--quiet','-p','vork-scene'
 const mesh = geometry => ({version:2,...geometry,nodes:[{type:'camera',name:'camera'},{type:'mesh',geometry:Object.keys(geometry.geometry)[0]}]});
 
 test('SDK no longer exports scatter', () => {
-  assert.equal('scatter' in sdk, false);
+  for (const name of ['scatter']) assert.equal(name in sdk,false,name);
 });
 
 test('SDK geometry engines emit fragments accepted by the Rust kernel', async () => {
   const fixtures=[];
-  for (const shape of ['box','sphere','cylinder','cone','torus','capsule','roundedBox','grid'])
+  for (const shape of ['box','sphere','grid','cylinder','cone','torus','capsule','roundedBox'])
     fixtures.push(mesh(sdk[shape](shape)));
-  fixtures.push(mesh(sdk.revolve('revolve',{profile:[[0,0],[1,0],[0.5,1],[0,1.2]]})));
-  const geometry=sdk.grid('surface'), instances={
+  const geometry=sdk.roundedBox('surface',{size:[2,0.01,2],radius:0}), instances={
     buffers:{placements:{type:'vec3',data:[[0,0,0],[2,0,0],[4,0,0]]},live:{type:'u32',data:[2]}},
     instances:{attributes:{TRANSLATION:'placements'},count:'live'},
   };

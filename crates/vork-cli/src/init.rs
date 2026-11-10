@@ -28,23 +28,21 @@ impl Args {
             Language::Json => "Edit scene.json, then render again.\n".to_owned(),
             Language::Typescript => {
                 files.push(("package.json", "{\n  \"private\": true,\n  \"type\": \"module\"\n}\n".to_owned()));
-                let mut value: serde_json::Value = serde_json::from_str(scene)?;
-                for (i, name) in ["blue", "coral", "floor"].iter().enumerate() { value["nodes"][i]["geometry"] = (*name).into(); }
+                let value: serde_json::Value = serde_json::from_str(scene)?;
                 let literal = serde_json::to_string_pretty(&value)?;
-                files.push(("scene.ts", format!("import {{ writeScene, sphere, box, grid, type Scene }} from '@voyager-so/vork';\n\nconst blue = sphere('blue', {{radius: 0.85, segments: 64, rings: 32}});\nconst coral = box('coral', {{size: [0.9, 0.9, 0.9]}});\nconst floor = grid('floor', {{size: [200, 200]}});\nconst scene = {{...{literal}, buffers: {{...blue.buffers, ...coral.buffers, ...floor.buffers}}, geometry: {{...blue.geometry, ...coral.geometry, ...floor.geometry}}}} satisfies Scene;\nawait writeScene(scene, 'scene.json');\n")));
+                files.push(("scene.ts", format!("import {{ writeScene, type Scene }} from '@voyager-so/vork';\n\nconst scene = {literal} satisfies Scene;\nawait writeScene(scene, 'scene.json');\n")));
                 if npm { "Edit scene.ts, then run `node scene.ts` to rewrite scene.json. Requires Node 22.18+ and npm. Older Node gives EBADENGINE warnings; upgrade, or use `node --experimental-strip-types scene.ts` where supported.\nInstall the SDK with `npm install @voyager-so/vork` (create-vork installs it for you).\nImport from `@voyager-so/vork`. See `npx vork help sdk`.\n".to_owned() } else { include_str!("starter-typescript.md").to_owned() }
             }
             Language::Python => {
-                let mut value: serde_json::Value = serde_json::from_str(scene)?;
-                for (i, name) in ["blue", "coral", "floor"].iter().enumerate() { value["nodes"][i]["geometry"] = (*name).into(); }
+                let value: serde_json::Value = serde_json::from_str(scene)?;
                 let literal = serde_json::to_string_pretty(&value)?;
-                files.push(("scene.py", format!("from vork import std, write_scene\n\nscene = {literal}\nscene['buffers'] = {{}}\nscene['geometry'] = {{}}\nfor shape, options in [('sphere', {{'name': 'blue', 'radius': 0.85, 'segments': 64, 'rings': 32}}), ('box', {{'name': 'coral', 'size': [0.9, 0.9, 0.9]}}), ('grid', {{'name': 'floor', 'size': [200, 200]}})]:\n    fragment = std(shape, options)\n    scene['buffers'].update(fragment['buffers'])\n    scene['geometry'].update(fragment['geometry'])\nwrite_scene(scene, 'scene.json')\n")));
+                files.push(("scene.py", format!("import json\nfrom vork import write_scene\n\nscene = json.loads(r'''{literal}''')\nwrite_scene(scene, 'scene.json')\n")));
                 if npm { include_str!("starter-python-npm.md").replace("{VERSION}", env!("CARGO_PKG_VERSION")) } else { include_str!("starter-python.md").to_owned() }
             }
         };
         files.push(("README.md", format!("# Your first vork scene\n\n{author}\n```sh\n{command} render scene.json --out render.png\n{command} help\n```\n\nOpen render.png. Try changing the colours, camera target or light positions.\nThe default `std/final` profile is warmed by setup; use `--profile std/draft` for quicker previews. For interiors and full bounce lighting, use `--profile std/path --set samples=64` to start; raise samples for delivery. See `{command} help profiles` for the speed/quality table. No fetched assets are needed.\n")));
         fs::create_dir_all(&self.dir).with_context(|| format!("create {}", self.dir.display()))?;
-        for (name, _) in &files {
+        for name in files.iter().map(|(name, _)| *name) {
             if self.dir.join(name).symlink_metadata().is_ok() {
                 return Err(anyhow::anyhow!("{} already exists; choose another directory (no files overwritten)", self.dir.join(name).display()).context(vork_render::failure::FailureKind::Usage));
             }

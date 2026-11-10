@@ -40,6 +40,34 @@ float3 boundary_velocity(float3 p,float time,float3 v) {return v;}
     scene=build(callbacks=callbacks,extent=[2,1,2],particle_budget=[40,24,40],spacing=.04,
                 grid=[64,32,64],surface_grid=[n,n//2,n],whitewater_budget=0,
                 speed=8.,dt=1/480,flip=.9)
+if kind.startswith('drop'):
+    # BB076's dimensions, marker spacing, walls and initial velocity. Variants
+    # change parcel shape/phase, never solver or display resolution.
+    centre = 'float3(.0007,.0307,-.0004)' if kind=='drop_shift' else 'float3(0,.030,0)'
+    shape = ('length(d/float3(1.,.4,1.))<.009' if kind=='drop_thin' else
+             'min(length(d-float3(.014,0,0)),length(d+float3(.014,0,0)))<.0045' if kind=='drop_pair' else
+             'length(d)<.0045' if kind=='drop_tiny' else 'length(d)<.009')
+    callbacks=f'''
+float container(float3 p) {{return max(-p.y,max(abs(p.x)-.148,abs(p.z)-.048));}}
+float initial_field(float3 p) {{return max(length(p-{centre})-.009,container(p));}}
+bool initial_marker(uint id,out float3 p) {{
+ uint3 c=uint3(id%markers_dims.x,(id/markers_dims.x)%markers_dims.y,id/(markers_dims.x*markers_dims.y));
+ float3 d=(float3(c)-.5*(float3(markers_dims)-1.))*MARKER_SPACING;
+ p=d+{centre};return {shape};
+}}
+float3 initial_velocity(float3 p,float dx) {{return float3(0,-.2,0);}}
+float initial_pressure(float3 p) {{return 0.;}}
+bool film_accept(float2 p) {{return abs(p.x)<.148 && abs(p.y)<.048;}}
+float film_height(float2 p) {{return 0.;}}
+float3 boundary_velocity(float3 p,float time,float3 v) {{return v;}}
+'''
+    if kind=='drop_blocked':
+        callbacks=callbacks.replace('max(-p.y,max(abs(p.x)-.148,abs(p.z)-.048))','.01')
+    if kind=='drop_empty':
+        callbacks=callbacks.replace('return '+shape+';','return false;')
+    scene=build(callbacks=callbacks,extent=[.15,.05,.05],particle_budget=[20,10,10] if kind=='drop_pair' else [10,10,10],
+                spacing=.002,grid=[60,20,20],surface_grid=[n,n//3,n//3],
+                film_grid=[60,1,20],speed=.5,dt=1/1000,film_diffusivity=.0001)
 if kind in ('edge','corner','interior','edge_thin'):
     values=[0.]*24
     values[{'edge':8,'corner':0,'interior':10,'edge_thin':8}[kind]]=1e-8 if kind=='edge_thin' else .04
@@ -57,8 +85,14 @@ scene['materials']['water']=dict(inputs=dict(base_weight=0,specular_weight=0,emi
 # Inline the selected checkout's library sources so the same GPU test binary
 # can compare the audited and repaired numerics without changing renderer code.
 for program in scene['programs'].values():
-    for module in ('config','solver','surface','film','whitewater'):
+    for module in ('config','solver','reconstruction','volume','surface','film','whitewater'):
         program['source']=program['source'].replace('#include "fluid/'+module+'.slang"',Path(__file__).with_name(module+'.slang').read_text())
 if kind=='dam':
     scene['nodes'][0]['scale']=[2,1,2]
+if kind.startswith('drop'):
+    scene['nodes'][0]['scale']=[.15,.05,.05]
+    scene['nodes'][0]['name']='small liquid '+kind
+    scene['nodes'][1]['translation']=[.035,.06,.07]
+    scene['nodes'][1]['target']=[0,.03,0]
+    scene['nodes'][1]['material']['inputs']['clip_start']=.001
 print(json.dumps(scene))

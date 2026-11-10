@@ -13,6 +13,22 @@ import vork_sampling;
 // sampling: x/y are sampling-table offsets (render samples, motion taps); z is the visibility film-offset table;
 // w is the visibility samples per exposure sample (0 outside decoupled colour).
 struct Frame { float4x4 vp; float4x4 light_vp; float4 eye; float4 background; float4 radiance; float4 params; float4 flags; float4x4 previous_vp; float4x4 next_vp; float4x4 inverse_vp; float4x4 view; float4 ao; float4 projection; float4 lens; float4 aperture; float4 temporal; float4 environment; float4x4 environment_rotation; float4 environment_color; float4 environment_mean; float4 scene; uint4 shadow_links; uint4 integrator; uint4 sampling; uint4 environment_links; uint4 medium; float4 display; float4 post; float4x4 composite_projection; float4 composite_optics; float4 composite_sensor; float4 composite_shutter; float4 composite_step; float4 camera_sample; uint4 camera_program; uint4 field_geometry; };
+// Subtract the eye before projection: the z/w cancellation in a combined
+// world-to-clip matrix is amplified when device depth is converted to metres.
+bool camera_needs_relative_clip(Frame f) {
+    // At 512 m a world-coordinate ULP reaches 2^-14 m. Below this
+    // conservative boundary retain the combined transform: reassociating its
+    // arithmetic changes raster interpolation and can amplify through glass.
+    return any(abs(f.eye.xyz)>=512.);
+}
+float4 camera_relative_clip(float3 relative,Frame f) {
+    let view=mul(float4(relative,0.),f.view).xyz;
+    return mul(float4(view,1.),f.composite_projection);
+}
+float4 camera_world_clip(float3 world,Frame f) {
+    if(!camera_needs_relative_clip(f)) return mul(float4(world,1.),f.vp);
+    return camera_relative_clip(world-f.eye.xyz,f);
+}
 // WGSL `background: vec3<f32>, light_count: f32` is one float4 here.
 float frame_light_count(Frame f) {return f.background.w;}
 struct ClusterConfig { uint4 grid; uint4 screen; };

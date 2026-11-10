@@ -27,6 +27,10 @@ impl VertexStream {
 
 #[derive(Clone)]
 pub(crate) struct EvaluatedGeometry {
+    /// Compact point endpoints: previous/current centre and diameter, eight floats per source row.
+    pub(crate) point_poses: Option<wgpu::Buffer>,
+    pub(crate) point_domain: Option<(u32,u32)>,
+    pub(crate) gpu_bounds: Option<wgpu::Buffer>,
     pub(crate) output: VertexStream,
     pub(crate) previous_output: VertexStream,
     pub(crate) attributes: Option<wgpu::Buffer>,
@@ -37,6 +41,9 @@ pub(crate) struct EvaluatedGeometry {
 impl From<&FrameDeform> for EvaluatedGeometry {
     fn from(frame: &FrameDeform) -> Self {
         Self {
+            point_poses: None,
+            point_domain: None,
+            gpu_bounds: None,
             attributes: None,
             previous_attributes: None,
             output: frame.output.clone(),
@@ -52,6 +59,8 @@ pub(crate) struct Geometry {
     /// Authored point domain, restored after loading the sphere expansion cache.
     #[serde(skip)]
     pub(crate) point_centers: Vec<[f32; 3]>,
+    #[serde(skip)]
+    pub(crate) point_widths: Vec<f32>,
     #[serde(skip)]
     pub(crate) refinement: Option<std::sync::Arc<crate::subdivision::Refinement>>,
     pub(crate) vertices: Vec<Vertex>,
@@ -143,6 +152,7 @@ impl Geometry {
         Some(Self {
             refinement: self.refinement.clone(),
             point_centers: self.point_centers.clone(),
+            point_widths: self.point_widths.clone(),
             vertices: sources.iter().map(|&i| self.vertices[i]).collect(),
             vertex_ids: sources.iter().filter_map(|&i| self.vertex_ids.get(i).copied()).collect(),
             indices: self.indices.iter().map(|&i| remap[i as usize]).collect(),
@@ -163,6 +173,7 @@ impl Geometry {
         Self {
             refinement: None,
             point_centers: Vec::new(),
+            point_widths: Vec::new(),
             primitive_ids: (0..(indices.len()/3) as u32).collect(),
             vertex_ids: Vec::new(),
             vertices,
@@ -237,6 +248,7 @@ impl Geometry {
 /// absent/default attributes read from a stride-zero constant stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct VertexLayout {
+    pub(crate) points: bool,
     pub(crate) deform: bool,
     pub(crate) tangent: bool,
     pub(crate) uv: [u8; 2],
@@ -252,7 +264,7 @@ impl VertexLayout {
             if deform && !tangent { continue; }
             for uv in [[absent,absent], [0,absent], [absent,0], [0,0], [0,1]] {
                 for color in [false,true] {
-                    layouts.push(Self { deform, tangent, uv, color, custom });
+                    layouts.push(Self { points:false, deform, tangent, uv, color, custom });
                 }
             }
         }}
@@ -262,6 +274,7 @@ impl VertexLayout {
         let mut out = Self {
             deform,
             tangent: deform || vertices.iter().any(|v| v.TANGENT != [0.; 4]),
+            points: false,
             uv: [constants::VERTEX_DEFAULT_UV; 2],
             color: vertices.iter().any(|v| v.COLOR_0 != [1.; 4]),
             custom: 0,
