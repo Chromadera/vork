@@ -27,6 +27,7 @@ projected at 13–18 minutes. [How we measured](#million-birds-measured-movies-p
 - **Fast:** 1.1–2.3× faster than EEVEE on default stills and movies, and about 8–11× on the bird flock.
   [Speed, with the qualifications](#speed-with-the-qualifications).
 - **Native GPU engine:** written in Rust and Slang, runs on Vulkan and Metal (Linux, Windows, macOS).
+- **No GPU needed:** render on Voyager's cloud GPUs with [vork cloud](https://voyager.so/vork/cloud).
 
 ## Paste this to your agent
 
@@ -178,11 +179,12 @@ A GPU liquid simulation implemented as Slang compute programs in vork's fluid li
 It uses published APIC/FLIP and surface-reconstruction methods, with an authored
 initial impulse and limited secondary spray.
 
-## No suitable GPU?
+## No suitable GPU? Use the cloud
 
 Rendering requires Apple Silicon or an NVIDIA GPU with Vulkan ray queries.
 Scene authoring and `vork help` work without a GPU. On your own NVIDIA Linux
 machine, you can use the [Docker runtime](docs/REMOTE-GPU.md).
+Or render on Voyager's cloud GPUs with [vork cloud](https://voyager.so/vork/cloud).
 
 ## Give it to an agent
 
