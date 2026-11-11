@@ -32,6 +32,7 @@ test('SDK geometry engines emit fragments accepted by the Rust kernel', async ()
   const font = join(root,'crates/vork-std/tests/fonts/LiberationSans-Regular.ttf');
   try {
     for (const [builder, token, options] of [
+      [sdk.sweep, 'sweep', {profile:[[0,0],[0.1,0],[0,0.1],[0,0]],path:[[0,0,0],[0,0,1]],scale:[0.5,0.25]}],
       [sdk.extrude, 'extrude', {outline:[[0,0],[1,0],[0,1]],bevelDepth:0.02,bevelResolution:4}],
       [sdk.text, 'text', {body:'x',font:join(root,'crates/vork-std/tests/fonts/LiberationSans-Regular.ttf')}],
     ]) {
@@ -42,6 +43,7 @@ test('SDK geometry engines emit fragments accepted by the Rust kernel', async ()
       fixtures.push(mesh(fragment));
     }
     fixtures.push(mesh(sdk.extrude('plate',{outline:[[0,0],[2,0],[2,1],[0,1]],holes:[[[0.5,0.25],[1.5,0.25],[1,0.75]]],depth:0.1})));
+    fixtures.push(mesh(sdk.extrude('svg',{d:'M0 0h2v1h-2z',depth:0.1})));
     if (existsSync(font)) fixtures.push(mesh(sdk.text('label',{body:'vork',font:join(root,'crates/vork-std/tests/fonts/LiberationSans-Regular.ttf')})));
   } finally {
     if (previousBinary === undefined) delete process.env.VORK_BIN;

@@ -677,12 +677,66 @@ pub(crate) struct Compute {
     dispatches: Vec<Dispatch>,
     /// Maximum dispatches per submission segment; zero keeps the step together.
     separate: usize,
+    /// Measured milliseconds per workgroup row for adaptive path bands.
+    time_budget: Option<std::sync::Mutex<f64>>,
     clear: Vec<wgpu::Buffer>,
     marker: Option<crate::timing::Marker>,
     begin: bool,
     end: bool,
 }
 impl Compute {
+    fn encode_time_budgeted(
+        &self, encoder: &mut wgpu::CommandEncoder, f: &crate::view::ViewState,
+        r: &crate::Renderer, segments: &mut crate::command_finish::Segments,
+    ) -> Result<()> {
+        let mut row_ms=self.time_budget.as_ref().unwrap().lock().unwrap();
+        let at=timing::query(self.span);
+        let queries=r.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label:Some("path dispatch budget"),ty:wgpu::QueryType::Timestamp,count:at+2,
+        });
+        let resolve=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {
+            label:Some("path dispatch budget resolve"),size:256,
+            usage:wgpu::BufferUsages::QUERY_RESOLVE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false,
+        });
+        let readback=crate::gpu_memory::buffer(&r.device,&wgpu::BufferDescriptor {
+            label:Some("path dispatch budget readback"),size:16,
+            usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,
+        });
+        let marker=r.timestamp_marker.get_or_init(||timing::Marker::new(&r.device));
+        marker.encode(encoder,&f.queries,at);
+        let mut begin=0;
+        let mut previous=if *row_ms>0. {self.dispatches.len()} else {1};
+        while begin<self.dispatches.len() {
+            let count=budget_rows(*row_ms,self.dispatches.len()-begin,previous);
+            let end=begin+count;
+            self.encode_range::<true>(encoder,&queries,&f.output_bind,f.color_enabled,
+                !f.variants_pending(),begin..end,true);
+            encoder.resolve_query_set(&queries,at..at+2,&resolve,0);
+            encoder.copy_buffer_to_buffer(&resolve,0,&readback,0,16);
+            let (submission,_)=segments.interop(r,encoder,"after timed path band");
+            let (tx,rx)=std::sync::mpsc::channel();
+            readback.map_async(wgpu::MapMode::Read,..,move |value|{let _=tx.send(value);});
+            r.wait(submission)?;
+            rx.recv()??;
+            let mapped=readback.get_mapped_range(..);
+            let ticks:&[u64]=bytemuck::cast_slice(&mapped);
+            let ms=timing::elapsed_ms(ticks[0],ticks[1],r.queue.get_timestamp_period())
+                .filter(|ms|ms.is_finite() && *ms>0.)
+                .ok_or_else(||anyhow::anyhow!("invalid GPU timestamps for path dispatch budget"))?;
+            drop(mapped);readback.unmap();
+            // Keep the high-water cost: a cheap sky band must not enlarge the
+            // following interior band. A new view starts with a cold pilot.
+            *row_ms=(*row_ms).max(ms/count as f64);
+            if std::env::var_os("VORK_PATH_DISPATCH_TIMES").is_some() {
+                eprintln!("path dispatch: sample={} rows={}..{} gpu_ms={ms:.6} budget_ms={}",
+                    f.sample_index,begin*8,(end*8).min(f.internal[1] as usize),constants::SAMPLE_GROUP_GPU_MS);
+            }
+            previous=count;
+            begin=end;
+        }
+        marker.encode(encoder,&f.queries,at+1);
+        Ok(())
+    }
     fn encode<const SEGMENT:bool>(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -691,6 +745,13 @@ impl Compute {
         color_enabled: bool,
         specialized: bool,
         range: std::ops::Range<usize>,
+    ) {
+        self.encode_range::<SEGMENT>(encoder,queries,output,color_enabled,specialized,range,false);
+    }
+    fn encode_range<const SEGMENT:bool>(
+        &self, encoder: &mut wgpu::CommandEncoder, queries: &wgpu::QuerySet,
+        output: &wgpu::BindGroup, color_enabled: bool, specialized: bool,
+        range: std::ops::Range<usize>, merge_rows: bool,
     ) {
         let first = range.start == 0;
         let begin = SEGMENT || (self.begin && first);
@@ -706,7 +767,9 @@ impl Compute {
                 end_of_pass_write_index: end.then_some(timing::query(self.span) + 1),
             }),
         });
-        for dispatch in &self.dispatches[range] {
+        let merged_rows = if merge_rows {self.dispatches[range.clone()].iter().map(|d|d.groups[1]).sum::<u32>()} else {0};
+        let dispatches = if merge_rows { &self.dispatches[range.start..range.start+1] } else { &self.dispatches[range] };
+        for dispatch in dispatches {
             if dispatch.color_only && !color_enabled {
                 continue;
             }
@@ -726,9 +789,19 @@ impl Compute {
             }
 
             let [x, y, z] = dispatch.groups;
-            pass.dispatch_workgroups(x, y, z);
+            pass.dispatch_workgroups(x, if merge_rows {merged_rows} else {y}, z);
         }
     }
+}
+
+/// A 500 ms target with 2x headroom, shared by all backends. Unknown/cold
+/// shaders start at one workgroup row; growth is limited to fourfold so a
+/// cheap pilot cannot immediately launch the whole image.
+fn budget_rows(row_ms:f64,remaining:usize,previous:usize)->usize {
+    let measured=if row_ms.is_finite() && row_ms>0. {
+        (constants::SAMPLE_GROUP_GPU_MS/row_ms).floor().max(1.) as usize
+    } else {1};
+    measured.min(previous.saturating_mul(4)).min(remaining).max(1)
 }
 pub(crate) enum Work {
     /// Encoded by its pass module over the view's or slot's prebuilt objects.
@@ -742,6 +815,9 @@ pub(crate) struct Step {
     pub work: Work,
 }
 impl Step {
+    pub(crate) fn needs_interop(&self)->bool {
+        matches!(&self.work,Work::Compute(work) if work.time_budget.is_some())
+    }
     pub(crate) fn separates(&self) -> bool {
         matches!(&self.work, Work::Compute(work) if work.separate>0)
     }
@@ -798,6 +874,7 @@ impl Recorder {
                 span,
                 output,
                 separate: 0,
+                time_budget: None,
                 dispatches,
                 clear: Vec::new(),
                 marker: None,
@@ -807,6 +884,9 @@ impl Recorder {
         ));
     }
     pub(crate) fn separate_last(&mut self) {self.separate_last_every(1);}
+    pub(crate) fn time_budget_last(&mut self) {
+        self.0.last_mut().expect("recorded compute step").1.time_budget=Some(std::sync::Mutex::new(0.));
+    }
     pub(crate) fn separate_last_every(&mut self,dispatches:usize) {
         assert!(dispatches>0);
         self.0.last_mut().expect("recorded compute step").1.separate = dispatches;
@@ -1099,6 +1179,9 @@ pub(crate) fn encode_view(
             }
             marker.encode(encoder,&f.queries,timing::query(work.span)+1);
         }
+        (Work::Compute(work), Pass::Path) if work.time_budget.is_some() => {
+            work.encode_time_budgeted(encoder,f,r,segments)?;
+        }
         (Work::Compute(work), _) if split && !work.dispatches.is_empty() => {
             for begin in (0..work.dispatches.len()).step_by(work.separate) {
                 if begin>0 {crate::command_finish::submission_boundary(r,encoder,segments);}
@@ -1128,6 +1211,23 @@ pub(crate) fn encode_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dispatch_budget_cold_growth_headroom_and_slow_rows() {
+        assert_eq!(budget_rows(0.,135,1),1);
+        assert_eq!(budget_rows(f64::NAN,135,1),1);
+        assert_eq!(budget_rows(1.,135,1),4);
+        assert_eq!(budget_rows(1.,135,4),16);
+        assert_eq!(budget_rows(10.,135,64),25);
+        assert_eq!(budget_rows(10.,3,64),3);
+        assert_eq!(budget_rows(1000.,135,64),1);
+        for previous in [1,4,16,64,256] {
+            for cost in [0.1,1.,3.,20.,250.] {
+                let rows=budget_rows(cost,135,previous);
+                assert!(rows>=1 && rows<=135 && rows<=previous*4);
+                assert!(rows as f64*cost<=constants::SAMPLE_GROUP_GPU_MS);
+            }
+        }
+    }
     #[test]
     fn contiguous_compute_stages_own_complete_timestamp_intervals() -> Result<()> {
         let mut builder=Builder::default();

@@ -12,6 +12,7 @@ pub struct CommandBuffer {
 
 #[derive(Debug)]
 enum Command {
+    BuildAccelerationStructure { mode: crate::AccelerationStructureBuildMode },
     ClearBuffer {
         buffer: Buffer,
         range: crate::MemoryRange,
@@ -24,6 +25,13 @@ enum Command {
 }
 
 impl CommandBuffer {
+    pub(crate) fn acceleration_structure_build_modes(&self) -> impl Iterator<Item = crate::AccelerationStructureBuildMode> + '_ {
+        self.commands.iter().filter_map(|command| match command {
+            Command::BuildAccelerationStructure { mode } => Some(*mode),
+            _ => None,
+        })
+    }
+
     /// # Safety
     ///
     /// Must be called with appropriate synchronization for the resources affected by the command,
@@ -278,6 +286,8 @@ impl crate::CommandEncoder for CommandBuffer {
         Api: 'a,
         T: IntoIterator<Item = crate::BuildAccelerationStructureDescriptor<'a, Buffer, Resource>>,
     {
+        self.commands.extend(descriptors.into_iter().map(|descriptor|
+            Command::BuildAccelerationStructure { mode: descriptor.mode }));
     }
 
     unsafe fn place_acceleration_structure_barrier(
@@ -308,6 +318,7 @@ impl Command {
     /// such as ensuring that buffers are not accessed by a command while aliasing references exist.
     unsafe fn execute(&self) {
         match self {
+            Command::BuildAccelerationStructure { .. } => {},
             Command::ClearBuffer { ref buffer, range } => {
                 // SAFETY:
                 // Caller is responsible for ensuring this does not alias.

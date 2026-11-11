@@ -114,7 +114,7 @@ impl Presentation<'_> {
     fn configure(&mut self, r: &Renderer) -> Result<()> {
         if !self.reconfigure || self.size.contains(&0) { return Ok(()); }
         ensure!(self.size.iter().all(|v| *v <= r.device.limits().max_texture_dimension_2d),
-            "window exceeds the GPU texture dimension limit; resize it to {} pixels or smaller", r.device.limits().max_texture_dimension_2d);
+            "{}", crate::gpu_memory::limit_message("window", format_args!("{}x{} pixels",self.size[0],self.size[1]), format_args!("{} pixels per axis",r.device.limits().max_texture_dimension_2d), "resize the window within the texture dimension limit"));
         self.config.width = self.size[0]; self.config.height = self.size[1];
         let scope = r.device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.surface.configure(&r.device, &self.config);

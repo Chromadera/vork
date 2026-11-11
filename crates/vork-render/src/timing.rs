@@ -195,6 +195,7 @@ pub(crate) fn forget(device: &wgpu::Device) {
 /// A missing interval has no defensible per-pass attribution. The caller must
 /// start the host clock before submission and stop it after completion. This
 /// envelope bounds every contained dispatch, including queue and host overhead.
+#[cfg(test)]
 pub(crate) fn measured_or_wall(begin: u64, end: u64, period: f32, wall_ms: f64) -> (f64, &'static str) {
     match elapsed_ms(begin, end, period) {
         Some(ms) if ms.is_finite() && ms >= 0. => (ms, "gpu_timestamp"),

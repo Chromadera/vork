@@ -735,6 +735,7 @@ impl CachedPipelines {
         if slang.no_boundary_transactions {identity.update(b"no boundary transactions");}
         if slang.no_points {identity.update(b"no points");}
         if slang.bounded_secondary_compilation {identity.update(b"bounded secondary compilation");}
+        if slang.approximate_field_admission() {identity.update(b"approximate field admission");}
         if let Some(native)=&slang.medium {
             identity.update(native.point.as_bytes());identity.update(&native.identity);
 
@@ -1418,6 +1419,33 @@ pub(crate) fn global_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 }
 /// Group 1: records plus scene-sized material texture and sampler tables. Ray-traced AO also reads it from compute for alpha-tested hits.
 pub(crate) fn material_entries(_rays: bool) -> Vec<wgpu::BindGroupLayoutEntry> {material_entries_for(1,1)}
+/// Per-stage resource slots a pipeline layout binds, as Metal counts them
+/// (binding arrays use one buffer slot for their argument table).
+#[cfg(test)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) struct StageResources {pub buffers:u32,pub textures:u32,pub samplers:u32}
+/// The tightest per-stage limits of the backends we ship: Metal.
+#[cfg(test)]
+pub(crate) const METAL_STAGE_LIMITS:StageResources=StageResources {buffers:31,textures:128,samplers:16};
+#[cfg(test)]
+pub(crate) fn stage_resources(groups:&[&[wgpu::BindGroupLayoutEntry]],stage:wgpu::ShaderStages)->StageResources {
+    let mut r=StageResources {buffers:0,textures:0,samplers:0};
+    for e in groups.iter().flat_map(|g|g.iter()).filter(|e|e.visibility.contains(stage)) {
+        let [buffers,textures,samplers]=e.ty.metal_resource_slots(e.count);
+        r.buffers+=u32::from(buffers);
+        r.textures+=u32::from(textures);
+        r.samplers+=u32::from(samplers);
+    }
+    r
+}
+/// Fails when a pipeline layout would exceed a shipped backend's per-stage limits, on any host.
+#[cfg(test)]
+pub(crate) fn check_stage_limits(label:&str,groups:&[&[wgpu::BindGroupLayoutEntry]],stage:wgpu::ShaderStages)->anyhow::Result<()> {
+    let r=stage_resources(groups,stage);let m=METAL_STAGE_LIMITS;
+    anyhow::ensure!(r.buffers<=m.buffers && r.textures<=m.textures && r.samplers<=m.samplers,
+        "pipeline layout {label} binds {} buffers, {} textures and {} samplers to one stage; Metal allows {}, {} and {}",r.buffers,r.textures,r.samplers,m.buffers,m.textures,m.samplers);
+    Ok(())
+}
 pub(crate) fn material_entries_for(textures:u32,samplers:u32) -> Vec<wgpu::BindGroupLayoutEntry> {
     let textures=textures.max(vork_slang::registry::MATERIAL_TEXTURE_CAPACITY);
     let samplers=samplers.max(vork_slang::registry::MATERIAL_SAMPLER_CAPACITY);
@@ -1909,6 +1937,66 @@ mod registry_identity_tests {
     }
 
     #[test]
+    fn mesh_edit_reuses_pipelines_across_field_policy() -> Result<()> {
+        let Some(r)=crate::test_renderer()? else {return Ok(());};
+        let root=std::path::Path::new(".");
+        let document=serde_json::json!({"version":2,"nodes":[
+            {"type":"mesh","geometry":{
+                "attributes":{"POSITION":{"type":"vec3","data":[[-1,-1,0],[1,-1,0],[0,1,0]]}},
+                "indices":{"type":"u32","data":[0,1,2]}},
+                "materials":[{"inputs":{"base_color":[0.8,0.2,0.1]}}]},
+            {"type":"camera","translation":[0,0,4],"target":[0,0,0]},
+            {"type":"light","shape":"environment","color":[0.2,0.2,0.2]}
+        ]});
+        let mut scene=crate::test_scene(document,root)?;
+        scene.render.resolution=[64,36];
+        scene.render.background=vork_scene::v2::Background::Color([0.1,0.1,0.1]);
+        let intent=serde_json::from_value(serde_json::json!({"samples":1,"denoise":false}))?;
+        scene.render.settings=vork_scene::Profile::load("std/draft")?.resolve(&intent)?;
+        scene.render.settings.approximate_field_boundaries=false;
+        let options=||InstallOptions {variants:VariantCompile::Inline,..Default::default()};
+        let first=r.install_with_options(scene.clone(),&root,options())?;
+        r.compiler.settle()?;
+        let known=r.compiler.known.lock().unwrap().keys.clone();
+        let geometry_slots=first.pipelines.geometry.lock().unwrap().len();
+        let creation_start=crate::timing::creations(&r.device).len();
+        // A numeric edit changes scene data, never its shader specialization.
+        scene.render.background=vork_scene::v2::Background::Color([0.2,0.3,0.4]);
+        scene.render.settings.approximate_field_boundaries=true;
+        let edited=r.install_with_options(scene,&root,options())?;
+        r.compiler.settle()?;
+        assert!(std::sync::Arc::ptr_eq(&first.pipelines,&edited.pipelines),
+            "mesh edits must reuse the registry across the field policy");
+        assert_eq!(r.compiler.known.lock().unwrap().keys,known,"mesh edit admitted new variant keys");
+        assert_eq!(edited.pipelines.geometry.lock().unwrap().len(),geometry_slots,
+            "mesh edit allocated new geometry pipeline slots");
+        let creations=crate::timing::creations(&r.device);
+        let new=&creations[creation_start..];
+        // Display/instance pipelines can create fresh objects using the driver
+        // cache; they must not trigger fresh scene shader compilation.
+        eprintln!("mesh edit creation receipt: {:?}",new.iter().map(|c|(&c.kind,&c.label)).collect::<Vec<_>>());
+        assert!(new.iter().all(|c|c.kind!="Slang"),"mesh edit recompiled shader code");
+        r.errors.check()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_keys_ignore_field_admission_policy() {
+        let mesh=crate::slang_forward::SlangScene::default();
+        let policy=crate::slang_forward::SlangScene {approximate_field_boundaries:true,..mesh.clone()};
+        assert!(!policy.approximate_field_admission(), "mesh variants must omit the field define");
+        assert_eq!(CachedPipelines::kernel_identity("",1,false,&mesh),
+            CachedPipelines::kernel_identity("",1,false,&policy));
+        assert_eq!(CachedPipelines::identity("",RESOLVE,1,false,&mesh,wgpu::TextureFormat::Rgba8Unorm),
+            CachedPipelines::identity("",RESOLVE,1,false,&policy,wgpu::TextureFormat::Rgba8Unorm));
+        let exact=crate::slang_forward::SlangScene {field_controls:true,..mesh};
+        let approximate=crate::slang_forward::SlangScene {field_controls:true,..policy};
+        assert!(approximate.approximate_field_admission());
+        assert_ne!(CachedPipelines::kernel_identity("",1,false,&exact),
+            CachedPipelines::kernel_identity("",1,false,&approximate));
+    }
+
+    #[test]
     fn remembered_keys_cover_shader_inputs_and_descriptor_capacities() {
         let base=crate::slang_forward::SlangScene::default();
         let key=|s:&crate::slang_forward::SlangScene|CachedPipelines::identity("",RESOLVE,1,false,s,wgpu::TextureFormat::Rgba8Unorm);
@@ -1922,6 +2010,7 @@ mod registry_identity_tests {
             crate::slang_forward::SlangScene {surface_coverage:true,..base.clone()},
             crate::slang_forward::SlangScene {field_controls:true,..base.clone()},
             crate::slang_forward::SlangScene {bounded_secondary_compilation:true,..base.clone()},
+            crate::slang_forward::SlangScene {field_controls:true,approximate_field_boundaries:true,..base.clone()},
             crate::slang_forward::SlangScene {no_points:true,..base.clone()},
             crate::slang_forward::SlangScene {no_shadow_containment:true,..base.clone()},
             crate::slang_forward::SlangScene {probes:true,..base.clone()},
@@ -1930,5 +2019,58 @@ mod registry_identity_tests {
             medium:Some(std::sync::Arc::new(medium::Native {homogeneous,..Default::default()})),..base.clone()
         };
         assert_ne!(key(&medium(true)),key(&medium(false)));
+    }
+}
+
+#[cfg(test)]
+mod stage_limit_tests {
+    use super::*;
+    #[test]
+    fn stage_limits_use_executor_slots_for_mixed_resource_arrays() {
+        let stage=wgpu::ShaderStages::COMPUTE;
+        let scalar=buffer_entry(0,stage,wgpu::BufferBindingType::Storage {read_only:true});
+        let texture=wgpu::BindGroupLayoutEntry {visibility:stage,..texture_entry(1,wgpu::TextureSampleType::Float {filterable:true},false)};
+        let sampler=wgpu::BindGroupLayoutEntry {visibility:stage,..sampler_entry(2,false)};
+        let array=|entry:wgpu::BindGroupLayoutEntry|wgpu::BindGroupLayoutEntry {count:std::num::NonZeroU32::new(64),..entry};
+        let scalars=(0..31).map(|binding|wgpu::BindGroupLayoutEntry {binding,..scalar}).collect::<Vec<_>>();
+        let texture_array=[array(texture)];
+        assert!(check_stage_limits("scalar buffers plus texture array",&[&scalars,&texture_array],stage)
+            .unwrap_err().to_string().contains("32 buffers"));
+
+        // Arrays of every resource class occupy argument-buffer slots, even
+        // when their capacities exceed the scalar texture/sampler limits.
+        let storage=wgpu::BindGroupLayoutEntry {binding:4,visibility:stage,ty:wgpu::BindingType::StorageTexture {access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::Rgba8Unorm,view_dimension:wgpu::TextureViewDimension::D2},count:None};
+        let mixed=[array(scalar),array(texture),array(sampler),array(storage),texture,sampler,storage,
+            wgpu::BindGroupLayoutEntry {binding:3,visibility:stage,ty:wgpu::BindingType::AccelerationStructure {vertex_return:false},count:None},
+            wgpu::BindGroupLayoutEntry {visibility:wgpu::ShaderStages::FRAGMENT,..array(texture)}];
+        assert_eq!(stage_resources(&[&scalars[..26],&mixed],stage),
+            StageResources {buffers:31,textures:2,samplers:1});
+        check_stage_limits("mixed arrays at limit",&[&scalars[..26],&mixed],stage).unwrap();
+        assert!(check_stage_limits("mixed arrays overflow",&[&scalars[..27],&mixed],stage).is_err());
+
+        // Composite resource kinds must also retain every executor slot.
+        let external=[wgpu::BindGroupLayoutEntry {binding:0,visibility:stage,ty:wgpu::BindingType::ExternalTexture,count:None}];
+        assert_eq!(stage_resources(&[&external],stage),StageResources {buffers:1,textures:3,samplers:0});
+    }
+
+    #[test]
+    fn stage_limits_count_slots_filter_visibility_and_reject_overflow() {
+        let buffer = |binding, visibility| wgpu::BindGroupLayoutEntry {
+            binding, visibility,
+            ty: wgpu::BindingType::Buffer {ty: wgpu::BufferBindingType::Storage {read_only:true}, has_dynamic_offset:false, min_binding_size:None},
+            count: std::num::NonZeroU32::new(8),
+        };
+        let mut entries = (0..31).map(|i| buffer(i, wgpu::ShaderStages::COMPUTE)).collect::<Vec<_>>();
+        entries.push(buffer(31, wgpu::ShaderStages::FRAGMENT));
+        assert_eq!(stage_resources(&[&entries], wgpu::ShaderStages::COMPUTE).buffers, 31);
+        check_stage_limits("at limit", &[&entries], wgpu::ShaderStages::COMPUTE).unwrap();
+        entries[31].visibility = wgpu::ShaderStages::COMPUTE;
+        assert!(check_stage_limits("overflow", &[&entries], wgpu::ShaderStages::COMPUTE).unwrap_err().to_string().contains("32 buffers"));
+        for (ty, limit) in [(wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), 16),
+            (wgpu::BindingType::Texture {sample_type:wgpu::TextureSampleType::Float {filterable:true}, view_dimension:wgpu::TextureViewDimension::D2, multisampled:false},128)] {
+            let entries = (0..=limit).map(|binding| wgpu::BindGroupLayoutEntry {binding, visibility:wgpu::ShaderStages::COMPUTE, ty, count:None}).collect::<Vec<_>>();
+            check_stage_limits("at limit", &[&entries[..limit as usize]], wgpu::ShaderStages::COMPUTE).unwrap();
+            assert!(check_stage_limits("overflow", &[&entries], wgpu::ShaderStages::COMPUTE).is_err());
+        }
     }
 }

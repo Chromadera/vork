@@ -18,10 +18,10 @@ void cloth_self_refit(uint lane) {
 }
 float3 cloth_self_normal(float3 delta,float3 old_delta,float3 face_normal,bool interior,out float distance) {
  distance=length(delta);float nl=length(face_normal);
- float3 n=distance>1e-8?delta/distance:cloth_unit(old_delta);
+ float3 n=distance>1e-6*(SELF_MARGIN/3)?delta/distance:cloth_unit(old_delta);
  // A plane crossing is a face contact only in the face interior. Beside
  // an edge, crossing the infinite supporting plane is not penetration.
- if(interior&&nl>1e-12) {
+ if(interior&&nl>0) {
   float3 fn=face_normal/nl;
   if(dot(old_delta,fn)*dot(delta,fn)<0){n=dot(old_delta,fn)>0?fn:-fn;distance=dot(delta,n);}
  }
@@ -29,9 +29,10 @@ float3 cloth_self_normal(float3 delta,float3 old_delta,float3 face_normal,bool i
 }
 void cloth_segments(float3 p,float3 q,float3 a,float3 b,out float s,out float t) {
  float3 u=q-p,v=b-a,r=p-a;float x=dot(u,u),y=dot(v,v),uv=dot(u,v),ur=dot(u,r),vr=dot(v,r);
- if(x<1e-16){s=0;t=y>1e-16?saturate(vr/y):0;return;}
- if(y<1e-16){t=0;s=saturate(-ur/x);return;}
- float den=x*y-uv*uv;s=den>1e-16?saturate((uv*vr-ur*y)/den):0;t=(uv*s+vr)/y;
+ float edge_epsilon2=1e-12*(SELF_MARGIN/3)*(SELF_MARGIN/3);
+ if(x<=edge_epsilon2){s=0;t=y>edge_epsilon2?saturate(vr/y):0;return;}
+ if(y<=edge_epsilon2){t=0;s=saturate(-ur/x);return;}
+ float den=x*y-uv*uv;s=den>1e-6*x*y?saturate((uv*vr-ur*y)/den):0;t=(uv*s+vr)/y;
  if(t<0){t=0;s=saturate(-ur/x);}else if(t>1){t=1;s=saturate((uv-ur)/x);}
 }
 void cloth_register(uint i,uint kind,uint4 key,uint4 ids,float4 weights,float4 plane,float3 motion) {
@@ -111,7 +112,7 @@ void cloth_self_generate(uint i) {
     float3 diff=lerp(snapshot_load(pair.x),snapshot_load(pair.y),s)-lerp(snapshot_load(pair.z),snapshot_load(pair.w),t);float distance=length(diff);
     if(distance>=margin||cloth_rest_edges(pair,margin))continue;
     float3 old_diff=lerp(old_load(pair.x),old_load(pair.y),s)-lerp(old_load(pair.z),old_load(pair.w),t);
-    float3 n=distance>1e-8?diff/distance:cloth_unit(old_diff);
+    float3 n=distance>1e-6*(SELF_MARGIN/3)?diff/distance:cloth_unit(old_diff);
     if(dot(diff,old_diff)<0){n=cloth_unit(old_diff);distance=dot(diff,n);}
     cloth_contact_add(i,1,pair,float4(1-s,s,-(1-t),-t),n,margin);
    }
@@ -125,7 +126,7 @@ void cloth_contacts_gauss_seidel() {
   for(uint k=0;k<count;k++) {
    uint slot=i*CONTACT_CAPACITY+k;if(uint(contact_owner_load(slot))!=i)continue;
    uint4 ids=uint4(contact_ids_load(slot));float4 w=contact_weights_load(slot),plane=contact_plane_load(slot);
-   float4 mass=float4(mass_load(ids.x),mass_load(ids.y),mass_load(ids.z),mass_load(ids.w));float den=dot(mass,w*w);if(den<1e-12)continue;
+   float4 mass=float4(mass_load(ids.x),mass_load(ids.y),mass_load(ids.z),mass_load(ids.w));float den=dot(mass,w*w);if(den<=0)continue;
    float3 delta=w.x*cloth_x[ids.x]+w.y*cloth_x[ids.y]+w.z*cloth_x[ids.z]+w.w*cloth_x[ids.w];
    float C=dot(delta,plane.xyz)-plane.w,old=contact_lambda_load(slot),dl=max(-old,-C/den),next=old+dl;
    contact_lambda_store(slot,next);float3 impulse=dl*plane.xyz;
@@ -133,7 +134,9 @@ void cloth_contacts_gauss_seidel() {
     float3 previous=contact_tangent_lambda_load(slot);
     float3 before=w.x*old_load(ids.x)+w.y*old_load(ids.y)+w.z*old_load(ids.z)+w.w*old_load(ids.w);
     float3 travel=delta-before-contact_motion_load(slot);travel-=dot(travel,plane.xyz)*plane.xyz;
-    float3 target=previous-travel/den;float limit=.6*next;target*=min(1.,limit/max(length(target),1e-12));
+    float3 target=previous-travel/den;float limit=.6*next;float magnitude=length(target);
+    if((magnitude==0||!isfinite(magnitude))&&any(target!=float3(0))){float scale=max(abs(target.x),max(abs(target.y),abs(target.z)));magnitude=scale*length(target/scale);}
+    if(magnitude>0)target*=min(1.,limit/magnitude);
     contact_tangent_lambda_store(slot,target);impulse+=target-previous;
    }
    for(uint j=0;j<4;j++)if(abs(w[j])>1e-6&&mass[j]>0)cloth_x[ids[j]]+=mass[j]*w[j]*impulse;

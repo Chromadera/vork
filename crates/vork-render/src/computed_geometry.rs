@@ -153,7 +153,7 @@ impl Mesh {
         let limit = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
         ensure!(
             bytes <= limit && attributes <= limit,
-            "computed geometry needs {bytes} motion bytes and {attributes} attribute bytes; adapter range limit is {limit}"
+            "{}", crate::gpu_memory::limit_message("computed geometry", format_args!("{bytes} motion bytes and {attributes} attribute bytes"), format_args!("{limit} bytes per binding"), "reduce geometry density or point pool size")
         );
         let topology = draw
             .exit_geometry
@@ -165,7 +165,7 @@ impl Mesh {
             for vertex in &topology.vertices[..point_vertices as usize] {words.extend(vertex.NORMAL.into_iter().chain(vertex.TEXCOORD_0).map(f32::to_bits));}
             words
         });
-        if let Some(template)=&point_template {gpu_memory::storage_binding(&limits,"compact point geometry",template.len() as u64*4)?;}
+        if let Some(template)=&point_template {gpu_memory::storage_binding(&limits,"compact point geometry",template.len() as u64*4, "reduce the point pool size")?;}
         // Point normals come from the immutable sphere. They never read triangle
         // adjacency; constructing it would replicate the shape for every point.
         let mut incidents = vec![Vec::new(); if points {0} else {count as usize}];
@@ -255,9 +255,7 @@ impl Mesh {
         }
         ensure!(
             base + 7 + usize::from(identities) + usize::from(historical_attributes) + usize::from(points) <= r.device.limits().max_storage_buffers_per_shader_stage as usize,
-            "computed geometry needs {} storage bindings; adapter supports {}",
-            base + 7 + usize::from(identities) + usize::from(historical_attributes) + usize::from(points),
-            r.device.limits().max_storage_buffers_per_shader_stage
+            "{}", crate::gpu_memory::limit_message("computed geometry", format_args!("{} storage bindings",base+7+usize::from(identities)+usize::from(historical_attributes)+usize::from(points)), format_args!("{} storage bindings",r.device.limits().max_storage_buffers_per_shader_stage), "reduce geometry attribute buffer inputs")
         );
         code.push_str("fn ordered(v:f32)->u32 {let b=bitcast<u32>(v);return select(b^0x80000000u,~b,(b&0x80000000u)!=0u);}\n");
         let position = &g.attributes["POSITION"];

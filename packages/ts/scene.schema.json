@@ -991,7 +991,7 @@
             "string",
             "null"
           ],
-          "x-help": "file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C",
+          "x-help": "file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed; 16-bit integer and floating-point inputs use uncompressed half-float precision, not exact source integer codes; ies: LM-63 Type C",
           "x-help-path": "image.file",
           "x-source": "vork (explicit contract/technique choice)"
         },
@@ -2430,7 +2430,7 @@
               "default": 0.009180432,
               "format": "float",
               "type": "number",
-              "x-help": "number; sun",
+              "x-help": "number; sun full angular diameter in radians; 0 = sharp shadows",
               "x-help-path": "light.angle",
               "x-source": "Blender 5.2.1 SunLight.angle (Add Light default)"
             },
@@ -2627,7 +2627,7 @@
               "default": 1.0,
               "format": "float",
               "type": "number",
-              "x-help": "number; rectangle full side, ellipse diameter; size_y sets the second axis",
+              "x-help": "number; only rectangle or ellipse lights; rectangle full side, ellipse diameter; size_y sets the second axis",
               "x-help-path": "light.size",
               "x-source": "Blender 5.2.1 AreaLight.size (Add Light default)"
             },
@@ -2637,7 +2637,7 @@
                 "number",
                 "null"
               ],
-              "x-help": "number|null; second side/diameter; omitted = size (square/disk)",
+              "x-help": "number|null; only rectangle or ellipse lights; second side/diameter; omitted = size (square/disk)",
               "x-help-path": "light.size_y",
               "x-source": "Blender 5.2.1 AreaLight square/disk sizing"
             },
@@ -3323,7 +3323,8 @@
         }
       ],
       "description": "Output rate: decimal number or reduced rational string (frames per second).",
-      "x-clock": true
+      "x-clock": true,
+      "x-output-rate": true
     },
     "Topology": {
       "oneOf": [
@@ -3394,7 +3395,7 @@
       "type": "string"
     }
   },
-  "$id": "https://raw.githubusercontent.com/voyager-so/vork/v0.5.0/packages/ts/scene.schema.json",
+  "$id": "https://raw.githubusercontent.com/voyager-so/vork/v0.5.1/packages/ts/scene.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -3627,7 +3628,7 @@
     "geometry.topology: triangles|points|curves|implicit; points render as spheres; default triangles",
     "geometry.widths: f32 buffer; diameter per point; curves and points; required",
     "image.color_space: sRGB|Linear Rec.709|Non-Color|null; null: hdr/exr/ies linear, others sRGB; default null",
-    "image.file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C",
+    "image.file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed; 16-bit integer and floating-point inputs use uncompressed half-float precision, not exact source integer codes; ies: LM-63 Type C",
     "image.mag_filter: nearest|linear; default linear",
     "image.min_filter: nearest|linear|nearest_mipmap_nearest|linear_mipmap_nearest|nearest_mipmap_linear|linear_mipmap_linear; default linear_mipmap_linear",
     "image.render: ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA; default null",
@@ -3639,7 +3640,7 @@
     "image.time: number|rational string|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends; default null",
     "image.wrap_s: repeat|clamp_to_edge|mirrored_repeat; default repeat",
     "image.wrap_t: repeat|clamp_to_edge|mirrored_repeat; default repeat",
-    "node.angle (light): number; sun; default 0.009180432",
+    "node.angle (light): number; sun full angular diameter in radians; 0 = sharp shadows; default 0.009180432",
     "node.color (light): RGB",
     "node.energy (light): number|null; sun W/m²; local W; environment multiplier",
     "node.illuminates (light): light-link-tag[]|null; receivers with any tag; null=all; []=none",
@@ -3649,8 +3650,8 @@
     "node.radius (light): number; point/spot emitter radius (shadow softness); default 0",
     "node.shadowed_by (light): light-link-tag[]|null; casters with any tag; null=all; []=none",
     "node.shape (light): sun|point|spot|rectangle|ellipse|environment",
-    "node.size (light): number; rectangle full side, ellipse diameter; size_y sets the second axis; default 1",
-    "node.size_y (light): number|null; second side/diameter; omitted = size (square/disk)",
+    "node.size (light): number; only rectangle or ellipse lights; rectangle full side, ellipse diameter; size_y sets the second axis; default 1",
+    "node.size_y (light): number|null; only rectangle or ellipse lights; second side/diameter; omitted = size (square/disk)",
     "node.spot_blend (light): number; 0..1; default 0.15",
     "node.spot_size (light): number; full cone angle; default 0.7853982",
     "node.temperature (light): number|null; K; multiplies color; not environment",

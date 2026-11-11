@@ -124,6 +124,60 @@ mod tests {
     use vork_scene::v2;
     #[test]
     #[ignore="requires pinned Slang and a real GPU"]
+    fn surface_dense_scalar_vector_publication_and_seek()->Result<()> {
+        let r=Renderer::new()?;
+        for (vector,animated) in [(false,false),(true,false),(false,true),(true,true)] {
+            let (ty,grid,sample,store)=if vector {("vec3","VectorGrid","sample_grid(i.field,float3(0))","float3(q,q*.5,q*.25)")}
+                else {("f32","FloatGrid","float3(sample_grid(i.field,float3(0)))","q")};
+            let mut value=serde_json::json!({"version":2,
+                "buffers":{"field":{"type":ty,"dims":[2,2,2]}},
+                "programs":{
+                    "surface":{"source":format!("import vork;import std.grid;struct Inputs {{{grid} field;float gain=1.;}};Closure surface(ShadingContext c,Inputs i) {{return unlit(({sample})*i.gain);}}")},
+                    "write":{"source":format!("struct Inputs {{}};void compute(ComputeContext c,Inputs i) {{float q=c.dt==0?.75:2.;field_store(c.id.x,{store});}}"),"bindings":{"field":"field"},"dispatch":8,"schedule":"simulation"}},
+                "materials":{"m":{"program":"surface","inputs":{"field":{"grid":"field"}}}},
+                "geometry":{"quad":{"attributes":{"POSITION":{"type":"vec3","data":[[-1,-1,0],[1,-1,0],[1,1,0],[-1,1,0]]}},"indices":{"type":"u32","data":[0,1,2,0,2,3]}}},
+                "nodes":[{"type":"mesh","name":"screen","geometry":"quad","materials":["m"]},{"type":"camera","name":"camera","translation":[0,0,3],"material":{"program":"std/camera","inputs":{"projection":"ortho","ortho_scale":2.2}}}],
+                "render":{"resolution":[32,32],"duration":2,"display":{"program":"std/standard"}},
+                "animation":[{"tracks":[{"path":["materials","m","inputs","gain"],"keys":[[0,1],[1,0.5]]}]}],
+                "simulation":{"t0":0,"dt":0.125,"seed":155,"state":["field","other"],"init":["write"],"steps":["write"]}});
+            // Initial range [0,1]: .75 detects stale cells, 2 detects stale range.
+            value["buffers"]["field"]["data"]=if vector {serde_json::json!([[0,0,0],[1,1,1],[0,0,0],[1,1,1],[0,0,0],[1,1,1],[0,0,0],[1,1,1]])} else {serde_json::json!([0,1,0,1,0,1,0,1])};
+            // Different mutable grids with identical initial bytes must not alias.
+            value["buffers"]["other"]=value["buffers"]["field"].clone();
+            value["programs"]["write"]["bindings"]["other"]=serde_json::json!("other");
+            let write=value["programs"]["write"]["source"].as_str().unwrap().replace(";}",&format!(";q*=.25;other_store(c.id.x,{store});}}"));
+            value["programs"]["write"]["source"]=serde_json::json!(write);
+            value["materials"]["other"]=value["materials"]["m"].clone();
+            value["materials"]["other"]["inputs"]["field"]["grid"]=serde_json::json!("other");
+            value["nodes"][0]["translation"]=serde_json::json!([-0.5,0,0]);
+            value["nodes"][0]["scale"]=serde_json::json!([0.45,0.9,1]);
+            let mut other=value["nodes"][0].clone();
+            other["name"]=serde_json::json!("other");other["translation"]=serde_json::json!([0.5,0,0]);other["materials"]=serde_json::json!(["other"]);
+            value["nodes"].as_array_mut().unwrap().push(other);
+            if !animated {value.as_object_mut().unwrap().remove("animation");}
+            let scene:Scene=vork_scene::v2::from_test_value(value.clone())?;
+            let installed=r.install(scene,Path::new("."))?;
+            assert!(installed.dense.is_some(),"surface-only grids need publication");
+            let mut slot=installed.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+            for (time,q) in [(0.,0.75),(0.125,2.),(0.,0.75)] {
+                slot.submit(&installed,&r,time)?;
+                let actual=slot.collect(&r)?.linear_rgba.unwrap();
+                let mut reference=value.clone();
+                reference.as_object_mut().unwrap().remove("simulation");
+                reference["programs"].as_object_mut().unwrap().remove("write");
+                reference["buffers"]["field"]["data"]=if vector {serde_json::json!(vec![[q,q*0.5,q*0.25];8])} else {serde_json::json!(vec![q;8])};
+                let q=q*0.25;
+                reference["buffers"]["other"]["data"]=if vector {serde_json::json!(vec![[q,q*0.5,q*0.25];8])} else {serde_json::json!(vec![q;8])};
+                let reference=r.install(vork_scene::v2::from_test_value(reference)?,Path::new("."))?;
+                let mut expected=reference.create_frame_slot(&r,crate::ReadbackPrecision::Float)?;
+                expected.submit(&reference,&r,time)?;
+                crate::test_linear::assert_linear_eq(&actual,&expected.collect(&r)?.linear_rgba.unwrap());
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires pinned Slang and a real GPU"]
     fn dense_scalar_vector_publication_and_seek_replay()->Result<()> {
         let r=Renderer::new()?;
         let value=serde_json::json!({"version":2,"render":{"resolution":[32,32],"duration":2,"display":{"program":"std/standard"}},

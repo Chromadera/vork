@@ -37,7 +37,7 @@ impl Persistent {
             words.extend(crate::sampling::sequence_parameters(count));
         }
 
-        ensure!(words.len() as u64*4<=r.device.limits().max_storage_buffer_binding_size.min(r.device.limits().max_buffer_size),"shadow sampling rows exceed the device storage binding limit");
+        ensure!(words.len() as u64*4<=r.device.limits().max_storage_buffer_binding_size.min(r.device.limits().max_buffer_size),"{}", crate::gpu_memory::limit_message("shadow sampling rows", format_args!("{} bytes",words.len() as u64*4), format_args!("{} bytes",r.device.limits().max_storage_buffer_binding_size.min(r.device.limits().max_buffer_size)), "reduce shadow light count"));
         let sequence=init(&r.device,"shadow sampling rows",bytemuck::cast_slice(&words),wgpu::BufferUsages::STORAGE);
         let mut changes=values::LightingTracker::default();
         if s.environment.animated() {changes.changed(values::LightingKey::EnvironmentInputs,&s.environment.sample_key(0.)?);}

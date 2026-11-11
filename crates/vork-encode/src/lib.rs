@@ -8,6 +8,7 @@
     allow(irrefutable_let_patterns)
 )]
 mod constants;
+pub mod gpu_memory;
 mod pipe;
 pub use vork_time::Time;
 use anyhow::{Context, Result, ensure};
@@ -19,10 +20,10 @@ use std::{
 
 /// A frame beyond a working device's limits (not a setup failure).
 #[derive(Debug)]
-pub struct DeviceLimit(pub &'static str);
+pub struct DeviceLimit(pub String);
 impl std::fmt::Display for DeviceLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 impl std::error::Error for DeviceLimit {}
@@ -98,11 +99,17 @@ pub struct Surface {
     returned: std::sync::mpsc::Sender<std::result::Result<Vec<u8>, String>>,
     completed: std::sync::Mutex<std::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>>,
     in_flight: bool,
+    pipe_wait_ms: f64,
     submitted: Option<u64>,
     #[cfg(target_os = "linux")]
     nvidia: Option<nvidia::Surface>,
 }
 impl Surface {
+    /// Host wall time reclaiming the previous pipe payload in the last push.
+    pub fn pipe_wait_ms(&self) -> f64 {
+        self.pipe_wait_ms
+    }
+
     /// Record the portable sink's copy in the frame's command buffer.
     pub fn record_copy(&self, encoder: &mut wgpu::CommandEncoder, source: &wgpu::Texture) {
         if let Some(buffer) = &self.readback {
@@ -452,15 +459,18 @@ mod encoder_capability_tests {
 }
 
 fn validate_device(device: &wgpu::Device, width: u32, height: u32) -> Result<()> {
-    let limits = device.limits();
+    validate_device_limits(&device.limits(), width, height)
+}
+
+fn validate_device_limits(limits: &wgpu::Limits, width: u32, height: u32) -> Result<()> {
     ensure!(
         width <= limits.max_texture_dimension_2d && height <= limits.max_texture_dimension_2d,
-        DeviceLimit("dimensions exceed device limits")
+        DeviceLimit(gpu_memory::limit_message("encoder texture dimensions", format_args!("{width}x{height}"), format_args!("max_texture_dimension_2d={}", limits.max_texture_dimension_2d), "reduce the output resolution or use a GPU with larger texture limits"))
     );
     let padded = (width as u64 * 4).div_ceil(COPY_ROW_ALIGNMENT) * COPY_ROW_ALIGNMENT;
     ensure!(
         padded * height as u64 <= limits.max_buffer_size,
-        DeviceLimit("readback size exceeds device limits")
+        DeviceLimit(gpu_memory::limit_message("encoder readback", format_args!("{} bytes at {width}x{height}", padded * height as u64), format_args!("max_buffer_size={} bytes", limits.max_buffer_size), "reduce the output resolution or use a GPU with a larger buffer limit"))
     );
     Ok(())
 }
@@ -710,27 +720,19 @@ impl Encoder {
             returned,
             completed: std::sync::Mutex::new(completed),
             in_flight: false,
+            pipe_wait_ms: 0.,
             submitted: None,
             #[cfg(target_os = "linux")]
             nvidia,
         })
     }
-    /// Wait for this entry's encoder consumer before the ring reuses it.
+    /// Release native GPU consumers before ring reuse. Portable pipe payloads
+    /// are independent of staging and are reclaimed at the next push.
     pub fn release(&mut self, index: u64, surface: &mut Surface) -> Result<()> {
         ensure!(
             surface.submitted == Some(index),
             "ring entry does not contain frame {index}"
         );
-        if surface.in_flight {
-            surface.pixels = surface
-                .completed
-                .get_mut()
-                .unwrap()
-                .recv()
-                .context("encoder pipe writer stopped")?
-                .map_err(anyhow::Error::msg)?;
-            surface.in_flight = false;
-        }
         #[cfg(target_os = "linux")]
         if let Sink::Nvidia(session) = &mut self.sink {
             session.release(
@@ -794,10 +796,21 @@ impl Encoder {
                 self.next,
             );
         }
-        ensure!(
-            !surface.in_flight,
-            "release the ring entry before reusing its pipe storage"
-        );
+        // The pipe owns packed host pixels, not the staging buffer. Reclaim
+        // them only after the successor render has been submitted, so pipe
+        // backpressure cannot idle the GPU before ring reuse.
+        let wait = std::time::Instant::now();
+        if surface.in_flight {
+            surface.pixels = surface
+                .completed
+                .get_mut()
+                .unwrap()
+                .recv()
+                .context("encoder pipe writer stopped")?
+                .map_err(anyhow::Error::msg)?;
+            surface.in_flight = false;
+        }
+        surface.pipe_wait_ms = wait.elapsed().as_secs_f64() * 1000.;
         let buffer = surface
             .readback
             .as_ref()
@@ -972,5 +985,25 @@ mod native {
         fn drop(&mut self) {
             unsafe { enc_drop(self.0) }
         }
+    }
+}
+
+#[cfg(test)]
+mod device_limit_tests {
+    use super::*;
+    #[test]
+    fn device_refusals_report_demand_limit_and_recovery() {
+        let mut limits = wgpu::Limits::default();
+        limits.max_texture_dimension_2d = 16;
+        limits.max_buffer_size = 256;
+        for (w, h, demand, limit) in [(17, 8, "17x8", "max_texture_dimension_2d=16"), (8, 2, "512 bytes", "max_buffer_size=256")] {
+            let error = validate_device_limits(&limits, w, h).unwrap_err();
+            assert!(error.is::<DeviceLimit>());
+            let message = error.to_string();
+            for expected in [demand, limit, "reduce the output resolution", "vork help limits"] {
+                assert!(message.contains(expected), "{message}");
+            }
+        }
+        validate_device_limits(&limits, 8, 1).unwrap();
     }
 }

@@ -159,7 +159,12 @@ fn accepts(value: &Value, schema: &Value, root: &Value) -> bool {
 fn inspect(value: &Value, schema: &Value, root: &Value, path: &str) -> Result<()> {
     let schema = resolve(schema, root);
     if schema.get("x-clock").and_then(Value::as_bool)==Some(true) {
-        serde_json::from_value::<super::Time>(value.clone()).map_err(|error|anyhow::anyhow!("{path}: {error}"))?;
+        // Output rates cross the i64 ABI; authored clocks retain arbitrary precision.
+        if schema.get("x-output-rate").and_then(Value::as_bool)==Some(true) {
+            serde_json::from_value::<super::Time>(value.clone()).map_err(|error|anyhow::anyhow!("{path}: {error}"))?;
+        } else {
+            serde_json::from_value::<vork_time::Clock>(value.clone()).map_err(|error|anyhow::anyhow!("{path}: {error}"))?;
+        }
     }
     if let Some(variants) = schema.get("enum").and_then(Value::as_array) {
         if !variants.contains(value) {
@@ -306,6 +311,21 @@ pub fn joined(errors: Vec<anyhow::Error>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decimal_timestep_does_not_mask_invalid_field() {
+        let bytes = br#"{"version":2,"nodes":[{"type":"light","shape":"rectangle","size":[0.16,0.22]}],"simulation":{"dt":0.0020833333333333333}}"#;
+        let error = super::super::Scene::from_json(bytes).unwrap_err().to_string();
+        assert!(error.contains("scene.nodes[0].size: expected"), "{error}");
+        assert!(!error.contains("output rate"), "{error}");
+    }
+
+    #[test]
+    fn real_output_rate_overflow_keeps_its_diagnostic() {
+        let bytes = br#"{"version":2,"nodes":[],"render":{"fps":0.0020833333333333333}}"#;
+        let error = super::super::Scene::from_json(bytes).unwrap_err().to_string();
+        assert!(error.contains("output rate denominator exceeds i64 ABI"), "{error}");
+    }
+
     #[test]
     fn obsolete_light_radius_field_is_rejected() {
         let bytes = br#"{"version":2,"nodes":[{"type":"light","shape":"point","shadow_soft_size":0.2}]}"#;

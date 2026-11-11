@@ -2,7 +2,7 @@ use super::*;
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Image {
-    #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "image.file", "x-help" = "file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C"))]
+    #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "image.file", "x-help" = "file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed; 16-bit integer and floating-point inputs use uncompressed half-float precision, not exact source integer codes; ies: LM-63 Type C"))]
     pub file: Option<String>,
     /// Seconds into media; omitted follows scene time. EXR sequences honor
     /// framesPerSecond metadata; other sequences use render.fps.
@@ -130,6 +130,7 @@ impl ImageRender {
             settings: Settings {
                 promotion_denoise: parent.settings.promotion_denoise,
                 bounded_secondary_compilation: parent.settings.bounded_secondary_compilation,
+                approximate_field_boundaries: parent.settings.approximate_field_boundaries,
                 previs: parent.settings.previs,
                 reconstruct: parent.settings.reconstruct,
                 seed: parent.settings.seed,

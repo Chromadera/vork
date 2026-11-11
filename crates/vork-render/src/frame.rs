@@ -153,7 +153,6 @@ pub struct FrameSlot {
     pub(crate) submission: Option<wgpu::SubmissionIndex>,
     /// Scene time of the submitted frame and the work it runs, named when the GPU fails it.
     submitted_time: f32,
-    timing_started: Instant,
     work: std::sync::Arc<str>,
     /// Collect optional named GPU timings and nonfinite diagnostics.
     pub profile: bool,
@@ -215,7 +214,7 @@ pub struct FrameTiming {
     /// Host wall time repacking and queuing CPU denoised output; zero for GPU interop.
     pub denoise_upload_ms: f64,
     pub gpu_ms: f64,
-    /// Counter intervals, or a conservative host envelope when counters are missing.
+    /// Validated GPU counter intervals; invalid counters discard the frame.
     pub timing_source: &'static str,
     /// Bad RGBA evaluations summed across views and exposure samples, diagnostics only.
     pub nonfinite: Option<NonfiniteCounts>,
@@ -746,7 +745,6 @@ impl FrameSlot {
             completed: None,
             submission: None,
             submitted_time: 0.,
-            timing_started: Instant::now(),
             work: s.gpu_work().into(),
             profile: false,
             sample_gpu_ms: Vec::new(),
@@ -912,7 +910,7 @@ impl FrameSlot {
             // Fixed-clock replay streams bounded chunks, including on Vulkan.
             && !s.compute.as_ref().is_some_and(|compute| compute.has_simulation())
 
-            && !view.recording().steps.iter().any(|step| match step.pass {
+            && !view.recording().steps.iter().any(|step| step.needs_interop() || match step.pass {
                 // This external-resource producer remains in plans without captures.
                 crate::graph::Pass::Images => s.graph.views.image_renders().next().is_some(),
                 crate::graph::Pass::Denoise => view.post.denoiser.is_some(),
@@ -928,7 +926,6 @@ impl FrameSlot {
     ) -> Result<()> {
         self.gpu_check(r)?;
         ensure!(!self.pending, "collect this frame slot before resubmitting");
-        self.timing_started = Instant::now();
         ensure!(time.is_finite() && time >= 0., "time must be nonnegative and finite");
         // Resolve once at the nominal exposure time, before selecting recorded
         // spatial work. Sample-time render evaluation must not change this plan.
@@ -1702,7 +1699,7 @@ impl FrameSlot {
         r.errors.check().with_context(|| self.failed_frame())
     }
     fn failed_frame(&self) -> String {
-        format!("GPU failed at or before the frame at {}s; frames run {}", self.submitted_time, self.work)
+        format!("GPU failed at or before the frame at {}s; frames run {}; frame discarded", self.submitted_time, self.work)
     }
     pub fn collect_readback(&mut self, r: &Renderer) -> Result<FrameReadback> {
         // Validate every queued producer before returning any dependent image,
@@ -1734,30 +1731,40 @@ impl FrameSlot {
     fn check_publications(&self, r: &Renderer) -> Result<()> {
         let Some(checks) = &self.publication_checks else {return Ok(());};
         let mut checks = checks.lock().unwrap();
-        for (submission,buffers) in checks.drain(..) {
-            r.wait(Some(submission))?;
-            for (kind,buffer) in buffers {
-                let (tx,rx)=mpsc::channel();
-                buffer.map_async(wgpu::MapMode::Read,..,move |result| {let _=tx.send(result);});
-                r.wait(None)?;rx.recv()??;
-                let mapped=buffer.get_mapped_range(..);
-                let code=u32::from_le_bytes(mapped[..4].try_into().unwrap());
-                drop(mapped);buffer.unmap();
-                if code!=0 {
-                    let solver=matches!(&kind,crate::graph::PublicationDiagnostic::SolverStatus(_));
-                    let reason=match kind {
-                        crate::graph::PublicationDiagnostic::Code(kind)=>format!("{kind} diagnostic {code}"),
-                        crate::graph::PublicationDiagnostic::ComputedGeometry=>computed_geometry::validation_message(code).to_owned(),
-                        crate::graph::PublicationDiagnostic::PointDisplacement=>format!("point displacement diagnostic {code}"),
-                        crate::graph::PublicationDiagnostic::SolverStatus(message)=>format!("{message} (reported value: {code})"),
-                    };
-                    let message=format!("frame publication invalidated by {reason}; reinstall the scene");
-                    self.publication_error.get_or_init(||message.clone());
-                    return Err(if solver {anyhow::anyhow!(message).context(crate::failure::FailureKind::Scene)} else {anyhow::anyhow!(message)});
-                }
+        // Register every map before waiting. Concurrent submitters can append
+        // receipts out of queue order, so the last receipt is not a covering fence.
+        let mut pending = Vec::new();
+        let mut submissions = Vec::new();
+        for (submission, buffers) in checks.drain(..) {
+            submissions.push(submission);
+            for (kind, buffer) in buffers {
+                let (tx, rx) = mpsc::channel();
+                buffer.map_async(wgpu::MapMode::Read, .., move |result| { let _ = tx.send(result); });
+                pending.push((kind, buffer, rx));
             }
         }
-        Ok(())
+        wait_publication_submissions(submissions, |submission| r.wait(Some(submission)))?;
+        // Decode and unmap every receipt before reporting an invalid publication.
+        let mut failure = None;
+        for (kind, buffer, rx) in pending {
+            rx.recv()??;
+            let mapped=buffer.get_mapped_range(..);
+            let code=u32::from_le_bytes(mapped[..4].try_into().unwrap());
+            drop(mapped);buffer.unmap();
+            if code!=0 {
+                let solver=matches!(&kind,crate::graph::PublicationDiagnostic::SolverStatus(_));
+                let reason=match kind {
+                    crate::graph::PublicationDiagnostic::Code(kind)=>format!("{kind} diagnostic {code}"),
+                    crate::graph::PublicationDiagnostic::ComputedGeometry=>computed_geometry::validation_message(code).to_owned(),
+                    crate::graph::PublicationDiagnostic::PointDisplacement=>format!("point displacement diagnostic {code}"),
+                    crate::graph::PublicationDiagnostic::SolverStatus(message)=>format!("{message} (reported value: {code})"),
+                };
+                let message=format!("frame publication invalidated by {reason}; reinstall the scene");
+                self.publication_error.get_or_init(||message.clone());
+                failure.get_or_insert_with(|| if solver {anyhow::anyhow!(message).context(crate::failure::FailureKind::Scene)} else {anyhow::anyhow!(message)});
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
     fn collect_readback_inner(&mut self, r: &Renderer) -> Result<FrameReadback> {
         self.gpu_check(r)?;
@@ -1790,6 +1797,7 @@ impl FrameSlot {
         // Recycle only this slot; later submissions remain in flight.
         r.wait(self.submission.take())
             .and_then(|_| rx.into_iter().try_for_each(|mapped| mapped.map_err(anyhow::Error::from)))
+            .map_err(crate::failure::device)
             .with_context(|| self.failed_frame())?;
         self.flight_ownership.complete();
         let read = |buffer: &wgpu::Buffer| {
@@ -1810,7 +1818,10 @@ impl FrameSlot {
             }
             counts
         });
-        let exposure = self.exposure_report.read(u64::from(self.view.width) * u64::from(self.view.height));
+        let (exposure, exposure_validity) = match self.exposure_report.read(u64::from(self.view.width) * u64::from(self.view.height)) {
+            Ok(exposure) => (exposure, Ok(())),
+            Err(error) => (None, Err(error)),
+        };
         let environment_invalid=self.environment_diagnostics.as_ref().is_some_and(|v|read(&v.readback)[0][0]!=0);
         let placement_errors=self.compute.as_ref().map(|c|read(&c.error_readback)).and_then(|p|p.first().copied()).map_or(0,|p|p[0]);
         let probe_pages=if let Some((source,status))=&self.probe_feedback {
@@ -1910,9 +1921,7 @@ impl FrameSlot {
             }
             fail(self);
             ensure!(exhausted_fragments == 0,
-                "transparent fragments need {exhausted_fragments} records per merge batch, beyond the device storage binding limit ({} bytes); \
-                 reduce the resolution or the transparent surfaces that overlap at a pixel",
-                r.device.limits().max_storage_buffer_binding_size.min(r.device.limits().max_buffer_size));
+                "{}", crate::gpu_memory::limit_message("transparent fragments", format_args!("{exhausted_fragments} records per merge batch ({} bytes per record)",vork_slang::registry::FRAGMENT_RECORD_WORDS*4), format_args!("{} bytes",r.device.limits().max_storage_buffer_binding_size.min(r.device.limits().max_buffer_size)), "reduce resolution or transparent surfaces overlapping at a pixel"));
             return Err(FrameRedo(Reservations { probe_pages, visibility_pool, transparent_fragments, shading_evaluations, ..Default::default() }).into());
         }
         if exhausted != 0 {
@@ -1935,7 +1944,7 @@ impl FrameSlot {
                 let names=ids.iter().filter_map(|&id|self.boundary_names.get(id as usize)).cloned().collect::<Vec<_>>().join(", ");
                 let bytes=self.materials.as_ref().map_or(0,|m|m.shader_errors.size());
                 let limits=r.device.limits();
-                anyhow::bail!("dielectric interior spill arena exhausted ({bytes} bytes, device memory {} bytes, max_storage_buffer_binding_size {} bytes, max_buffer_size {} bytes); active glass examples: {names}; frame refused without an image",r.device_memory,limits.max_storage_buffer_binding_size,limits.max_buffer_size);
+                anyhow::bail!("{}", crate::gpu_memory::limit_message(format_args!("dielectric interior spill arena; active glass examples: {names}"), format_args!("more than the allocated {bytes} bytes"), format_args!("device memory={} bytes, max_storage_buffer_binding_size={} bytes, max_buffer_size={} bytes",r.device_memory,limits.max_storage_buffer_binding_size,limits.max_buffer_size), "reduce overlapping glass geometry or resolution"));
             }
             if count == vork_slang::registry::GEOMETRY_NONFINITE {anyhow::bail!("geometry prefix on object {capacity} produced nonfinite geometry; make displacement positions and shading frames finite");}
             if count == vork_slang::registry::IMPLICIT_INVALID { anyhow::bail!("implicit grid has a nonfinite sample, constant-zero cell or singular zero gradient (object {capacity})"); }
@@ -1964,21 +1973,6 @@ impl FrameSlot {
             if count == vork_slang::registry::PATH_MEDIUM_DIVERGENT {anyhow::bail!("unbounded medium emission has no proven finite integral: a constant zero-extinction channel diverges; varying emission without asymptotic closure is unsupported; use a finite mesh boundary");}
             anyhow::bail!("unrecognized shader diagnostic code {count} (detail {capacity})");
         }
-        let readback = if self.read_pixels {
-            Some(std::sync::Arc::new(ReadbackLease {
-                neutral_motion: self.propagation_motion,
-                buffer: self.ring.readback.clone(),
-                mapping: Default::default(),
-                pixel_count: self.view.width as usize * self.view.height as usize,
-                outputs: self.view.readback_outputs,
-                has_catchers: self.view.has_catchers,
-                aovs: self.view.aovs.clone(),
-                aov_base: if self.view.float_output {constants::FLOAT_OUTPUT_PLANES as usize} else {constants::PACKED_OUTPUT_PLANES as usize},
-                display_base: self.view.post.display_base.map(|b| b as usize),
-            }))
-        } else {
-            None
-        };
         let mapped = self.query_readback.get_mapped_range(..);
         let mut gpu_spans_ms: Vec<_> = constants::GPU_SPANS
             .iter()
@@ -2024,22 +2018,36 @@ impl FrameSlot {
             Ok(())
         })();
         drop(mapped);
+        // Some drivers report a reset only on the next submission, after the
+        // old fence/map succeeded. Probe without draining later frame slots.
+        crate::command_finish::Segments::flush(&r.queue);
+        // Native queue submission already performs nonblocking maintenance and
+        // delivers its errors synchronously; another poll repeats that work.
+        let validity = r.errors.frame_complete(timings.and(exposure_validity));
+        if let Err(error) = validity {
+            fail(self);
+            return Err(error.context(self.failed_frame()));
+        }
         self.query_readback.unmap();
         self.flight_ownership.retire();
         self.pending = false;
-        let timing_source = if let Err(error) = timings {
-            // Starts before any exposure work is submitted and ends after its
-            // final fence and readback. Includes CPU recording and queue waits.
-            let (envelope, _) = timing::measured_or_wall(0, 0, r.queue.get_timestamp_period(), self.timing_started.elapsed().as_secs_f64() * 1000.);
-            eprintln!("timing fallback: submission_wall_upper_bound_ms={envelope:.6}; {error:#}");
-            // No attribution is possible. Do not retain partial span totals or
-            // divide an upper bound among samples: each sample may cost it all.
-            gpu_spans_ms.clear();
-            gpu_spans_ms.push(("submission wall upper bound", envelope));
-            sample_gpu_ms.fill(envelope);
-            "submission_wall_upper_bound"
-        } else { "gpu_timestamp" };
         self.sample_gpu_ms = sample_gpu_ms;
+        let timing_source = "gpu_timestamp";
+        let readback = if self.read_pixels {
+            Some(std::sync::Arc::new(ReadbackLease {
+                neutral_motion: self.propagation_motion,
+                buffer: self.ring.readback.clone(),
+                mapping: Default::default(),
+                pixel_count: self.view.width as usize * self.view.height as usize,
+                outputs: self.view.readback_outputs,
+                has_catchers: self.view.has_catchers,
+                aovs: self.view.aovs.clone(),
+                aov_base: if self.view.float_output {constants::FLOAT_OUTPUT_PLANES as usize} else {constants::PACKED_OUTPUT_PLANES as usize},
+                display_base: self.view.post.display_base.map(|b| b as usize),
+            }))
+        } else {
+            None
+        };
         self.gpu_check(r)?;
         // A rejected exposure must not persist partially evaluated compute state.
         if let Some(checkpoint) = self.simulation_checkpoint.take() { checkpoint.publish(); }
@@ -2060,7 +2068,7 @@ impl FrameSlot {
                 denoise_upload_ms: self.denoise_ms.upload_ms,
                 timing_source,
                 gpu_ms: gpu_spans_ms.iter().map(|(_, ms)| ms).sum(),
-                gpu_elapsed_ms: if timing_source == "gpu_timestamp" { timing::elapsed_ms(gpu_begin, gpu_end, r.queue.get_timestamp_period()).unwrap_or(0.) } else { self.sample_gpu_ms.first().copied().unwrap_or(0.) },
+                gpu_elapsed_ms: timing::elapsed_ms(gpu_begin, gpu_end, r.queue.get_timestamp_period()).unwrap_or(0.),
                 gpu_spans_ms,
                 nonfinite,
                 terminated_medium_paths: shader_diagnostics.as_ref().map_or(0, |words| {
@@ -2166,6 +2174,46 @@ mod profiling_tests {
         drop(data);readback.unmap();Ok(())
     }
 
+    #[test]
+    fn collection_submits_only_the_post_map_loss_probe() -> Result<()> {
+        let Some(renderer) = crate::test_renderer()? else { return Ok(()); };
+        let scene = vork_scene::v2::from_test_value(serde_json::json!({
+            "version": 2, "render": {"resolution": [16, 16],
+                "background": [0.2, 0.3, 0.4],
+                "settings": {"integrator": "path", "samples": 1, "denoiser": null}},
+            "nodes": [{"type": "camera"}]
+        }))?;
+        let installed = renderer.install(scene, Path::new("."))?;
+        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
+        // Multiple producers and receipts exercise the publication path as well
+        // as ordinary collection, with and without CPU pixel readback.
+        for receipts in [0, 1, 4] {
+            if receipts == 4 { frame.submit_gpu(&installed, &renderer, 0.)?; }
+            else { frame.submit(&installed, &renderer, 0.)?; }
+            let checks: crate::graph::PublicationChecks = Default::default();
+            for _ in 0..receipts {
+                let mut buffers = Vec::new();
+                for _ in 0..3 {
+                    let buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("publication count receipt"), size: 4,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    });
+                    renderer.queue.write_buffer(&buffer, 0, &0u32.to_le_bytes());
+                    buffers.push((crate::graph::PublicationDiagnostic::Code("test"), buffer));
+                }
+                let submission = crate::command_finish::Segments::flush(&renderer.queue);
+                checks.lock().unwrap().push((submission, buffers));
+            }
+            frame.publication_checks = Some(checks);
+            let before = crate::command_finish::submission_count();
+            frame.collect(&renderer)?;
+            assert_eq!(crate::command_finish::submission_count() - before, 1,
+                "collection must submit one loss probe regardless of receipt count");
+        }
+        Ok(())
+    }
+
     /// wgpu panicked ("Error in Device::poll: Parent device is lost") when a GPU
     /// timeout or fault lost the device mid-frame (Metal watchdog, NVIDIA Xid 109).
     #[test]
@@ -2226,40 +2274,57 @@ mod profiling_tests {
         Ok(())
     }
 
+    /// Runs on lavapipe too: no watchdog/reset or physical GPU is required.
     #[test]
-    #[ignore = "requires real GPU and pinned Slang"]
-    fn missing_timestamps_complete_with_conservative_wall_timing() -> Result<()> {
-        let Some(renderer) = crate::test_renderer()? else { return Ok(()); };
-        let mut input = vork_scene::v2::with_test_settings(
-            include_str!("../tests/fixtures/analytic.json"),
-            include_str!("../tests/presets/analytic-7fefd52a.json"))?;
-        input["render"]["resolution"] = serde_json::json!([32,24]);
-        input["render"]["settings"]["samples"] = 1.into();
-        vork_scene::v2::replace_integrator(&mut input, serde_json::json!({"integrator":"path","denoiser":null}));
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
-        let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
-        frame.profile = true;
-        frame.submit(&installed, &renderer, 0.)?;
-        let expected = frame.collect(&renderer)?.linear_rgba.unwrap();
-        for end_only in [true, false] {
+    fn missing_timestamps_discard_frame() -> Result<()> {
+        for fault in [0, 1, 2, 3] {
+            let Some(renderer) = crate::test_renderer()? else { return Ok(()); };
+            let mut input = vork_scene::v2::with_test_settings(
+                include_str!("../tests/fixtures/analytic.json"),
+                include_str!("../tests/presets/analytic-7fefd52a.json"))?;
+            input["render"]["resolution"] = serde_json::json!([32,24]);
+            input["render"]["settings"]["samples"] = 1.into();
+            vork_scene::v2::replace_integrator(&mut input, serde_json::json!({"integrator":"path","denoiser":null}));
+            // Self-contained fixture retained from fix/wintdr-readback so this
+            // regression also runs as a standalone GPU test executable.
+            let base = std::env::temp_dir().join(format!("vork-timestamp-readback-{}-{fault}", std::process::id()));
+            std::fs::create_dir_all(&base)?;
+            std::fs::write(base.join("geometry.bin"), include_bytes!("../tests/fixtures/geometry.bin"))?;
+            let installed = renderer.install(vork_scene::v2::from_test_value(input)?, &base)?;
+            let mut frame = installed.create_frame_slot(&renderer, crate::ReadbackPrecision::Float)?;
+            frame.profile = true;
             frame.submit(&installed, &renderer, 0.)?;
-            // Inject a missing endpoint after the real query copy, preserving
-            // the ordinary final-fence/map/collection path and rendered image.
-            let mut encoder = renderer.device.create_command_encoder(&Default::default());
-            let offset = timing::resolve_offset(0, timing::sample_query());
-            encoder.clear_buffer(&frame.query_readback, offset + if end_only { 8 } else { 0 }, Some(if end_only { 8 } else { 16 }));
-            frame.submission = Some(renderer.queue.submit([encoder.finish()]));
-            let pixels = frame.collect(&renderer)?;
-            crate::test_linear::assert_linear_eq(pixels.linear_rgba.as_ref().unwrap(),&expected);
+            let valid = frame.collect(&renderer)?;
+            assert!(valid.linear_rgba.as_ref().unwrap().iter().any(|pixel| pixel[3] > 0.));
+            assert!(valid.exposure.is_some_and(|exposure| exposure.coverage > 0.));
             if let Ok(out) = std::env::var("VORK_TEST_FRAME_OUT") {
                 std::fs::create_dir_all(&out)?;
-                image::save_buffer(std::path::Path::new(&out).join(format!("missing-counter-{end_only}.png")), &pixels.rgba, 32, 24, image::ColorType::Rgba8)?;
+                image::save_buffer(Path::new(&out).join(format!("valid-before-fault-{fault}.png")), &valid.rgba, 32, 24, image::ColorType::Rgba8)?;
             }
-            assert_eq!(pixels.timing.timing_source, "submission_wall_upper_bound");
-            assert!(pixels.timing.gpu_elapsed_ms > 0.);
-            assert_eq!(frame.sample_gpu_ms, vec![pixels.timing.gpu_elapsed_ms]);
-            assert_eq!(pixels.timing.gpu_spans_ms, vec![("submission wall upper bound", pixels.timing.gpu_elapsed_ms)]);
+            frame.submit(&installed, &renderer, 0.)?;
+            // Simulate successful map/fence but unwritten queries and zero image,
+            // as observed after Windows TDR. No loss callback is injected.
+            let mut encoder = renderer.device.create_command_encoder(&Default::default());
+            let offset = timing::resolve_offset(0, timing::sample_query());
+            if fault == 3 {
+                encoder.clear_buffer(&frame.query_readback, 0, None);
+            } else if fault < 2 {
+                encoder.clear_buffer(&frame.query_readback, offset + if fault == 1 { 8 } else { 0 }, Some(if fault == 1 { 8 } else { 16 }));
+            }
+            encoder.clear_buffer(&frame.ring.readback, 0, None);
+            if fault >= 2 {
+                encoder.clear_buffer(frame.exposure_report.pending().unwrap(), 0, None);
+            }
+            frame.submission = Some(renderer.queue.submit([encoder.finish()]));
+            let error = frame.collect(&renderer).err().context("corrupt frame was published")?;
+            assert_eq!(crate::failure::exit_code(&error), 4);
+            let message = format!("{error:#}");
+            assert!(message.contains("GPU device lost") && message.contains("frame discarded"), "{message}");
+            assert!(message.contains(if fault == 2 { "incomplete GPU exposure readback" } else { "invalid GPU" }), "{message}");
+            assert!(!frame.pending);
+            assert!(frame.publication_error.get().is_some());
+            assert!(frame.submit(&installed, &renderer, 0.).is_err(), "suspect device accepted a successor");
+            std::fs::remove_dir_all(base)?;
         }
         Ok(())
     }
@@ -2582,4 +2647,40 @@ fn dielectric_arena_exhaustion_replays_before_publishing() -> Result<()> {
         for p in pixels {for c in 0..3 {assert!((p[c]-[0.4,0.6,0.8][c]).abs()<0.004,"replayed interior transport: {p:?}");}}
     }
     Ok(())
+}
+
+// Receipt append order need not match queue order across frame slots.
+fn wait_publication_submissions<T>(submissions: Vec<T>, mut wait: impl FnMut(T) -> Result<()>) -> Result<()> {
+    for submission in submissions { wait(submission)?; }
+    Ok(())
+}
+
+#[cfg(test)]
+mod publication_wait_tests {
+    use super::wait_publication_submissions;
+    #[test]
+    fn concurrent_submitters_publish_receipts_in_reverse_queue_order() {
+        let receipts = std::sync::Mutex::new(Vec::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let receipts = &receipts;
+            scope.spawn(move || {
+                // Submission 1 pauses before publishing its receipt.
+                rx.recv().unwrap();
+                receipts.lock().unwrap().push(1);
+            });
+            scope.spawn(|| {
+                receipts.lock().unwrap().push(2);
+                tx.send(()).unwrap();
+            });
+        });
+        let receipts = receipts.into_inner().unwrap();
+        assert_eq!(receipts, [2, 1]);
+        let mut completed = 0;
+        wait_publication_submissions(receipts, |index| {
+            completed = completed.max(index);
+            Ok(())
+        }).unwrap();
+        assert_eq!(completed, 2, "all mapped receipts must be covered before receiving callbacks");
+    }
 }

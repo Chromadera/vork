@@ -125,8 +125,8 @@ cargo +1.96 test --workspace --locked
 ```
 
 The public workspace tests use shipped synthetic fixtures and the bundled
-Liberation Sans font (SIL OFL 1.1, including copyright and licence in
-crates/vork-std/tests/fonts/OFL.txt). No additional asset downloads are needed.
+Liberation Sans and Noto Sans Arabic/Devanagari fonts (SIL OFL 1.1; licences in
+crates/vork-{std,text}/tests/fonts/OFL.txt). No additional asset downloads are needed.
 Corpus-dependent tests requiring unshipped assets are excluded from the public
 source and are not part of its coverage.
 

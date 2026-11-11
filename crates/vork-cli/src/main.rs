@@ -5,6 +5,7 @@ macro_rules! output {
     ($($arg:tt)*) => { crate::output::line(format_args!($($arg)*))? };
 }
 mod output;
+mod update_notice;
 
 mod constants;
 mod init;
@@ -155,7 +156,10 @@ fn channel(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 fn main() -> std::process::ExitCode {
-    match run() {
+    if update_notice::worker_entry() { return std::process::ExitCode::SUCCESS; }
+    let result = run();
+    update_notice::after_command();
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) if output::broken_pipe(&error) => std::process::ExitCode::SUCCESS,
         Err(error) => {

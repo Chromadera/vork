@@ -49,7 +49,7 @@ geometry.subdivision.use_limit_surface: bool; default true; JSON shape: boolean
 geometry.topology: triangles|points|curves|implicit; points render as spheres; default triangles; JSON shape: "triangles"|"points"|"curves"|"implicit"
 geometry.widths: f32 buffer; diameter per point; curves and points; required; JSON shape: string|Buffer object|null
 image.color_space: sRGB|Linear Rec.709|Non-Color|null; null: hdr/exr/ies linear, others sRGB; default null; JSON shape: "sRGB"|"Linear Rec.709"|"Non-Color"|null
-image.file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C; JSON shape: string|null
+image.file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed; 16-bit integer and floating-point inputs use uncompressed half-float precision, not exact source integer codes; ies: LM-63 Type C; JSON shape: string|null
 image.mag_filter: nearest|linear; default linear; JSON shape: "nearest"|"linear"
 image.min_filter: nearest|linear|nearest_mipmap_nearest|linear_mipmap_nearest|nearest_mipmap_linear|linear_mipmap_linear; default linear_mipmap_linear; JSON shape: "nearest"|"linear"|"nearest_mipmap_nearest"|"linear_mipmap_nearest"|"nearest_mipmap_linear"|"linear_mipmap_linear"
 image.render: ImageRender; renders a camera view into the texture; inherits integrator, fps, AOVs; sampling budget follows quality/cost level; closed shutter; scene-linear premultiplied RGBA; default null; JSON shape: ImageRender object|null
@@ -61,7 +61,7 @@ image.render.root: node-name|null; only this subtree draws and is lit; objects o
 image.time: number|rational string|null; seconds from first displayed frame; null follows scene time; animatable; subframes hold; out-of-range holds ends; default null; JSON shape: number|string|null
 image.wrap_s: repeat|clamp_to_edge|mirrored_repeat; default repeat; JSON shape: "repeat"|"clamp_to_edge"|"mirrored_repeat"
 image.wrap_t: repeat|clamp_to_edge|mirrored_repeat; default repeat; JSON shape: "repeat"|"clamp_to_edge"|"mirrored_repeat"
-node.angle (light): number; sun; default 0.009180432; JSON shape: number
+node.angle (light): number; sun full angular diameter in radians; 0 = sharp shadows; default 0.009180432; JSON shape: number
 node.color (light): RGB; JSON shape: [number, number, number]|null
 node.energy (light): number|null; sun W/m²; local W; environment multiplier; JSON shape: number|null
 node.illuminates (light): light-link-tag[]|null; receivers with any tag; null=all; []=none; JSON shape: string[]|null
@@ -71,8 +71,8 @@ node.medium (light): material-name|inline material|null; environment only; autho
 node.radius (light): number; point/spot emitter radius (shadow softness); default 0; JSON shape: number
 node.shadowed_by (light): light-link-tag[]|null; casters with any tag; null=all; []=none; JSON shape: string[]|null
 node.shape (light): sun|point|spot|rectangle|ellipse|environment; JSON shape: "sun"|"point"|"spot"|"rectangle"|"ellipse"|"environment"
-node.size (light): number; rectangle full side, ellipse diameter; size_y sets the second axis; default 1; JSON shape: number
-node.size_y (light): number|null; second side/diameter; omitted = size (square/disk); JSON shape: number|null
+node.size (light): number; only rectangle or ellipse lights; rectangle full side, ellipse diameter; size_y sets the second axis; default 1; JSON shape: number
+node.size_y (light): number|null; only rectangle or ellipse lights; second side/diameter; omitted = size (square/disk); JSON shape: number|null
 node.spot_blend (light): number; 0..1; default 0.15; JSON shape: number
 node.spot_size (light): number; full cone angle; default 0.7853982; JSON shape: number
 node.temperature (light): number|null; K; multiplies color; not environment; JSON shape: number|null

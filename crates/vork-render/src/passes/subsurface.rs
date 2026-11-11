@@ -106,7 +106,7 @@ impl Resources {
         // dispatches. Camera and refraction receivers reuse the same scratch.
         let sums=u64::from(vork_slang::renderer_registry::REG_SUBSURFACE_ACCUMULATION_WORDS);
         let bytes=if ranges.len()>1 {records.size()/if receiver.is_some() {2} else {1}/u64::from(constants::VISIBILITY_DIFFUSION_WORDS)*sums} else {sums*4};
-        gpu_memory::storage_binding(&d.limits(),"diffusion accumulation",bytes)?;
+        gpu_memory::storage_binding(&d.limits(),"diffusion accumulation",bytes, "reduce resolution or choose --profile std/draft for a lower sample budget")?;
         let accumulation=s.transients.buffer(d,"diffusion accumulation",bytes,wgpu::BufferUsages::STORAGE);
         let dispatch = |offset, color: &wgpu::TextureView, ambient: &wgpu::TextureView| {
             ranges.iter().enumerate().map(|(index,_)| {

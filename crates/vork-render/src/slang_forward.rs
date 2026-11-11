@@ -46,7 +46,15 @@ pub(crate) struct SlangScene {
     pub(crate) denoise: bool,
     pub(crate) field_controls: bool,
     pub(crate) bounded_secondary_compilation: bool,
+    pub(crate) approximate_field_boundaries: bool,
     pub(crate) medium: Option<Arc<crate::medium::Native>>,
+}
+
+impl SlangScene {
+    /// Owning-cell admission only changes kernels that can encounter implicit fields.
+    pub(crate) fn approximate_field_admission(&self) -> bool {
+        self.field_controls && self.approximate_field_boundaries
+    }
 }
 
 pub(crate) struct SlangForward {
@@ -221,6 +229,9 @@ impl SlangForward {
         let programs=primary.or(all_programs);
         let path_medium=self.scene.medium.as_ref().filter(|_|matches!(kernel,Some(ProgramKernel::Path {media:Some(_),..})));
         let mut kernel_defines=vec![format!("-DVORK_AOV_COUNT={}",self.scene.aov_count),format!("-DVORK_SHADOW_CAPACITY={}",self.scene.shadow_capacity)];
+        if self.scene.approximate_field_admission() && !matches!(kernel,Some(ProgramKernel::Path {..})) {
+            kernel_defines.push("-DVORK_APPROXIMATE_FIELD_ADMISSION".into());
+        }
         if self.scene.program_trace {kernel_defines.push("-DVORK_PROGRAM_TRACE".into());}
         if self.scene.program_trace && main=="program_depth" && entry.0=="masked_fs" {
             kernel_defines.push("-DVORK_RAY_BINDING_GROUP=4".into());

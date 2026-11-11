@@ -146,7 +146,7 @@ impl ViewState {
         let [iw, ih] = internal;
         ensure!(
             w <= d.limits().max_texture_dimension_2d && h <= d.limits().max_texture_dimension_2d,
-            "render resolution exceeds device limits"
+            "{}", crate::gpu_memory::limit_message("render resolution", format_args!("{w}x{h} pixels"), format_args!("max_texture_dimension_2d={} pixels per axis",d.limits().max_texture_dimension_2d), "reduce render.resolution")
         );
         let float_output = precision == ReadbackPrecision::Float;
         let aov_base = if float_output {
@@ -187,18 +187,15 @@ impl ViewState {
             ensure!(
                 bytes <= d.limits().max_storage_buffer_binding_size
                     && bytes <= d.limits().max_buffer_size,
-                "render.aovs: {} declared; {name} needs {bytes} bytes; device max_storage_buffer_binding_size is {} bytes and max_buffer_size is {} bytes",
-                s.render.aovs.len(),
-                d.limits().max_storage_buffer_binding_size,
-                d.limits().max_buffer_size
+                "{}", crate::gpu_memory::limit_message(format_args!("render.aovs: {} declared; {name}",s.render.aovs.len()), format_args!("{bytes} bytes at {w}x{h}"), format_args!("max_storage_buffer_binding_size={} bytes, max_buffer_size={} bytes",d.limits().max_storage_buffer_binding_size,d.limits().max_buffer_size), "reduce resolution or the number of render.aovs")
             );
         }
         if s.pipelines.denoise && view_graph.runs(Pass::Denoise) {
             let guide_bytes = pixels * 32;
             ensure!(guide_bytes <= d.limits().max_storage_buffer_binding_size && guide_bytes <= d.limits().max_buffer_size,
-                "OIDN guides need {guide_bytes} bytes; exceeds device storage binding or buffer limit");
+                "{}", crate::gpu_memory::limit_message("OIDN guides", format_args!("{guide_bytes} bytes"), format_args!("storage binding={} bytes, buffer={} bytes",d.limits().max_storage_buffer_binding_size,d.limits().max_buffer_size), "reduce resolution or disable denoising with --set denoise=false"));
             ensure!(pixels * 48 <= d.limits().max_buffer_size,
-                "OIDN staging needs {} bytes; exceeds device buffer limit", pixels * 48);
+                "{}", crate::gpu_memory::limit_message("OIDN staging", format_args!("{} bytes",pixels*48), format_args!("max_buffer_size={} bytes",d.limits().max_buffer_size), "reduce resolution or disable denoising with --set denoise=false"));
         }
         let uniform = crate::gpu_memory::buffer(&d, &wgpu::BufferDescriptor {
             label: Some(&label),
@@ -895,7 +892,7 @@ fn light_grid(
 ) -> Result<([u32; 3], u32, u64)> {
     ensure!(
         u64::from(stride) * 4 <= max_bytes,
-        "one cluster light list exceeds the device storage limit"
+        "{}", crate::gpu_memory::limit_message("one cluster light list", format_args!("{} bytes",u64::from(stride)*4), format_args!("{max_bytes} bytes"), "reduce light count")
     );
     let mut tile = constants::CLUSTER_TILE_PIXELS;
     let mut slices = constants::CLUSTER_DEPTH_SLICES;

@@ -1,5 +1,11 @@
 MATERIALS
 Use std/openpbr (the default) for constant, image and named attribute inputs.
+Mesh Node.instances takes custom attribute columns in instances.attributes;
+a material reads a column with {"attribute": name}. Two instances with different colours:
+{"type":"mesh","geometry":{"std":"sphere"},
+ "instances":{"attributes":{"TRANSLATION":{"type":"vec3","data":[[0,0,0],[2,0,0]]},
+                            "tint":{"type":"vec3","data":[[1,0,0],[0,0,1]]}}},
+ "materials":[{"inputs":{"base_color":{"attribute":"tint"}}}]}
 These are data materials: they share the shipped evaluator and add no surface
 code to the scene kernel. Use a surface program for custom logic, such as
 procedural patterns, transformed texture sampling, or layered closures. Merely
@@ -13,10 +19,15 @@ and RGB for colour. Custom factors, channels and UV transforms need a program.
 For glass panes use transmission_weight: 1 and geometry_thin_walled: true.
 Use transmission_color for glass tint and subsurface_color for scattering colour.
 Use std/path when refraction or indirect lighting is important.
-In std/previs, a used std/openpbr material with geometry_opacity < 1 or
-alpha_cutoff >= 0 switches the whole view to path transport and can substantially
-increase render time. Bindings or animation of either input also trigger this.
-See vork help profiles for preview alternatives.
+In std/previs, scalar std/openpbr geometry_opacity and alpha_cutoff use each
+material's raster coverage, retaining direct lighting and visible emission. Fractional
+coverage is sampled and can look grainy at the preview sample budget. Bindings
+or animation of either input, and opacity combined with transmission, retain
+whole-view path transport until qualified. Other effects can also require path
+transport. The sample budget and denoise setting stay unchanged.
+Raster previs uses analytic lights and environment approximations. Emissive
+meshes stay visible, but light they cast on other objects needs std/draft,
+std/final or std/path; the former alpha-triggered path view included that light.
 <!-- all -->
 MATERIAL REFERENCE
 Solid glass requires closed mesh boundaries; model hollow vessels with a shell.

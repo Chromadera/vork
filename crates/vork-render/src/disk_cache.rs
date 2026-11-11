@@ -208,7 +208,14 @@ pub(crate) fn wait_persistence() -> anyhow::Result<()> {
 
 /// Writers and eviction share a persistent advisory lock across processes. Never
 /// unlink the lock file: existing waiters must keep locking the same inode.
-fn lock_store(root: &Path) -> std::io::Result<fs::File> {
+pub(crate) struct StoreLock(fs::File);
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        // A forked child may retain the descriptor beyond this scope.
+        let _ = self.0.unlock();
+    }
+}
+pub(crate) fn lock_store(root: &Path) -> std::io::Result<StoreLock> {
     fs::create_dir_all(root)?;
     let file = fs::OpenOptions::new()
         .read(true)
@@ -217,13 +224,14 @@ fn lock_store(root: &Path) -> std::io::Result<fs::File> {
         .truncate(false)
         .open(root.join("store.lock"))?;
     file.lock()?;
+    let lock = StoreLock(file);
     // Recover the fixed-name reservation used by older writers. No live
     // writer can own it while we hold the store lock.
     match fs::remove_file(root.join("store.tmp")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    Ok(file)
+    Ok(lock)
 }
 
 /// Platform cache location for the same content-addressed store and trim policy.
@@ -425,6 +433,34 @@ fn publish_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_lock_releases_retained_descriptor_on_all_exits() {
+        let root = std::env::temp_dir().join(format!("vork-store-unlock-{}", std::process::id()));
+        for exit in 0..3 {
+            let mut retained = None;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> std::io::Result<()> {
+                let lock = lock_store(&root)?;
+                retained = Some(lock.0.try_clone()?);
+                match exit {
+                    0 => Ok(()),
+                    1 => Err(std::io::Error::other("injected I/O failure")),
+                    _ => panic!("injected unwind"),
+                }
+            }));
+            let file = fs::File::open(root.join("store.lock")).unwrap();
+            file.try_lock().expect("store scope must release retained descriptors");
+            let _lock = StoreLock(file);
+            drop(retained);
+        }
+        // Recovery failure occurs after acquisition and must release too.
+        fs::create_dir(root.join("store.tmp")).unwrap();
+        assert!(lock_store(&root).is_err());
+        let file = fs::File::open(root.join("store.lock")).unwrap();
+        file.try_lock().unwrap();
+        drop(StoreLock(file));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn device_identity_ignores_where_the_card_sits() {

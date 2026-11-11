@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan a registry publication from tested files: verify, print, never upload.
+"""Plan a registry publication from tested files: verify and print; upload only with --publish-npm.
 
 Shared by `scripts/cut-release publish --dry-run` and the registry-publish
 workflow. Every registry file is checked by sha256 against the tested manifest;
@@ -13,12 +13,14 @@ import json
 from pathlib import Path
 import re
 import sys
+import subprocess
+import time
 
 NPM_REGISTRY = 'https://registry.npmjs.org'
 PYPI_REGISTRY = 'https://upload.pypi.org/legacy/'
 NPM_PACKAGES = ('@voyager-so/vork-linux-x64', '@voyager-so/vork-darwin-arm64',
                 '@voyager-so/vork-windows-x64', '@voyager-so/vork', 'create-vork')
-PYPI_PROJECTS = ('vork-native-linux-x64', 'vork-native-darwin-arm64', 'vork-native-windows-x64', 'vork')
+PYPI_PROJECTS = ('vork',)
 PACKAGES = NPM_PACKAGES + PYPI_PROJECTS
 
 
@@ -70,16 +72,77 @@ def render(rows):
                      f'    {row["file"]}  sha256 {row["sha256"]}' for row in rows)
 
 
+def wait_npm_visible(row, timeout=1200, interval=15):
+    """Require exact-version metadata and a reachable tarball within 20 minutes."""
+    spec = f'{row["package"]}@{row["version"]}'
+    deadline = time.monotonic() + timeout
+    last_error = 'no successful registry response'
+
+    def run(command):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('visibility deadline reached')
+        return subprocess.run(command, check=True, capture_output=True, text=True,
+                              timeout=min(60, remaining)).stdout.strip()
+
+    while time.monotonic() < deadline:
+        try:
+            command = ['npm', 'view', spec, '--registry', NPM_REGISTRY, '--prefer-online']
+            version = json.loads(run(command + ['version', '--json']))
+            if version != row['version']:
+                raise ValueError(f'expected {row["version"]}, got {version!r}')
+            tarball = json.loads(run(command + ['dist.tarball', '--json']))
+            if not isinstance(tarball, str) or not tarball.startswith('https://'):
+                raise ValueError(f'invalid tarball URL: {tarball!r}')
+            run(['curl', '--fail', '--silent', '--show-error', '--location', '--head',
+                 '--proto', '=https', '--proto-redir', '=https', tarball])
+            print(f'VISIBLE: {spec} (metadata and tarball)', flush=True)
+            return
+        except (subprocess.SubprocessError, OSError, ValueError, TimeoutError) as error:
+            last_error = str(error)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            print(f'Waiting for {spec}: {last_error}', flush=True)
+            time.sleep(min(interval, remaining))
+    raise Mismatch(f'npm visibility timed out after {timeout}s for {spec}: {last_error}')
+
+
+def publish_npm(rows, directory):
+    """Publish in dependency order, waiting before any dependant can upload."""
+    npm_rows = sorted((row for row in rows if row['registry'] == NPM_REGISTRY),
+                      key=lambda row: NPM_PACKAGES.index(row['package']))
+    for row in npm_rows:
+        subprocess.run(['npm', 'publish', str(Path(directory).resolve() / row['file']),
+                        '--ignore-scripts', '--access', 'public', '--tag', 'latest',
+                        '--provenance', '--registry', NPM_REGISTRY], check=True)
+        # Also wait for the SDK before create-vork, which pins it exactly.
+        wait_npm_visible(row)
+    missing = []
+    for row in npm_rows:
+        try:
+            wait_npm_visible(row)
+        except Mismatch as error:
+            missing.append(str(error))
+    if missing:
+        raise Mismatch('Final npm visibility check failed:\n  ' + '\n  '.join(missing))
+    print(f'Final npm visibility check passed: {len(npm_rows)} packages.', flush=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--dist', type=Path, required=True, help='directory holding the registry files')
     p.add_argument('--manifest', type=Path, required=True, help='tested manifest with sha256 per file')
     p.add_argument('--version', required=True)
     p.add_argument('--format', choices=('text', 'json'), default='text')
+    p.add_argument('--publish-npm', action='store_true',
+                   help='publish verified npm files and wait for registry visibility')
     a = p.parse_args()
     try:
         rows = plan(a.dist, json.loads(a.manifest.read_text()), a.version)
-    except Mismatch as error:
+        if a.publish_npm:
+            publish_npm(rows, a.dist)
+            return
+    except (Mismatch, subprocess.CalledProcessError) as error:
         print(f'REFUSED: {error}', file=sys.stderr)
         sys.exit(2)
     if a.format == 'json':

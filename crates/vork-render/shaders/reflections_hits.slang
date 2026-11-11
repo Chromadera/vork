@@ -91,6 +91,35 @@ struct SurfaceHits<V:IVariant,P:IProgram> : IReflectionTrace {
         RayDesc desc;
         desc.Origin=origin;desc.Direction=ray;
         desc.TMin=0.;desc.TMax=REG_FP32_MAX;
+#ifdef VORK_METAL
+        // Metal is the selection path because no per-device HW-RT capability gate exists: two queries in one kernel change the first hit on Apple hardware ray tracing (observed M5, 0.5.0); remove when a per-device gate exists or Apple fixes it.
+        // Never commit: hardware closest-hit pruning can hide equal-distance
+        // candidates. One full traversal selects the stable accepted minimum.
+        DielectricHit closest={};closest.t=-1.;
+        var closest_coverage=false;
+        {
+            RayQuery<RAY_FLAG_FORCE_NON_OPAQUE> query;
+            query.TraceRayInline(ray_scene,RAY_FLAG_NONE,REG_RAY_SPECULAR,desc);
+            while(query.Proceed()) {
+                if(query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE) {continue;}
+                let t=query.CandidateTriangleRayT();
+                if(closest.t>=0. && t>closest.t) {continue;}
+                let candidate=RayIntersection(query.CandidateInstanceIndex(),query.CandidateInstanceID(),query.CandidatePrimitiveIndex(),query.CandidateTriangleBarycentrics());
+                let record=material_records[objects[candidate.instance_custom_data].material_index];
+                let coverage=record.tag.x!=0u || record.extra.y>0.;
+                if(t==closest.t) {
+                    if(closest_coverage && !coverage) {continue;}
+                    if(closest_coverage==coverage && (candidate.instance_custom_data>closest.object
+                        || (candidate.instance_custom_data==closest.object && candidate.primitive_index>=closest.primitive))) {continue;}
+                }
+                let inverse=query.CandidateWorldToObject3x4();
+                if(!reflection_candidate_accepts<P,ReflectionGeometry>(ReflectionGeometry(ray_alpha,ray_hit_buffers),ray_alpha,candidate,inverse,ray,footprint,cell,index,ReflectionShadows<P>.sample_count())) {continue;}
+                closest.t=t;closest.instance=candidate.instance_index;closest.object=candidate.instance_custom_data;
+                closest.primitive=candidate.primitive_index;closest.barycentrics=candidate.barycentrics;closest.world_to_object=inverse;
+                closest_coverage=coverage;
+            }
+        }
+#else
         // Find the nearest accepted distance with hardware pruning, then resolve
         // equal-distance coverage in a bounded interval. Committing the first
         // query may prune ties, so only the second query chooses their owner.
@@ -133,6 +162,7 @@ struct SurfaceHits<V:IVariant,P:IProgram> : IReflectionTrace {
                 closest_coverage=coverage;
             }
         }
+#endif
         closest=merge_field_hits<P,ReflectionGeometry>(ReflectionGeometry(ray_alpha,ray_hit_buffers),closest,ray_fields(ray_alpha),origin,ray,desc.TMax,REG_RAY_SPECULAR);
         var transmission=float3(1.);var source=float3(0.);
         let world_specular=site.world_specular;

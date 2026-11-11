@@ -1,9 +1,28 @@
 // Original XPBD cloth. Configuration, typed buffers and callbacks precede this include.
+// Numerical predicates are dimensionless: divide by the matching power of a
+// local edge length (rest length for stretch), or fabric thickness for contact gaps.
+// SELF_MARGIN/3 is that thickness, available even without a body collider.
+// Written as multiplied comparisons to avoid division by a collapsed scale.
+// Lengths and directly computed angles use 1e-6 (squared: 1e-12);
+// cancellation-prone Gram determinants use 1e-6 after normalization. Face-region
+// distance uses 2.5e-5 of thickness, independent of collider tessellation.
+// Normalization has no geometric cutoff. Preserve ordinary arithmetic; scale
+// components only when a squared norm underflows or overflows. Weight and UV
+// tolerances are unitless.
 groupshared float3 cloth_x[CLOTH_VERTICES];
 void cloth_contacts_gauss_seidel();
-float3 cloth_unit(float3 x) {float l=length(x);return l>1e-12?x/l:float3(0,1,0);}
+float3 cloth_unit(float3 x) {float l=length(x);if(l>0&&isfinite(l))return x/l;float scale=max(abs(x.x),max(abs(x.y),abs(x.z)));if(scale==0)return float3(0,1,0);x/=scale;return x/length(x);}
 float3 cloth_closest(float3 p,float3 a,float3 b,float3 c,out float3 bary) {
- float3 ab=b-a,ac=c-a,ap=p-a;float d1=dot(ab,ap),d2=dot(ac,ap);
+ float3 ab=b-a,ac=c-a,ap=p-a;
+ float ab2=dot(ab,ab),ac2=dot(ac,ac),bc2=dot(c-b,c-b),abac=dot(ab,ac);
+ if(ab2*ac2-abac*abac<=1e-6*ab2*ac2) {
+  // A collapsed triangle reduces to its longest edge, including a point.
+  float3 start=a,edge=ab,first=float3(1,0,0),last=float3(0,1,0);float e2=ab2;
+  if(ac2>e2){edge=ac;last=float3(0,0,1);e2=ac2;}
+  if(bc2>e2){start=b;edge=c-b;first=float3(0,1,0);last=float3(0,0,1);e2=bc2;}
+  float t=e2>0?saturate(dot(p-start,edge)/e2):0;bary=lerp(first,last,t);return start+t*edge;
+ }
+ float d1=dot(ab,ap),d2=dot(ac,ap);
  if(d1<=0&&d2<=0){bary=float3(1,0,0);return a;}
  float3 bp=p-b;float d3=dot(ab,bp),d4=dot(ac,bp);
  if(d3>=0&&d4<=d3){bary=float3(0,1,0);return b;}
@@ -16,13 +35,13 @@ float3 cloth_closest(float3 p,float3 a,float3 b,float3 c,out float3 bary) {
  float va=d3*d6-d5*d4;
  if(va<=0&&(d4-d3)>=0&&(d5-d6)>=0){float w=(d4-d3)/((d4-d3)+(d5-d6));bary=float3(0,1-w,w);return b+w*(c-b);}
  float denom=va+vb+vc;
- if(abs(denom)<1e-20){bary=float3(1,0,0);return a;}
+ if(abs(denom)<=1e-6*dot(ab,ab)*dot(ac,ac)){bary=float3(1,0,0);return a;}
  float v=vb/denom,w=vc/denom;bary=float3(1-v-w,v,w);return a+v*ab+w*ac;
 }
 void cloth_stretch(uint k,float h) {
  uint a=edges_load(2*k),b=edges_load(2*k+1);float3 d=cloth_x[b]-cloth_x[a];float l=length(d);
  float wa=mass_load(a),wb=mass_load(b),alpha=stretch_compliance_load(k)/(h*h);
- if(l<1e-12||wa+wb==0)return;
+ if(l<=1e-6*rest_load(k)||wa+wb==0)return;
  float old=lambda_load(k),dl=(-(l-rest_load(k))-alpha*old)/(wa+wb+alpha);
  lambda_store(k,old+dl);float3 q=d*(dl/l);cloth_x[a]-=wa*q;cloth_x[b]+=wb*q;
 }
@@ -30,8 +49,10 @@ void cloth_bend(uint k,float h) {
  uint a=hinges_load(4*k),b=hinges_load(4*k+1),c=hinges_load(4*k+2),d=hinges_load(4*k+3);
  float3 e=cloth_x[b]-cloth_x[a],u=cloth_x[c]-cloth_x[a],v=cloth_x[d]-cloth_x[a];
  float3 n1=cross(e,u),n2=cross(v,e);float e2=dot(e,e),n12=dot(n1,n1),n22=dot(n2,n2);
- if(min(e2,min(n12,n22))<1e-16)return;
- float el=sqrt(e2);float angle=atan2(dot(cross(n1/sqrt(n12),n2/sqrt(n22)),e/el),dot(n1,n2)/sqrt(n12*n22));
+ if(e2<=1e-12*max(dot(u,u),dot(v,v))||n12<=1e-12*e2*dot(u,u)||n22<=1e-12*e2*dot(v,v))return;
+ float el=sqrt(e2),normal_product=n12*n22;
+ float cosine=normal_product>0&&isfinite(normal_product)?dot(n1,n2)/sqrt(normal_product):dot(n1/sqrt(n12),n2/sqrt(n22));
+ float angle=atan2(dot(cross(n1/sqrt(n12),n2/sqrt(n22)),e/el),cosine);
  float error=angle-bend_rest_load(k);error-=6.28318530718*floor((error+3.14159265359)/6.28318530718);
  float3 gc=-el*n1/n12,gd=-el*n2/n22;float tc=dot(u,e)/e2,td=dot(v,e)/e2;
  float3 ga=-(1-tc)*gc-(1-td)*gd,gb=-tc*gc-td*gd;
@@ -82,7 +103,7 @@ void cloth_publish(ComputeContext ctx,Inputs inputs) {
   float2 u=cloth_uv(ids.y)-cloth_uv(ids.x),v=cloth_uv(ids.z)-cloth_uv(ids.x);float det=u.x*v.y-u.y*v.x;
   if(CLOTH_HAS_UV&&abs(det)>1e-12){t+=(v.y*e1-u.y*e2)/det;b+=(-v.x*e1+u.x*e2)/det;}else t+=e1;
  }
- n=cloth_unit(n);t-=dot(t,n)*n;if(dot(t,t)<1e-16)t=cross(abs(n.y)<.9?float3(0,1,0):float3(1,0,0),n);
+ n=cloth_unit(n);float tangent_length2=dot(t,t);t-=dot(t,n)*n;if(dot(t,t)<=1e-12*tangent_length2)t=cross(abs(n.y)<.9?float3(0,1,0):float3(1,0,0),n);
  normal_store(i,n);tangent_store(i,float4(cloth_unit(t),dot(cross(n,t),b)<0?-1.:1.));
  // Preserve integrated velocity: subtracting two world positions each tick
  // loses small accelerations at metre-scale origins. Only projection corrects v.

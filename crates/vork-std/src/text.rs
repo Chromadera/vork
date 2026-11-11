@@ -95,7 +95,9 @@ fn default_align_x() -> String {
 fn default_align_y() -> String {
     Options::default().align_y
 }
+#[cfg(test)]
 struct Outline(lyon_path::path::Builder);
+#[cfg(test)]
 impl ttf_parser::OutlineBuilder for Outline {
     fn move_to(&mut self, x: f32, y: f32) {
         self.0.begin(point(x, y));
@@ -296,83 +298,61 @@ pub(crate) fn evaluate(argument: &str) -> Result<String> {
         std::fs::read(&options.font).with_context(|| format!("read font {}", options.font))?;
     Ok(serde_json::to_string(&geometry(options, &bytes)?)?)
 }
-fn width(face: &ttf_parser::Face<'_>, line: &str, scale: f32) -> Result<f32> {
-    let mut pen = 0.;
-    let mut previous = None;
-    for ch in line.chars() {
-        let glyph = face
-            .glyph_index(ch)
-            .with_context(|| format!("font has no glyph for {ch:?}"))?;
-        if let (Some(prev), Some(kern)) = (previous, face.tables().kern) {
-            for table in kern.subtables {
-                if table.horizontal && !table.variable && !table.has_cross_stream {
-                    pen += table.glyphs_kerning(prev, glyph).unwrap_or(0) as f32 * scale;
-                }
-            }
-        }
-        pen += face.glyph_hor_advance(glyph).unwrap_or(0) as f32 * scale;
-        previous = Some(glyph);
-    }
-    Ok(pen)
-}
 fn geometry(o: Options, bytes: &[u8]) -> Result<Value> {
     validate_options(&o)?;
-    let face = ttf_parser::Face::parse(bytes, 0).context("parse font (TrueType/OpenType)")?;
+    let face = vork_text::Font::new(bytes, 0)?;
     let scale = o.size / face.units_per_em() as f32;
     // Lyon's absolute fill tolerance also joins vertices within half of it of an edge.
     // Keep that well below one font unit at any size, and remove the points it would
     // join from the contours too, so caps and walls share exactly one outline.
     let merge = scale * 0.05;
     let mut lines: Vec<(Vec<Vec<Point>>, f32)> = Vec::new();
-    let line_widths = o
-        .body
-        .split('\n')
-        .map(|line| width(&face, line, scale))
-        .collect::<Result<Vec<_>>>()?;
-    let max_width = line_widths.iter().copied().fold(0., f32::max);
-    for (line_index, line) in o.body.split('\n').enumerate() {
-        let spaces = line.chars().filter(|c| *c == ' ').count();
-        let gaps = line.chars().count().saturating_sub(1);
-        let justify = o.align_x == "justify" && line_index + 1 < line_widths.len() && spaces > 0;
+    let shaped_lines = face.layout(&o.body)?;
+    let max_width = shaped_lines
+        .iter()
+        .map(|line| line.width * scale)
+        .fold(0., f32::max);
+    for (line_index, (line, source)) in shaped_lines.iter().zip(o.body.split('\n')).enumerate() {
+        // Expand shaped clusters, never individual code points inside a conjunct.
+        let boundaries: Vec<_> = line
+            .glyphs
+            .iter()
+            .enumerate()
+            .filter(|(i, g)| {
+                line.glyphs
+                    .get(i + 1)
+                    .is_none_or(|next| next.cluster != g.cluster)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let spaces = boundaries
+            .iter()
+            .filter(|&&i| source[line.glyphs[i].cluster..].starts_with(' '))
+            .count();
+        let gaps = boundaries.len().saturating_sub(1);
+        let justify = o.align_x == "justify" && line_index + 1 < shaped_lines.len() && spaces > 0;
         let flush = o.align_x == "flush" && gaps > 0;
         let extra = if justify {
-            (max_width - line_widths[line_index]) / spaces as f32
+            (max_width - line.width * scale) / spaces as f32
         } else if flush {
-            (max_width - line_widths[line_index]) / gaps as f32
+            (max_width - line.width * scale) / gaps as f32
         } else {
             0.
         };
         let mut contours = Vec::<Vec<Point>>::new();
-        let mut pen = 0.;
-        let mut previous = None;
-        for (character_index, ch) in line.chars().enumerate() {
-            ensure!(
-                ch != '\t' && ch != '\r' && !ch.is_control(),
-                "unsupported text control character {ch:?}"
-            );
-            let glyph = face
-                .glyph_index(ch)
-                .with_context(|| format!("font has no glyph for {ch:?}"))?;
-            if let (Some(prev), Some(kern)) = (previous, face.tables().kern) {
-                for table in kern.subtables {
-                    if table.horizontal && !table.variable && !table.has_cross_stream {
-                        pen += table.glyphs_kerning(prev, glyph).unwrap_or(0) as f32 * scale;
-                    }
-                }
-            }
-            let mut outline = Outline(Path::builder());
-            if face.outline_glyph(glyph, &mut outline).is_some() {
-                let path = outline.0.build();
+        let mut spacing = 0.;
+        for (glyph_index, glyph) in line.glyphs.iter().enumerate() {
+            if let Some(path) = face.outline(glyph) {
                 let mut contour = Vec::new();
                 // Adaptive outline flattening: 1/1024 em in output units.
                 for event in path.iter().flattened(face.units_per_em() as f32 / 1024.) {
                     match event {
                         PathEvent::Begin { at } => {
                             contour.clear();
-                            contour.push(point(at.x * scale + pen, at.y * scale));
+                            contour.push(point(at.x * scale + spacing, at.y * scale));
                         }
                         PathEvent::Line { to, .. } => {
-                            contour.push(point(to.x * scale + pen, to.y * scale));
+                            contour.push(point(to.x * scale + spacing, to.y * scale));
                         }
                         PathEvent::End { .. } => {
                             simplify(&mut contour, merge);
@@ -384,13 +364,15 @@ fn geometry(o: Options, bytes: &[u8]) -> Result<Value> {
                     }
                 }
             }
-            pen += face.glyph_hor_advance(glyph).unwrap_or(0) as f32 * scale;
-            previous = Some(glyph);
-            if (justify && ch == ' ') || (flush && character_index < gaps) {
-                pen += extra;
+            let boundary = boundaries.binary_search(&glyph_index).is_ok();
+            if boundary
+                && ((justify && source[glyph.cluster..].starts_with(' '))
+                    || (flush && glyph_index + 1 < line.glyphs.len()))
+            {
+                spacing += extra;
             }
         }
-        lines.push((contours, pen));
+        lines.push((contours, line.width * scale + spacing));
     }
     let line_height = o.size; // Blender Text space_line=1.
     let last_y = -(lines.len().saturating_sub(1) as f32) * line_height;
@@ -522,6 +504,54 @@ impl Mesh {
 pub(crate) mod tests {
     use super::*;
     const FONT: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+    #[test]
+    fn complex_scripts_use_positioned_outlines() {
+        for (bytes, text) in [
+            (
+                include_bytes!("../../vork-text/tests/fonts/NotoSansArabic-Regular.ttf").as_slice(),
+                "سلام",
+            ),
+            (
+                include_bytes!("../../vork-text/tests/fonts/NotoSansDevanagari-Regular.ttf")
+                    .as_slice(),
+                "क्षि",
+            ),
+        ] {
+            let g = geometry(
+                Options {
+                    body: text.into(),
+                    align_x: "right".into(),
+                    ..Options::default()
+                },
+                bytes,
+            )
+            .unwrap();
+            let points = g["buffers"]["text_position"]["data"].as_array().unwrap();
+            let font = vork_text::Font::new(bytes, 0).unwrap();
+            let line = font.layout(text).unwrap().remove(0);
+            let mut expected = f32::NEG_INFINITY;
+            for glyph in &line.glyphs {
+                for event in font
+                    .outline(glyph)
+                    .unwrap()
+                    .iter()
+                    .flattened(font.units_per_em() as f32 / 1024.)
+                {
+                    if let PathEvent::Line { to, .. } = event {
+                        expected = expected.max((to.x - line.width) / font.units_per_em() as f32);
+                    }
+                }
+            }
+            let actual = points
+                .iter()
+                .map(|p| p[0].as_f64().unwrap() as f32)
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "{text}: {actual} != {expected}"
+            );
+        }
+    }
     #[test]
     fn counters_survive_caps_and_extrusion() {
         let o = Options {
@@ -675,7 +705,7 @@ pub(crate) mod tests {
             let Some(glyph) = face.glyph_index(c) else {
                 continue;
             };
-            if overlapping(&face, glyph) {
+            if glyph.0 == 0 || overlapping(&face, glyph) {
                 continue;
             }
             match closed(&c.to_string(), 0.) {

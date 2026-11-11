@@ -1,6 +1,14 @@
 """Author ordinary vork compute/implicit/point fragments. All lengths below are SI.
 
 build() returns buffers, programs, materials, geometry and simulation dictionaries.
+geometry["water"] uses buffers["surface"]; geometry["floor_film"] uses
+buffers["film_surface"]. buffers["wetness"] stores XZ film depth in solver units.
+Only whitewater_budget > 0 adds geometry["whitewater"] and its buffers:
+buffers["white_draw_position"] (positions), buffers["white_width"] (diameters),
+buffers["white_count"] (active prefix), buffers["white_draw_id"] (stable IDs),
+and simulation slots buffers["white_position"], buffers["white_life"],
+buffers["white_kind"] (0 inactive, 1 spray, 2 foam, 3 bubble).
+Mesh nodes reference geometry keys; buffer keys name data, not geometry.
 Callbacks use solver coordinates (world metres / scale); time is seconds.
 See `vork help fluid --all` for the Slang callback contract and numerical limits.
 """
@@ -15,6 +23,15 @@ def build(*, callbacks, extent: Sequence[float], particle_budget: int | Sequence
           dt=None, speed=1., flip=0., whitewater_budget=0, seed=7,
           film_diffusivity=5e-5, pressure_iterations=50):
     """Build one fluid state. Merge returned maps into the author's scene.
+
+    geometry["water"] uses buffers["surface"]; geometry["floor_film"] uses
+    buffers["film_surface"]. buffers["wetness"] stores XZ film depth in solver units.
+    Only whitewater_budget > 0 adds geometry["whitewater"] and its buffers:
+    buffers["white_draw_position"] (positions), buffers["white_width"] (diameters),
+    buffers["white_count"] (active prefix), buffers["white_draw_id"] (stable IDs),
+    and simulation slots buffers["white_position"], buffers["white_life"],
+    buffers["white_kind"] (0 inactive, 1 spray, 2 foam, 3 bubble).
+    Mesh nodes reference geometry keys; buffer keys name data, not geometry.
 
     Dimension sequences accept lists or tuples; each has exactly three X, Y, Z
     entries. extent contains positive finite domain half-sizes in metres; origin

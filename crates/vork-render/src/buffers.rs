@@ -1365,7 +1365,7 @@ impl ProgramBuffers {
                 identity.update(bytemuck::cast_slice(&data.words));
                 initial_identity.insert(name.clone(), identity.finalize());
             }
-            ensure!(data.width <= limit, "compute element exceeds binding limit");
+            ensure!(data.width <= limit, "{}", crate::gpu_memory::limit_message(format_args!("compute buffer {name} element"), format_args!("{} words",data.width), format_args!("{limit} words"), "reduce the compute element width"));
             let mut spans = Vec::new();
             let mut first = 0;
             while first < data.count() {

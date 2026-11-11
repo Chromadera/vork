@@ -185,7 +185,7 @@ with tempfile.TemporaryDirectory(dir=a.output) as tmp:
         if not relative or relative.startswith('#'):
             continue
         path = Path(relative)
-        if path.is_absolute() or '..' in path.parts or path.parts[0] != 'examples':
+        if path.is_absolute() or '..' in path.parts or not (path.parts[0] == 'examples' or path.parts[:2] == ('skills', 'vork')):
             p.error(f'invalid example payload path: {relative}')
         source = ROOT / path
         if source.is_symlink() or not source.is_file():

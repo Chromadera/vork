@@ -8,6 +8,7 @@ struct GeometryScope {
     geometry: String,
     instance: Option<u32>,
     programs: BTreeSet<String>,
+    outputs: BTreeSet<String>,
     buffers: ProgramBuffers,
     /// Local binding page to the canonical cursor/checkpoint page.
     pages: Vec<usize>,
@@ -89,6 +90,17 @@ fn private_geometry_buffers(r:&Renderer,source:&ProgramBuffers,state:&BTreeSet<S
     Ok((plan.buffers,canonical))
 }
 
+// A nonspatial material reader can consume one object's geometry output
+// directly. Multiple producers keep the existing global named namespace.
+fn unique_geometry_source(scene:&v2::Scene,sources:&[Option<&v2::Node>],buffer:&str)->bool {
+    let mut owners=sources.iter().flatten().filter(|node| {
+        matches!(&node.kind,v2::NodeKind::Mesh {geometry,..}
+            if scene.geometry[geometry].attributes.values().any(|name|name==buffer))
+    });
+    let Some(owner)=owners.next() else {return false;};
+    owners.next().is_none() && matches!(&owner.kind,v2::NodeKind::Mesh {instances:None,..})
+}
+
 // The original namespace executes only where something outside object-local
 // geometry consumes it. This avoids paying for an unused global solver in the
 // usual geometry-only scene while preserving explicit named readers.
@@ -99,9 +111,31 @@ fn global_solver_consumers(scene: &v2::Scene, sources: &[Option<&v2::Node>]) -> 
         .flat_map(|program| program.bindings.values().cloned()));
     for node in sources.iter().flatten() {
         if let v2::NodeKind::Mesh { instances: Some(instances), .. } = &node.kind {
-            names.extend(instances.attributes.values().cloned());
+            names.extend(instances.attributes.iter().filter(|(semantic,buffer)| {
+                matches!(semantic.as_str(),"TRANSLATION"|"ROTATION"|"SCALE")
+                    || !unique_geometry_source(scene,sources,buffer)
+            }).map(|(_,buffer)|buffer.clone()));
             names.extend(instances.count.iter().cloned());
         }
     }
     geometry_solver_dependencies(scene, names).0
+}
+
+#[cfg(test)]
+mod attribute_source_tests {
+    use super::*;
+    #[test]
+    fn external_material_reader_preserves_geometry_producer_context() -> Result<()> {
+        let mut scene:v2::Scene = v2::from_test_value(serde_json::from_str(include_str!("../tests/fixtures/computed-attribute.json"))?)?;
+        let sources:Vec<_>=scene.nodes.iter().map(Some).collect();
+        assert!(!global_solver_consumers(&scene,&sources).contains("copy_predecessor"),
+            "a material reader must not erase the geometry producer's predecessor context");
+        let mut other=scene.nodes[0].clone();
+        other.name="second_producer".into();
+        scene.nodes.push(other);
+        let sources:Vec<_>=scene.nodes.iter().map(Some).collect();
+        assert!(global_solver_consumers(&scene,&sources).contains("copy_predecessor"),
+            "multiple geometry producers retain the global named namespace");
+        Ok(())
+    }
 }

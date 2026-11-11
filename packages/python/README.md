@@ -1,9 +1,22 @@
 # Python SDK
 
-Requires Python 3.11+. Ships in every vork release archive as `python/`;
-create a virtual environment, then install from that directory. See the main
-README Install section for Linux, Mac and Windows commands. From a source
-checkout, use `python -m pip install ./packages/python` in your virtual environment.
+Requires Python 3.11+. Install with `python -m pip install vork`, or from a
+source checkout with `python -m pip install ./packages/python`.
+
+This package contains only the Python SDK: no native dependencies and no `vork`
+console command. Importing types and writing scenes work without the renderer.
+For `std()` and `render()`, install the renderer separately:
+
+- npm: `npm install -g @voyager-so/vork` (keep optional dependencies enabled).
+- GitHub release: https://github.com/voyager-so/vork/releases — download and
+  extract the archive for your platform.
+
+Put the directory containing `vork` on PATH, or set `VORK_BIN` to its full path.
+For a project-local npm installation, add `node_modules/.bin` to PATH.
+Use the SDK and renderer from the same release. Release archives also include
+this package under `python/`. The package version is generated from the Cargo
+workspace by `scripts/sync-version` and checked in CI.
+
 `from vork import Scene, std, write_scene`
 exposes the scene type, the shared CLI engines and scene writing:
 

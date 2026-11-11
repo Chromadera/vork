@@ -24,9 +24,9 @@ scenes = [root / 'crates/vork-scene/src/starter.json']
 if (root / 'scenes').is_dir():
     scenes += [root / name for name in (
         'examples/first-scene.json',
-        'examples/orbit.json',
-        'examples/jitter-aa.json',
-        'examples/sampled-shadows.json',
+        'examples/orbit.json', # export-example-private: guarded by private scenes directory
+        'examples/jitter-aa.json', # export-example-private: guarded by private scenes directory
+        'examples/sampled-shadows.json', # export-example-private: guarded by private scenes directory
         'scenes/path-cornell.json',
         'scenes/hair/chiang-color.json',
     )]

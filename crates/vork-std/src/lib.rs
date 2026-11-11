@@ -7,6 +7,7 @@ pub use expand::{expand_scene, load_scene};
 pub mod environment;
 mod extrude;
 mod sky;
+mod sweep;
 mod text;
 pub use text::input_help as text_input_help;
 
@@ -47,6 +48,7 @@ pub fn evaluate(function: &str, argument: &str) -> Result<String> {
         "sky" => return sky::evaluate(argument),
         "text" => return text::evaluate(argument),
         "extrude" => return extrude::evaluate(argument),
+        "sweep" => return sweep::evaluate(argument),
         _ => {}
     }
     let runtime = rquickjs::Runtime::new().context("initialize standard-library engine")?;

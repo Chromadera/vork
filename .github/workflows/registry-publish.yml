@@ -1,10 +1,9 @@
 # Publishes the tested registry files of a published GitHub release to npm and
 # PyPI through OIDC trusted publishing. No tokens, passwords or logins.
 #
-# Two refusals only: the downloaded files are not the tested files (sha256 against
-# the release's tested-manifest.json, checked by scripts/registry_plan.py), and the release owner
-# has not approved the `npm` / `pypi` environment deployments. dry_run (the default)
-# verifies and prints the plan, then stops before any upload.
+# Publication requires tested file digests, approval of the npm / pypi
+# environments, and npm dependency visibility before dependant uploads.
+# dry_run (the default) verifies and prints the plan, then stops before upload.
 #
 # Runs only in the public repository, dispatched at a published release tag:
 # Actions > Publish approved registry assets > Run workflow > tag vX.Y.Z.
@@ -65,7 +64,7 @@ jobs:
     needs: plan
     if: ${{ !inputs.dry_run && (inputs.registry == 'both' || inputs.registry == 'npm') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 240
     environment: npm
     permissions:
       contents: read
@@ -91,10 +90,8 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          python3 ../scripts/registry_plan.py --dist . --manifest tested-manifest.json --version "$VERSION" --format json > plan.json
-          for file in $(jq -r '.[] | select(.registry == "https://registry.npmjs.org") | .file' plan.json); do
-            npm publish "./$file" --ignore-scripts --access public --tag latest --provenance --registry https://registry.npmjs.org
-          done
+          python3 ../scripts/registry_plan.py --dist . --manifest tested-manifest.json --version "$VERSION" --publish-npm
+
   pypi:
     needs: plan
     if: ${{ !inputs.dry_run && (inputs.registry == 'both' || inputs.registry == 'pypi') }}
@@ -110,19 +107,14 @@ jobs:
         with:
           name: tested-registry-files
           path: registry-dist
-      - name: Verify again and separate native wheels from the common wheel
+      - name: Verify again and select the SDK-only wheel
         env:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           python3 scripts/registry_plan.py --dist registry-dist --manifest registry-dist/tested-manifest.json --version "$VERSION"
-          mkdir native common
-          mv registry-dist/vork_native_*.whl native/
+          mkdir common
           mv registry-dist/vork-*.whl common/
-      - name: Publish native wheels
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: native/
       - name: Publish the common wheel
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

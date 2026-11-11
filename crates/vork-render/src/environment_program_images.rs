@@ -25,9 +25,22 @@ impl Images {
             let definition=scene.images.get(name).with_context(||format!("unknown image {name}"))?.clone();
             let path=base.join(definition.file.as_ref().context("environment programs cannot sample rendered images")?);
             let media=crate::footage::is_media(&path).then(||crate::footage::Source::open_gpu(&path,r)).transpose()?.map(std::sync::Mutex::new);
-            let identity=if let Some(media)=&media {media.lock().unwrap().identity()?} else {blake3::hash(&std::fs::read(&path)?)};
+            let bytes = if media.is_none() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                        && !path.extension().is_some_and(|e|e.eq_ignore_ascii_case("ies")) => None,
+                    Err(error) => return Err(error).with_context(||format!("read environment image {}; restore the file or correct its path",path.display())),
+                }
+            } else {None};
+            let identity=if let Some(media)=&media {media.lock().unwrap().identity()?}
+                else {bytes.as_ref().map_or_else(||blake3::hash(b"missing-image-magenta"),|bytes|blake3::hash(bytes))};
             let pixels=if media.is_none() {
-                encode(&definition,crate::texture_source::decode(&path,&std::fs::read(&path)?,r.device.limits().max_texture_dimension_2d)?)
+                encode(&definition,match &bytes {
+                    Some(bytes) => crate::texture_source::decode(&path,bytes,r.device.limits().max_texture_dimension_2d)
+                        .with_context(||format!("environment image {}; restore a valid image or correct its path",path.display()))?,
+                    None => crate::texture_source::missing_image(&path),
+                })
             } else {Vec::new()};
             let slot=sources.len() as u32;
             sources.push(Source {name:name.into(),definition,pixels,media,identity});
@@ -38,7 +51,7 @@ impl Images {
     }
     pub(super) fn count(&self)->usize {self.sources.len()}
     pub(super) fn install(&self,r:&Renderer,data:&[u32])->Result<Vec<wgpu::Texture>> {
-        ensure!(self.sources.len()<=r.device.limits().max_sampled_textures_per_shader_stage as usize,"environment image inputs exceed this GPU's sampled texture bindings");
+        ensure!(self.sources.len()<=r.device.limits().max_sampled_textures_per_shader_stage as usize,"{}", crate::gpu_memory::limit_message("environment image inputs", format_args!("{} sampled textures",self.sources.len()), format_args!("{} sampled textures",r.device.limits().max_sampled_textures_per_shader_stage), "combine environment image inputs into fewer textures"));
         let textures=(0..self.sources.len()).map(|k| {let at=data[k] as usize;crate::gpu_memory::texture(&r.device,&wgpu::TextureDescriptor {
             label:Some("environment program image float bits"),size:wgpu::Extent3d {width:data[at],height:data[at+1],depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba32Uint,usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::COPY_DST,view_formats:&[],
         })}).collect::<Vec<_>>();
@@ -104,6 +117,27 @@ fn encode(definition:&v2::Image,image:image::DynamicImage)->Vec<u32> {
     let mut words=vec![image.width(),image.height(),wrap(definition.wrap_s),wrap(definition.wrap_t),u32::from(matches!(definition.mag_filter,v2::MagFilter::Nearest))];
     for p in image.pixels() {for (k,&v) in p.0.iter().enumerate() {words.push(if k<3 && definition.is_srgb() {crate::texture_source::decode_srgb(v)} else {v}.to_bits());}}
     words
+}
+
+#[cfg(test)]
+#[test]
+fn missing_environment_image_is_magenta_and_warned() -> Result<()> {
+    let renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+    let scene = v2::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"}],
+        "images":{"plate":{"file":"missing-refuseearly-environment.exr"}}}"#)?;
+    let layout = vork_slang::InputLayout {words:2, fields:vec![vork_slang::InputField {
+        name:"map".into(), ty:vork_slang::Type::Image, offset:1, enumeration:None, range:None,
+    }]};
+    let values = [("map".into(), serde_json::json!({"image":"plate"}))].into_iter().collect();
+    let collector = crate::warnings::Collector::default();
+    let _scope = collector.enter();
+    let (images, _) = Images::new(&renderer, &scene, Path::new("."), &layout, &values)?;
+    let words = images.words(&vork_time::Request::Numeric(0.))?;
+    let start = words[0] as usize;
+    assert_eq!(&words[start..start+2], [1, 1]);
+    assert_eq!(&words[start+5..start+9], [1f32.to_bits(), 0, 1f32.to_bits(), 1f32.to_bits()]);
+    assert_eq!(collector.snapshot()[0].code, "missing_image");
+    Ok(())
 }
 fn sampling_shader()->String {
     format!(r#"

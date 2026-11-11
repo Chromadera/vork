@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "level": 1,
+  "settings": {
+    "seed": 0,
+    "denoise": false
+  },
+  "description": "Final quality/cost level."
+}

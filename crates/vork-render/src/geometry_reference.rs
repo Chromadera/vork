@@ -158,20 +158,37 @@ impl Table {
                 .with_context(|| {
                     format!("geometry reference {name:?}: object does not exist; name a mesh node")
                 })?;
-            let candidates: BTreeSet<_> = draws
+            let object = draws
                 .iter()
-                .filter(|draw| roots[draw.object as usize].node == node)
+                .find(|draw| roots[draw.object as usize].node == node)
                 .map(|draw| draw.object)
-                .collect();
+                .with_context(|| format!(
+                    "geometry reference {name:?}: requires one mesh object; put each collider instance on its own named node"
+                ))?;
+            let root = &roots[object as usize];
+            // Material ranges have separate render object slots, but reference
+            // the same complete source mesh. Distinguish actual instances even
+            // when their placements happen to be identical.
             ensure!(
-                candidates.len() == 1,
+                draws.iter()
+                    .filter(|draw| roots[draw.object as usize].node == node)
+                    .flat_map(|draw| draw.instances.clone())
+                    .map(|object| &roots[object as usize])
+                    .filter(|other| other.node == node)
+                    .all(|other| root.same_placement(other)
+                        && root.instance_index == other.instance_index),
                 "geometry reference {name:?}: requires one mesh object; put each collider instance on its own named node"
             );
-            let object = *candidates.first().unwrap();
-            let root = &roots[object as usize];
             let vork_scene::v2::NodeKind::Mesh { geometry, .. } = &nodes[node].node.kind else {
                 bail!("geometry reference {name:?}: use a native mesh node with named geometry");
             };
+            let node_draws: Vec<_> = draws.iter()
+                .filter(|draw| roots[draw.object as usize].node == node).collect();
+            ensure!(
+                node_draws.iter().all(|draw| draw.displacement.is_none())
+                    || node_draws.iter().map(|draw| draw.material).collect::<BTreeSet<_>>().len() == 1,
+                "canonical displacement on node {name:?} requires one material; split the node into separately named geometry objects"
+            );
             ensure!(!compute::places_instances(scene,&nodes[node].node),
                 "geometry reference {name:?}: GPU instance placement/counts require canonical placement sampling; use node animation tracks on a separately named native mesh collider");
             let shape = &scene.geometry[geometry];
@@ -221,7 +238,7 @@ impl Table {
             .min(r.device.limits().max_buffer_size);
         ensure!(
             bytes <= limit,
-            "geometry reference table needs {bytes} bytes, device limit {limit}; use smaller collision proxies"
+            "{}", crate::gpu_memory::limit_message("geometry reference table", format_args!("{bytes} bytes"), format_args!("{limit} bytes"), "use smaller collision proxies")
         );
         let buffer = init(
             &r.device,

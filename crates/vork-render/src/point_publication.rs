@@ -30,7 +30,7 @@ impl Frame {
             words[header as usize..header as usize+4].copy_from_slice(&[position,attribute,history,(draw.layout.attribute_stride()/4) as u32]);
             for object in draw.instances.clone() {words[object as usize+1]=header;}
         }
-        gpu_memory::storage_binding(&r.device.limits(),"compact point raster publication",words.len() as u64*4)?;
+        gpu_memory::storage_binding(&r.device.limits(),"compact point raster publication",words.len() as u64*4, "reduce the point pool size")?;
         let buffer=init(&r.device,"compact point raster publication",bytemuck::cast_slice(&words),wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST);
         let mut encoder=r.device.create_command_encoder(&Default::default());
         for (source,offset,destination,size) in initial {encoder.copy_buffer_to_buffer(&source,offset,&buffer,destination,size);}

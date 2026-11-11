@@ -4,3 +4,7 @@ target/
 __pycache__/
 .DS_Store
 
+
+# Python packaging intermediates
+/packages/python/build/
+/packages/python/*.egg-info/

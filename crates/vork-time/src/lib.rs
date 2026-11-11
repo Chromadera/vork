@@ -167,7 +167,7 @@ impl schemars::JsonSchema for Time {
         "Time".into()
     }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"x-clock":true,"description":"Output rate: decimal number or reduced rational string (frames per second).", "anyOf":[{"type":"number"},{"type":"string","pattern":"^-?[0-9]+/[1-9][0-9]*$"}]})
+        schemars::json_schema!({"x-clock":true,"x-output-rate":true,"description":"Output rate: decimal number or reduced rational string (frames per second).", "anyOf":[{"type":"number"},{"type":"string","pattern":"^-?[0-9]+/[1-9][0-9]*$"}]})
     }
 }
 

@@ -5,7 +5,9 @@ import type { GeometryFragment } from './shapes.js';
 type V2 = [number, number];
 export interface ExtrudeOptions {
   /** Closed [x, y] polygon in metres; either winding; a repeated first point is ignored. */
-  outline: V2[];
+  outline?: V2[];
+  /** SVG path data in metres, in XY; exclusive with outline and holes. */
+  d?: string;
   /** Polygons cut through the outline; inside it, not crossing or nesting. */
   holes?: V2[][];
   /** Full thickness along Z in metres, centred on z = 0. */
@@ -19,10 +21,10 @@ export interface ExtrudeOptions {
  * vork std loader (override its executable with VORK_BIN). Wall corners turning more than 30°
  * are sharp. Cap UVs span the outline's bounds (u along +X, mirrored on the back; v down from
  * the top); wall u runs by length along each contour from its first point, v front to back.
- * @help XY outline/holes: either winding; depth:full Z thickness, centred; +Z front; bevel_depth:inward rim radius; bevel_resolution:1..32; wall corners >30° sharp; cap uv spans outline bounds (v down); wall u along contour, v front→back
+ * @help d:SVG path in XY metres XOR outline/holes; first subpath outer, rest holes; curves flatten at 1e-4 of extent; XY outline/holes: either winding; depth:full Z thickness, centred; +Z front; bevel_depth:inward rim radius; bevel_resolution:1..32; wall corners >30° sharp; cap uv spans outline bounds (v down); wall u along contour, v front→back
  */
 export function extrude(name: string = "extrude", {depth = 1, bevelDepth = 0, bevelResolution = 4, ...options}: ExtrudeOptions): GeometryFragment {
   checkName(name, 'extrude name');
-  checkOptions(options, ['depth','outline','holes','bevelDepth','bevelResolution']);
+  checkOptions(options, ['depth','outline','d','holes','bevelDepth','bevelResolution']);
   return stdCommand('extrude', {name,depth,bevel_depth:bevelDepth,bevel_resolution:bevelResolution,...options}) as GeometryFragment;
 }

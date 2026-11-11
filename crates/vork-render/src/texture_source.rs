@@ -1,6 +1,12 @@
 //! Install-time image sources. Render names resolve to slots in the material table.
 use std::path::PathBuf;
 
+pub(crate) fn missing_image(path: &std::path::Path) -> image::DynamicImage {
+    crate::warnings::dropped("missing_image", serde_json::json!({"file":path}),
+        "using a 1x1 magenta texture; restore the image or correct its path.".into());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 255, 255])))
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) enum TextureSource {
     File(PathBuf),
@@ -76,7 +82,7 @@ fn bounded(
     let side = |what: &str, width: usize, height: usize| {
         anyhow::ensure!(
             width.max(height) <= max_side as usize,
-            "the {what} is {width}x{height}, beyond this GPU's {max_side}-texel texture side"
+            "{}", crate::gpu_memory::limit_message(format_args!("the {what} is {width}x{height}"), format_args!("{width}x{height} texels"), format_args!("{max_side} texels per texture side"), "reduce the source image resolution")
         );
         Ok(())
     };
@@ -119,7 +125,7 @@ mod tests {
             ("exr-data-window-5gb", "exr", "the data window is 352321538x2"),
             ("exr-dwa-ac-count-small-window", "exr", "DWA section sizes exceed the chunk"),
             // zune-jpeg 0.5.15 asserts in its AVX2 upsampler on this one.
-            ("jpeg-avx2-upsampler-assert", "jpg", "the image is 4x16388, beyond this GPU's 16384-texel texture side"),
+            ("jpeg-avx2-upsampler-assert", "jpg", "the image is 4x16388"),
         ];
         // zune-jpeg 0.5.15 unwraps None in its AVX2 IDCT, the path it takes on
         // x86-64 hosts with AVX2 (every CI and VM host).

@@ -14,7 +14,7 @@ a = p.parse_args()
 expected = {}
 for f in a.tree.rglob('*'):
     rel = f.relative_to(a.tree)
-    if f.is_file() and rel.parts[0] not in ('sdk', 'python', 'examples', 'README.md'):
+    if f.is_file() and rel.parts[0] not in ('sdk', 'python', 'examples', 'skills', 'README.md'):
         expected[rel.as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
 with tarfile.open(next(a.dist.glob(f'voyager-so-vork-{a.platform}-*.tgz'))) as t:
     actual = {f.name.removeprefix('package/runtime/'): hashlib.sha256(t.extractfile(f).read()).hexdigest()

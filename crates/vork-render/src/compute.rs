@@ -62,6 +62,64 @@ pub(crate) fn prepare_with_packed(r:&Renderer,source:&v2::Scene,base:&std::path:
     }
     Ok(prepared)
 }
+/// Declarations only: stage discovery checks the whole module, while only a
+/// compute installation supplies implementations and resource bindings.
+pub(crate) fn stage_declarations(scene:&v2::Scene, program:&v2::Program)->Result<String> {
+    fn accessor(header:&mut String,name:&str,kind:v2::BufferType)->Result<&'static str> {
+        let ty=match kind {
+            v2::BufferType::F32=>"float",v2::BufferType::I32=>"int",v2::BufferType::U32=>"uint",
+            v2::BufferType::Vec2=>"float2",v2::BufferType::Vec3=>"float3",v2::BufferType::Vec4=>"float4",
+            v2::BufferType::Uvec4=>"uint4",v2::BufferType::Mat4=>"VorkMat4",
+        };
+        if ty=="VorkMat4" && !header.contains("struct VorkMat4") {header.push_str("struct VorkMat4 {float4 c0;float4 c1;float4 c2;float4 c3;};\n");}
+        writeln!(header,"extern static const uint {name}_count; {ty} {name}_load(uint i);")?;
+        Ok(ty)
+    }
+    if !program.is_compute() {return Ok(String::new());}
+    let mut header=String::new();
+    for (alias,buffer) in &program.bindings {
+        let kind=scene.buffers[buffer].element_type;
+        let ty=accessor(&mut header,alias,kind)?;
+        if alias=="fluid_status" {header.push_str("#define VORK_FLUID_STATUS_BOUND 1\n");}
+        writeln!(header,"void {alias}_store(uint i,{ty} value);")?;
+        accessor(&mut header,&format!("previous_{alias}"),kind)?;
+        if scene.buffers[buffer].dims.is_some() {writeln!(header,"extern static const uint3 {alias}_dims;")?;}
+        if matches!(kind,v2::BufferType::F32|v2::BufferType::U32) {
+            writeln!(header,"{ty} {alias}_atomic_add(uint i,{ty} value);")?;
+        }
+        if kind==v2::BufferType::U32 {
+            for operation in ["sub","min","max","and","or","xor","exchange"] {
+                writeln!(header,"uint {alias}_atomic_{operation}(uint i,uint value);")?;
+            }
+            writeln!(header,"uint {alias}_atomic_compare_exchange(uint i,uint expected,uint desired);")?;
+        }
+    }
+    // Use one of this kernel's actual geometry contexts to type-check its
+    // unused body. Installation still compiles every referenced context.
+    let name=scene.programs.iter().find_map(|(name,p)|std::ptr::eq(p,program).then_some(name));
+    if let Some(geometry)=name.and_then(|name|scene.geometry.values().find(|geometry| {
+        let names=geometry.attributes.values().chain(geometry.widths.iter()).chain(geometry.count.iter())
+            .chain(geometry.ids.iter()).chain(geometry.status.iter().map(|s| &s.buffer)).cloned().collect();
+        geometry_solver_dependencies(scene,names).0.contains(name)
+    })) {
+        for (index,(semantic,buffer)) in geometry.attributes.iter().enumerate() {
+            let kind=scene.buffers[buffer].element_type;
+            accessor(&mut header,&format!("geometry_attribute_{index}"),kind)?;
+            if matches!(semantic.as_str(),"POSITION"|"NORMAL"|"TANGENT")
+                || ["TEXCOORD_","COLOR_","JOINTS_","WEIGHTS_"].iter().any(|prefix|
+                    semantic.strip_prefix(*prefix).is_some_and(|index|!index.is_empty() && index.bytes().all(|c|c.is_ascii_digit()))) {
+                accessor(&mut header,&format!("geometry_{semantic}"),kind)?;
+            }
+        }
+        for (alias,buffer) in [("width",&geometry.widths),("id",&geometry.ids),("count",&geometry.count)] {
+            if let Some(buffer)=buffer {accessor(&mut header,&format!("geometry_{alias}"),scene.buffers[buffer].element_type)?;}
+        }
+        header.push_str("extern static const uint geometry_attribute_count; extern static const uint geometry_vertex_capacity; uint geometry_vertex_count(); uint geometry_source_vertex(uint i);\n");
+    }
+    header.push_str("uint geometry_vertex_count(Geometry g); uint geometry_object_id(Geometry g); uint geometry_source_vertex_load(Geometry g,uint i); uint geometry_triangle_count(Geometry g); float3 geometry_POSITION_load(Geometry g,uint i); float3 geometry_NORMAL_load(Geometry g,uint i); uint3 geometry_triangle_load(Geometry g,uint i); float3 geometry_to_world(Geometry g,float3 p);\n");
+    Ok(header)
+}
+
 fn atomic_accessors(header: &mut String, binding: &str, ty: v2::BufferType, layout: &AttributeBinding) -> Result<()> {
     if matches!(ty, v2::BufferType::U32) {
         for operation in ["add", "sub", "min", "max", "and", "or", "xor", "exchange", "compare_exchange"] {
@@ -98,7 +156,7 @@ fn prepare_program(r:&Renderer,source:&v2::Scene,base:&std::path::Path,named:&Pr
                 .collect();
             ensure!(
                 used.len() as u32 <= r.device.limits().max_storage_buffers_per_shader_stage,
-                "compute {name}: too many buffer pages"
+                "{}", crate::gpu_memory::limit_message(format_args!("compute {name}"), format_args!("{} storage buffer pages",used.len()), format_args!("{} storage bindings",r.device.limits().max_storage_buffers_per_shader_stage), "reduce compute buffer pool sizes or the number of input buffers")
             );
             let atomic_pages: BTreeSet<_> = program.bindings.values()
                 .filter(|name| matches!(source.buffers[*name].element_type, v2::BufferType::U32 | v2::BufferType::F32))
@@ -548,14 +606,14 @@ impl Compute {
                 // Keep the geometry view, but alias its geometry-independent named
                 // state and schedule the connected programs only once globally.
                 geometry_scopes.push(GeometryScope {objects:BTreeSet::from([draw.object]),node:root.node,
-                    instance:root.instance_index,geometry:geometry_name,programs:BTreeSet::new(),
+                    instance:root.instance_index,geometry:geometry_name,programs:BTreeSet::new(),outputs:names,
                     buffers:ProgramBuffers {storage:attributes.storage.clone(),bindings:attributes.bindings.clone(),initial_identity:attributes.initial_identity.clone()},
                     pages:(0..attributes.storage.len()).collect()});
                 continue;
             }
             let (buffers, scope_pages) = private_geometry_buffers(r, attributes, &state, &names, &mut pages, &mut copy)?;
             geometry_scopes.push(GeometryScope { objects: BTreeSet::from([draw.object]), node: root.node,
-                instance: root.instance_index, geometry: geometry_name, programs, buffers, pages: scope_pages });
+                instance: root.instance_index, geometry: geometry_name, programs, outputs:names, buffers, pages: scope_pages });
         }
         if !geometry_scopes.is_empty() { crate::command_finish::Segments::submit(&r.queue, copy); }
         let mut initial = Vec::new();
@@ -697,7 +755,7 @@ impl Compute {
                 implicit_buffers.push((binding.binding, buffer));
             }
             ensure!(types.iter().filter(|(_, ty)| ty.is_some()).count() as u32 <= r.device.limits().max_storage_buffers_per_shader_stage,
-                "compute {name}: geometry/previous-state inputs and buffer pages exceed storage binding limit");
+                "{}", crate::gpu_memory::limit_message(format_args!("compute {name}: geometry/previous-state inputs and buffer pages"), format_args!("{} storage bindings",types.iter().filter(|(_,ty)|ty.is_some()).count()), format_args!("{} storage bindings",r.device.limits().max_storage_buffers_per_shader_stage), "reduce compute buffer pool sizes or the number of input buffers"));
             let query_program=!artifact.queries.is_empty();
             let group=if query_program {1} else {0};
             let pipeline=if query_program {trace.as_ref().unwrap().pipeline(r,prepared,&types)?}
@@ -982,11 +1040,14 @@ impl Compute {
     }
     pub(crate) fn bind_material_attributes(&mut self, buffers: &ProgramBuffers, rows: Vec<(String, u32, u32)>) -> Result<()> {
         for (source, index, destination) in rows {
-            let binding = &buffers.bindings[&source];
+            let mut owners=self.geometry_scopes.iter().filter(|scope|scope.outputs.contains(&source));
+            let owner=owners.next().filter(|_|owners.next().is_none());
+            let binding = &owner.map_or(buffers,|scope| &scope.buffers).bindings[&source];
             ensure!(index < binding.count, "material attribute row exceeds source capacity");
             let span = binding.spans.iter().find(|span| index >= span.first && index < span.first + span.count)
                 .context("material attribute row has no installed range")?;
-            self.material_attributes.push((span.page as usize,
+            let page=owner.map_or(span.page as usize,|scope|scope.pages[span.page as usize]);
+            self.material_attributes.push((page,
                 u64::from(span.offset + (index - span.first) * binding.width) * 4,
                 u64::from(destination) * 4, u64::from(binding.width) * 4));
             self.material_attribute_sources.push(source);
@@ -1583,7 +1644,7 @@ impl Compute {
         let count = self.named_pages;
         ensure!(
             2 * count as u32 + 5 <= r.device.limits().max_storage_buffers_per_shader_stage,
-            "compute instance bridge exceeds device storage binding limit"
+            "{}", crate::gpu_memory::limit_message("compute instance bridge", format_args!("{} storage bindings",2*count+5), format_args!("{} storage bindings",r.device.limits().max_storage_buffers_per_shader_stage), "reduce compute buffer pool size or the number of named buffers")
         );
         for i in 0..count {
             writeln!(
@@ -1992,3 +2053,11 @@ mod atomic_contract_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "cloth_tests.rs"]
+mod cloth_rim_tests;
+
+#[cfg(test)]
+#[path = "compute_declarations_tests.rs"]
+mod compute_declarations_tests;

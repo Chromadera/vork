@@ -197,8 +197,7 @@ mod tests {
         std::fs::create_dir(&root)?;
         let store=disk_cache::Store::for_test(root.clone());
         let path=store.path("hdr-filtered",9,blake3::hash(b"held-lock"));
-        let lock=std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(root.join("store.lock"))?;
-        lock.lock()?;
+        let lock=disk_cache::lock_store(&root)?;
         let expired=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         std::thread::scope(|scope| -> Result<()> {
             let (release,wait)=std::sync::mpsc::channel();

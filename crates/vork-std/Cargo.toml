@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+vork-path = { path = "../vork-path" }
+vork-text = { path = "../vork-text" }
 vork-time = { path = "../vork-time" }
 anyhow = "1"
 glam = {version="0.30",features=["serde"]}

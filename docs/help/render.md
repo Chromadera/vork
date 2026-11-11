@@ -13,6 +13,24 @@ A white RGB background looks grey by default because AgX maps scene-linear
 white into the display's middle range to leave room for bright highlights.
 std/standard at default exposure/gamma maps white background RGB to screen white;
 this display transform affects the whole image. EXR remains scene-linear.
+TONE CURVE AND GRAIN
+Set the tone curve on render.display, for example:
+"display":{"program":"std/agx","inputs":{"look":"high_contrast","exposure":1}}
+inside render. Use look "none" for the default AgX look, or program "std/standard"
+for the Standard display transform. `vork help field std/agx` lists the inputs.
+There is no built-in film-grain input. Author a display program for artistic grain;
+`vork help programs --all` describes DisplayContext (pixel, seed, bit_depth).
+Display dither is controlled by dither_intensity (0 disables it); it reduces
+encoding banding. For sampling noise, increase --set samples=64 or use
+--set denoise=true; these controls do not add artistic grain.
+
+MOVIES
+Set render.duration in seconds and render.fps, e.g. "duration":2,"fps":24,
+then run `vork render scene.json --out shot.mp4` to render the whole 48-frame clip.
+A .png destination renders one still. Use `--out frames/` for a PNG sequence,
+`--out shot.mov` to keep alpha, or `--frame-start 0 --frame-end 23` for an
+inclusive frame range. MP4 needs opaque final alpha; `vork help outputs` covers encodings.
+
 Motion-blur shutter is in output frames: exposure time in seconds is shutter/fps.
 Previous-pose and shutter sample times clamp to zero before animation-layer retiming.
 AgX exposure is stops, default 0, with no automatic exposure.

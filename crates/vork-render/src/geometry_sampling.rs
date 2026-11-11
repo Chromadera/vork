@@ -236,7 +236,7 @@ impl Inputs {
                 .min(r.device.limits().max_buffer_size);
             ensure!(
                 geometry_bytes * 2 <= limit,
-                "canonical predecessor exceeds the device storage binding limit; split the geometry into smaller objects"
+                "{}", crate::gpu_memory::limit_message("canonical predecessor", format_args!("{} bytes",geometry_bytes*2), format_args!("{limit} bytes"), "split geometry into smaller objects")
             );
             let buffer = |label, size, usage| {
                 crate::gpu_memory::buffer(
@@ -314,7 +314,7 @@ impl Inputs {
                     ((4 + deform.joints * 16 + deform.targets).div_ceil(4) * 16) as u64;
                 ensure!(
                     param_bytes <= limit,
-                    "canonical skin palette exceeds the storage binding limit; split the skin"
+                    "{}", crate::gpu_memory::limit_message("canonical skin palette", format_args!("{param_bytes} bytes"), format_args!("{limit} bytes"), "split the skin into smaller objects")
                 );
                 let params = buffer(
                     "canonical predecessor palette",
@@ -382,7 +382,7 @@ impl Inputs {
                 .collect();
             ensure!(
                 pages.len() + 1 <= r.device.limits().max_storage_buffers_per_shader_stage as usize,
-                "deformed predecessor pages exceed the device storage binding count; split the geometry into smaller objects"
+                "{}", crate::gpu_memory::limit_message("deformed predecessor pages", format_args!("{} storage bindings",pages.len()+1), format_args!("{} storage bindings",r.device.limits().max_storage_buffers_per_shader_stage), "split geometry into smaller objects")
             );
             let slots: BTreeMap<_, _> = pages
                 .iter()

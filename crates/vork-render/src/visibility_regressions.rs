@@ -1,4 +1,6 @@
 use super::*;
+#[path = "test_capture.rs"]
+mod capture_test;
 
 #[test]
 fn hidden_world_medium_has_no_absorption_or_emission() -> Result<()> {
@@ -19,28 +21,39 @@ fn hidden_world_medium_has_no_absorption_or_emission() -> Result<()> {
             let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/analytic.json"))?;
             input["buffers"] = fixture["buffers"].clone();
             input["geometry"] = fixture["geometry"].clone();
-            input["nodes"].as_array_mut().unwrap().push(serde_json::json!({"type":"mesh","geometry":"shape_box","materials":["fog"],"translation":[0,-1.8,-2.4]}));
+            // A varying medium requires a finite boundary. Keep that boundary
+            // under the animated parent so this still tests inherited visibility.
+            input["nodes"][1]["children"][0].as_object_mut().unwrap().remove("medium");
+            input["nodes"][1]["children"].as_array_mut().unwrap().push(serde_json::json!({"type":"mesh","geometry":"shape_box","materials":["fog"],"translation":[0,-1.8,-2.4]}));
         }
         if capture {
-            input["buffers"] = serde_json::json!({
-                "p":{"type":"vec3","data":[[-1,-1.4,-0.2],[1,-1.4,-0.2],[1,0.2,-1.4],[-1,0.2,-1.4]]},
-                "uv":{"type":"vec2","data":[[0,0],[1,0],[1,1],[0,1]]},
-                "i":{"type":"u32","data":[0,1,2,0,2,3]}});
-            input["geometry"] = serde_json::json!({"screen":{"attributes":{"POSITION":"p","TEXCOORD_0":"uv"},"indices":"i"}});
-            input["materials"]["display"] = serde_json::json!({"inputs":{"base_weight":0,"emission_color":{"image":"feed"},"emission_luminance":1}});
-            input["images"] = serde_json::json!({"feed":{"render":{"camera":"cam","root":"parent","resolution":[8,8],"background":[0.4,0.4,0.4]}}});
-            input["nodes"].as_array_mut().unwrap().push(serde_json::json!({"type":"mesh","name":"screen","geometry":"screen","materials":["display"]}));
-            input["render"]["root"] = "screen".into();
-
+            // Consume a whole-scene capture without a monitor surface inside
+            // the medium or unsupported path subtree membership.
+            input["images"] = serde_json::json!({"feed":{"render":{"camera":"cam","resolution":[8,8],"background":[0.4,0.4,0.4]}}});
+            input["render"]["compositor"] = capture_test::compositor(&mut input, "feed");
+        }
+        if falloff > 0. && !bounded {
+            let error = renderer.install(vork_scene::v2::from_test_value(input)?, &base)
+                .err().expect("varying world fog must require a finite domain");
+            assert!(format!("{error:#}").contains("sampled heterogeneous world medium fog needs a finite domain"), "{error:#}");
+            continue;
         }
         let mut installed = renderer.install(vork_scene::v2::from_test_value(input.clone())?,&base)?;
         let mut frame = installed.create_frame_slot(&renderer,Default::default())?;
         let mut images = Vec::new();
         for time in [0.,1.,0.] {
-            images.push(installed.render_frame(&renderer, &mut frame, time)?.rgba);
+            let output = installed.render_frame(&renderer, &mut frame, time)?;
+            if let Some(out) = std::env::var_os("VORK_TEST_OUTPUT") {
+                std::fs::create_dir_all(&out)?;
+                image::save_buffer(Path::new(&out).join(format!("medium-{falloff}-{capture}-{bounded}-{time}.png")), &output.rgba, 8, 8, image::ColorType::Rgba8)?;
+            }
+            images.push(output.rgba);
         }
         let mut clear = input;
         clear["nodes"][1]["children"][0].as_object_mut().unwrap().remove("medium");
+        if bounded {
+            clear["nodes"][1]["children"].as_array_mut().unwrap().pop();
+        }
         let mut installed = renderer.install(vork_scene::v2::from_test_value(clear)?,&base)?;
         let mut frame = installed.create_frame_slot(&renderer,Default::default())?;
         let clear = installed.render_frame(&renderer, &mut frame, 0.)?.rgba;

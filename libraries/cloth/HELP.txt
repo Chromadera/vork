@@ -1,5 +1,7 @@
 cloth: GPU XPBD cloth on the ordinary geometry compute chain.
 Python entry point: vork.cloth.attach(scene, node, *, pins, collider, ...).
+attach modifies scene in place and returns None; it has no returned output map.
+The node's geometry reference selects the generated private geometry and buffers.
 Call before write_scene, on native triangle buffers in world metres. Pins are
 vertex indices; collider names a native mesh, including animated skin or morphs.
 Scenes without cloth install no cloth resources or dispatches.

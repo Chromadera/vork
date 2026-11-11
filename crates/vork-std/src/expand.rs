@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
 pub fn expand_scene(document: &mut Value, base: &Path) -> Result<()> {
-    fn expand(value: &mut Value, base: &Path, built: &mut BTreeMap<String, Value>) -> Result<()> {
+    fn expand(value: &mut Value, base: &Path, built: &mut BTreeMap<String, Value>, apply: bool) -> Result<()> {
         let Some(shape) = value.get("std") else {
             return Ok(());
         };
@@ -14,7 +14,7 @@ pub fn expand_scene(document: &mut Value, base: &Path) -> Result<()> {
             .to_owned();
         let key = value.to_string();
         if let Some(result) = built.get(&key) {
-            *value = result.clone();
+            if apply { *value = result.clone(); }
             return Ok(());
         }
         let mut options = value.as_object().context("std geometry object")?.clone();
@@ -52,30 +52,47 @@ pub fn expand_scene(document: &mut Value, base: &Path) -> Result<()> {
             let name = indices.as_str().context("std index buffer name")?;
             *indices = fragment["buffers"][name].clone();
         }
-        built.insert(key, geometry.clone());
-        *value = geometry;
+        if apply { *value = geometry.clone(); }
+        built.insert(key, geometry);
         Ok(())
     }
-    fn nodes(value: &mut Value, base: &Path, built: &mut BTreeMap<String, Value>) -> Result<()> {
+    fn nodes(value: &mut Value, base: &Path, built: &mut BTreeMap<String, Value>, errors: &mut Vec<anyhow::Error>, apply: bool) {
         for node in value.as_array_mut().into_iter().flatten() {
             if let Some(geometry) = node.get_mut("geometry") {
-                expand(geometry, base, built).context("inline node geometry")?;
+                if let Err(error) = expand(geometry, base, built, apply).context("inline node geometry") {
+                    errors.push(error);
+                }
             }
             if let Some(children) = node.get_mut("children") {
-                nodes(children, base, built)?;
+                nodes(children, base, built, errors, apply);
             }
         }
-        Ok(())
     }
     let mut built = BTreeMap::new();
+    let mut errors = Vec::new();
     if let Some(table) = document.get_mut("geometry").and_then(Value::as_object_mut) {
         for (name, geometry) in table {
-            expand(geometry, base, &mut built).with_context(|| format!("geometry {name}"))?;
+            if let Err(error) = expand(geometry, base, &mut built, false).with_context(|| format!("geometry {name}")) {
+                errors.push(error);
+            }
         }
     }
     if let Some(value) = document.get_mut("nodes") {
-        nodes(value, base, &mut built)?;
+        nodes(value, base, &mut built, &mut errors, false);
     }
+    if !errors.is_empty() {
+        let messages = errors.iter().map(|error| format!("{error:#}")).collect::<Vec<_>>().join("\n");
+        return Err(errors.remove(0).context(format!("{messages}\nCorrect each geometry builder or restore its font (choose a font covering the text); see vork help std --all")));
+    }
+    // Publish only after every builder succeeds. The existing deduplication map
+    // owns the prepared geometry, so this walk does not evaluate builders again.
+    if let Some(table) = document.get_mut("geometry").and_then(Value::as_object_mut) {
+        for geometry in table.values_mut() { expand(geometry, base, &mut built, true)?; }
+    }
+    if let Some(value) = document.get_mut("nodes") {
+        nodes(value, base, &mut built, &mut errors, true);
+    }
+    debug_assert!(errors.is_empty());
     Ok(())
 }
 
@@ -91,6 +108,20 @@ pub fn load_scene(path: &Path) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn expansion_reports_independent_builder_failures_together() {
+        let mut scene = json!({"version":2,"geometry":{
+            "first":{"std":"not_a_builder"},"second":{"std":"also_not_a_builder"},"valid":{"std":"box"}},
+            "nodes":[{"geometry":{"std":"third_invalid_builder"}},
+                {"children":[{"geometry":{"std":"fourth_invalid_builder"}}]}]});
+        let original = scene.clone();
+        let error = format!("{:#}", expand_scene(&mut scene, Path::new(".")).unwrap_err());
+        assert_eq!(scene, original, "a failed expansion must not publish successful siblings");
+        for name in ["not_a_builder", "also_not_a_builder", "third_invalid_builder", "fourth_invalid_builder"] {
+            assert!(error.contains(name), "{error}");
+        }
+    }
 
     #[test]
     fn expansion_owns_identity_and_preserves_unvalidated_content() -> Result<()> {

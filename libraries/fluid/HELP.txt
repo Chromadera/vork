@@ -7,6 +7,11 @@ grid sizes or pressure iterations. --at T replays simulation ticks from zero to 
 Begin at --at 0 with a coarse grid and small particle budget; then advance time.
 Watch shader/pipeline progress; later runs reuse cached programs. GPU timing depends
 on simulation grids and tick count as well as image resolution.
+build() returns geometry["water"] using buffers["surface"] and
+geometry["floor_film"] using buffers["film_surface"]. With whitewater_budget > 0,
+it also returns geometry["whitewater"] using buffers["white_draw_position"],
+buffers["white_width"], buffers["white_count"] and buffers["white_draw_id"].
+Use these geometry keys for mesh nodes; buffer keys name their data.
 Use vork help fluid --all for the simulation reference.
 
 <!-- all -->
@@ -64,22 +69,28 @@ accepted initial_marker slots times spacing³. Changing inflow mass requires an
 authored mass-accounting/recycling pass; initial_field is not a volume ledger.
 
 OUTPUTS
-surface: implicit scalar grid in local [-1,1]³; node translation=origin and scale=extent
-in metres. wetness: XZ subgrid film depth, multiply by scale for metres.
-floor_film / film_surface: closed implicit height surface on a flat opaque rendered
-floor. Use an optical water material, XZ translation=origin.xz, Y translation=
+geometry["water"] uses buffers["surface"]: implicit scalar grid in local [-1,1]³;
+node translation=origin and scale=extent in metres. buffers["wetness"]: XZ subgrid
+film depth, multiply by scale for metres.
+geometry["floor_film"] uses buffers["film_surface"]: closed implicit height surface
+on a flat opaque rendered floor. Use an optical water material,
+XZ translation=origin.xz, Y translation=
 film_height(DOMAIN_ORIGIN.xz)*scale, and scale=[extent.x,2*extent.y,extent.z] in
 metres. Three Y samples encode height without losing sub-cell film. XZ boundary depths
 extend to the domain faces, where explicit closure preserves edge/corner water. The lower
 closure lies within floating-point roundoff of the support. The floor and film
 must share the authored height; the bounded field rejects overflowing depth.
-white_draw_position/white_width: compact point positions/fixed diameters in solver units;
-use node scale=scale. white_count is the active prefix. Width is not compute-bound:
+With whitewater_budget > 0 only, geometry["whitewater"] uses
+buffers["white_draw_position"] for compact point positions and buffers["white_width"]
+for fixed diameters, both in solver units; use node scale=scale.
+buffers["white_count"] is the active prefix. Width is not compute-bound:
 the renderer can bound sphere tessellation from its physical size and camera near plane.
-white_draw_id carries slot/generation identities through compaction. Bind it as
+buffers["white_draw_id"] carries slot/generation identities through compaction. Bind it as
 geometry.ids so deaths, compaction and slot reuse preserve historical correspondence.
-white_position/white_life/white_kind are simulation slots, before compaction.
-white_kind: 0 inactive, 1 spray, 2 foam, 3 bubble.
+buffers["white_position"], buffers["white_life"] and buffers["white_kind"]
+are simulation slots, before compaction; these whitewater buffers are also
+absent when whitewater_budget is zero.
+buffers["white_kind"]: 0 inactive, 1 spray, 2 foam, 3 bubble.
 The caller supplies optical materials; whitewater points require opaque coverage.
 The helper uses unprefixed buffer/program names: rename maps/references for multiple fluids.
 

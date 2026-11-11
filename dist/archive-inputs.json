@@ -45,5 +45,9 @@
   {
     "source": "LICENSE",
     "destination": "python/LICENSE"
+  },
+  {
+    "source": "skills/vork",
+    "destination": "skills/vork"
   }
 ]

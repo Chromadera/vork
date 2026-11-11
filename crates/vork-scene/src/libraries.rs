@@ -49,7 +49,7 @@ pub const LIBRARIES: &[Library] = &[
         modules: modules!("std":
             "openpbr_core" false, "texture" false, "normal_filter" false, "hair" true, "hair_bsdf" false,
             "camera" true, "sky" true, "environment_image" true, "grid" false, "pnanovdb" false,
-            "color" false,
+            "color" false, "white_balance" false, "bloom" true, "procedurals" false, "vector" false,
             "agx" true, "standard" true, "display" false),
         profiles: &[
             ("std/previs", include_str!("../../../libraries/std/profiles/previs.json")),
@@ -141,9 +141,9 @@ fn test_modules() -> impl Iterator<Item = &'static Module> {
 }
 
 // Undocumented compatibility through 0.5.x. Never include these in library help or setup.
-pub const COMPATIBILITY_MODULES: &[&str] = &["std/bloom", "post/white_balance", "std/procedurals", "std/vector", "std/particles"];
+pub const COMPATIBILITY_MODULES: &[&str] = &["post/white_balance", "std/particles"];
 fn compatibility_modules() -> impl Iterator<Item = &'static Module> {
-    modules!("std": "bloom" true, "procedurals" false, "vector" false, "particles" false).iter()
+    modules!("std": "particles" false).iter()
         .chain(modules!("post": "white_balance" true))
 }
 
@@ -154,5 +154,14 @@ fn compatibility_expires_in_06() {
     if version.as_slice() >= [0, 6].as_slice() {
         let remaining: Vec<_> = COMPATIBILITY_MODULES.iter().filter(|name| module_source(name).is_some()).collect();
         assert!(remaining.is_empty(), "remove expired 0.4 compatibility modules: {remaining:?}");
+    }
+}
+
+#[test]
+fn permanent_std_homes_are_visible_and_unique() {
+    for name in ["std/bloom", "std/procedurals", "std/vector", "std/color", "std/white_balance"] {
+        assert!(!COMPATIBILITY_MODULES.contains(&name));
+        assert!(library("std").unwrap().modules.iter().any(|module| module.name == name));
+        assert_eq!(modules().filter(|module| module.name == name).count(), 1);
     }
 }

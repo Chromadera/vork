@@ -5,14 +5,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Check the complete binding against the limits requested from this adapter.
+/// Shared diagnostic for resource and dispatch admission against a known device limit.
+pub(crate) use vork_encode::gpu_memory::limit_message;
+
+/// Check the complete binding, with recovery advice specific to its allocation.
 /// Allocation capacity alone does not imply that a buffer can be bound whole.
-pub(crate) fn storage_binding(limits: &wgpu::Limits, label: &str, bytes: u64) -> Result<()> {
+pub(crate) fn storage_binding(limits: &wgpu::Limits, label: &str, bytes: u64, remedy: &str) -> Result<()> {
     anyhow::ensure!(
         bytes <= limits.max_storage_buffer_binding_size && bytes <= limits.max_buffer_size,
-        "{label} needs {bytes} bytes in one storage binding; device max_storage_buffer_binding_size={} bytes, max_buffer_size={} bytes",
-        limits.max_storage_buffer_binding_size,
-        limits.max_buffer_size,
+        "{}", limit_message(label, format_args!("{bytes} bytes in one storage binding"),
+            format_args!("max_storage_buffer_binding_size={} bytes, max_buffer_size={} bytes", limits.max_storage_buffer_binding_size, limits.max_buffer_size), remedy)
     );
     Ok(())
 }
@@ -54,16 +56,14 @@ pub(crate) fn frame_bindings<const N: usize>(
         remedies.push(format!("reduce the rendered resolution to {w}x{h} or smaller"));
     }
     let advice = if remedies.is_empty() {
-        "no supported profile budget or resolution fits this allocation".to_owned()
+        "use a GPU with larger storage binding and buffer limits; no supported profile budget or resolution fits this allocation".to_owned()
     } else {
         remedies.join(", or ")
     };
-    anyhow::bail!(
-        "{label} needs {needed} bytes in one storage binding; device max_storage_buffer_binding_size={} bytes, max_buffer_size={} bytes \
-         (at {width}x{height} with {samples} samples; camera budget ceiling at this extent={fewer} samples); {advice}",
-        limits.max_storage_buffer_binding_size,
-        limits.max_buffer_size,
-    )
+    anyhow::bail!("{}", limit_message(label,
+        format_args!("{needed} bytes at {width}x{height} with {samples} samples"),
+        format_args!("max_storage_buffer_binding_size={} bytes, max_buffer_size={} bytes (camera budget ceiling at this extent={fewer} samples)", limits.max_storage_buffer_binding_size, limits.max_buffer_size),
+        &advice))
 }
 
 /// How often a wait gives the driver a chance to report a hung GPU.
@@ -259,6 +259,19 @@ impl Errors {
             *first = Some(Failure { oom, message });
         }
     }
+    /// A completed map alone does not establish that frame execution succeeded.
+    pub(crate) fn frame_complete(&self, validity: Result<()>) -> Result<()> {
+        if let Err(error) = validity {
+            // The callback can lag successful fence/map results after a reset.
+            // Preserve an existing native failure (especially OOM), and retain
+            // this failure so no successor can publish from the suspect device.
+            self.0.lock().unwrap().get_or_insert_with(|| Failure {
+                oom: false,
+                message: format!("GPU device lost: frame completion could not be verified: {error:#}"),
+            });
+        }
+        self.check().map_err(|error| error.context("frame discarded"))
+    }
     pub(crate) fn check(&self) -> Result<()> {
         if let Some(error) = self.0.lock().unwrap().as_ref() {
             let message=error.message.clone();
@@ -390,6 +403,59 @@ pub(crate) fn texture(device: &wgpu::Device, desc: &wgpu::TextureDescriptor<'_>)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn limit_messages_include_demand_limit_remedy_and_help() -> Result<()> {
+        for (binding, allocation) in [(127, 256), (256, 127)] {
+            let limits = wgpu::Limits {
+                max_storage_buffer_binding_size: binding,
+                max_buffer_size: allocation,
+                ..Default::default()
+            };
+            let error = storage_binding(&limits, "test pool", 128, "reduce pool size").unwrap_err().to_string();
+            for expected in ["test pool", "128 bytes", &format!("max_storage_buffer_binding_size={binding} bytes"),
+                &format!("max_buffer_size={allocation} bytes"), "reduce pool size", "vork help limits"] {
+                assert!(error.contains(expected), "{error}");
+            }
+            storage_binding(&limits, "test pool", 127, "reduce pool size")?;
+        }
+        let limits = wgpu::Limits {max_storage_buffer_binding_size: 128, max_buffer_size: 256, ..Default::default()};
+        let error = frame_bindings(&limits, [8, 8], 4, |[w,h], samples| {
+            [("sample records", u64::from(w)*u64::from(h)*u64::from(samples))]
+        }).unwrap_err().to_string();
+        for expected in ["256 bytes", "8x8", "4 samples", "128 bytes", "reduce the rendered resolution", "vork help limits"] {
+            assert!(error.contains(expected), "{error}");
+        }
+        Ok(())
+    }
+
+    /// Grep every renderer source, including subdirectories, so new literal
+    /// refusals cannot bypass the common diagnostic contract.
+    #[test]
+    fn device_limit_refusals_use_the_message_helper() -> Result<()> {
+        let needle = ["exceeds", " device limit"].concat();
+        let variants = [needle.clone(), ["exceed", " device limits"].concat(), ["exceeds", " GPU texture side"].concat()];
+        let canonical = format!("format!(\"{{label}} {needle}: requested {{requested}}; limit {{limit}}; {{remedy}}; see vork help limits\")");
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut dirs = vec![root.join("src"), root.join("../vork-encode/src")];
+        let mut helper_count = 0;
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.is_dir() { dirs.push(path); continue; }
+                if path.extension().is_none_or(|ext| ext != "rs") { continue; }
+                let source = std::fs::read_to_string(&path)?;
+                for (line, text) in source.lines().enumerate() {
+                    if !variants.iter().any(|phrase| text.contains(phrase)) { continue; }
+                    assert!(path.file_name().is_some_and(|name| name == "gpu_memory.rs") && text.trim() == canonical,
+                        "{}:{}: device-limit refusal must use gpu_memory::limit_message", path.display(), line+1);
+                    helper_count += 1;
+                }
+            }
+        }
+        assert_eq!(helper_count, 1, "the helper must own the refusal text");
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn partial_optional_admission_records_no_transfers() {
@@ -411,12 +477,12 @@ mod tests {
         for bytes in [317_030_400, 1_276_706_584, 920_858_124, 557_962_124] {
             limits.max_buffer_size = 2 << 30;
             limits.max_storage_buffer_binding_size = 128 << 20;
-            let error = storage_binding(&limits, "authored resource", bytes).unwrap_err();
+            let error = storage_binding(&limits, "authored resource", bytes, "reduce the resource pool size").unwrap_err();
             assert!(error.to_string().contains(&format!("{bytes} bytes")));
             limits.max_storage_buffer_binding_size = bytes;
-            storage_binding(&limits, "authored resource", bytes)?;
+            storage_binding(&limits, "authored resource", bytes, "reduce the resource pool size")?;
             limits.max_buffer_size = bytes - 1;
-            assert!(storage_binding(&limits, "authored resource", bytes).is_err());
+            assert!(storage_binding(&limits, "authored resource", bytes, "reduce the resource pool size").is_err());
         }
         Ok(())
     }
@@ -444,6 +510,32 @@ mod tests {
         errors.lose("Metal native fault 0x42");
         let combined=format!("{:#}",errors.check().unwrap_err());
         assert!(combined.contains("GPU out of memory") && combined.contains("Metal native fault 0x42"), "{combined}");
+    }
+
+    #[test]
+    fn invalid_frame_timestamps_discard_frame_without_loss_callback() {
+        for (begin, end) in [(0, 0), (0, 20), (20, 0), (20, 19)] {
+            let errors = Errors::default();
+            let timing = crate::timing::elapsed_ms(begin, end, 1.)
+                .map(|_| ())
+                .ok_or_else(|| anyhow::anyhow!("invalid GPU timestamp pair for query 24, sample 0: begin={begin}, end={end}"));
+            let error = errors.frame_complete(timing).expect_err("invalid frame was published");
+            assert_eq!(crate::failure::exit_code(&error), 4);
+            let message = format!("{error:#}");
+            assert!(message.contains("GPU device lost") && message.contains("frame discarded") && message.contains("query 24"), "{message}");
+            assert!(errors.check().is_err(), "a suspect device must not publish successors");
+        }
+    }
+
+    #[test]
+    fn frame_completion_preserves_loss_and_accepts_valid_timestamps() {
+        let errors = Errors::default();
+        errors.frame_complete(Ok(())).unwrap();
+        errors.lose("simulated delayed driver reset");
+        let error = errors.frame_complete(Err(anyhow::anyhow!("secondary invalid timestamp"))).unwrap_err();
+        assert_eq!(crate::failure::exit_code(&error), 4);
+        let message = format!("{error:#}");
+        assert!(message.contains("simulated delayed driver reset") && message.contains("frame discarded"), "{message}");
     }
 
     #[test]

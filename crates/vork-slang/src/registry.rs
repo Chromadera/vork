@@ -86,7 +86,7 @@ registry! {
     NONFINITE_RESOLVE: usize => u32, "REG_NONFINITE_RESOLVE" = 3;
     // Exposure report over the 8-bit display image: low/high word pairs count
     // Alpha-weighted clipped, near-black and quantized luma sums, then coverage (0..255 per pixel).
-    EXPOSURE_WORDS: usize => u32, "REG_EXPOSURE_WORDS" = 8;
+    EXPOSURE_WORDS: usize => u32, "REG_EXPOSURE_WORDS" = 10;
     EXPOSURE_LUMA_SCALE: f32 => f32, "REG_EXPOSURE_LUMA_SCALE" = 65535.;
     // ARRI false-colour bands: white clipping 99-100% (here: any display channel),
     // black clipping 0-2.5% (display Rec.709 luma).

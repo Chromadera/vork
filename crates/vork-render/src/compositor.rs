@@ -334,7 +334,7 @@ pub(crate) fn record(
             .context("compositor image size overflows")?;
         let limits = r.device.limits();
         ensure!(bytes <= u64::from(limits.max_storage_buffer_binding_size) && bytes <= limits.max_buffer_size,
-            "compositor entry {index}: image exceeds device buffer limits");
+            "{}", crate::gpu_memory::limit_message(format_args!("compositor entry {index}"), format_args!("{bytes} bytes"), format_args!("storage binding={} bytes, buffer={} bytes",limits.max_storage_buffer_binding_size,limits.max_buffer_size), "reduce compositor image resolution"));
         let output = s.transients.buffer(&r.device, &format!("{stage:?} image {index}"),
             bytes,
             wgpu::BufferUsages::STORAGE);

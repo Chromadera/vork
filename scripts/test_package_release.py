@@ -158,7 +158,7 @@ class PackageReleaseTests(unittest.TestCase):
             self.assertEqual(command, 'prepare-release-shaders')
             self.assertIn(str(ROOT / 'crates/vork-scene/src/starter.json'), scenes)
             if (ROOT / 'scenes').is_dir():
-                self.assertTrue({ROOT / 'examples/orbit.json', ROOT / 'examples/jitter-aa.json'}
+                self.assertTrue({ROOT / 'examples/orbit.json', ROOT / 'examples/jitter-aa.json'} # export-example-private: guarded by private scenes directory
                                 .issubset(map(Path, scenes)))
             for scene in scenes:
                 self.assertIn('nodes', json.loads(Path(scene).read_text()))
@@ -200,6 +200,8 @@ class PackageReleaseTests(unittest.TestCase):
             archive = next((root / 'out').glob('*.tar.gz'))
             with tarfile.open(archive) as package:
                 self.assertIn('vork', package.getnames())
+                skill = 'skills/vork/SKILL.md'
+                self.assertEqual(package.extractfile(skill).read(), (ROOT / skill).read_bytes())
                 self.assertIn('vork-slang-filesystem', package.getnames())
                 sdk_metadata = json.loads(package.extractfile('sdk/package.json').read())
                 self.assertEqual(sdk_metadata['exports'], {
@@ -218,9 +220,9 @@ class PackageReleaseTests(unittest.TestCase):
                 expected = {line for line in (ROOT / 'dist/example-payload.txt').read_text().splitlines()
                             if line and not line.startswith('#')}
                 actual = {entry.name for entry in package.getmembers()
-                          if entry.isfile() and entry.name.startswith('examples/')}
+                          if entry.isfile() and entry.name.startswith(('examples/', 'skills/'))}
                 self.assertEqual(actual, expected)
-                self.assertNotIn('examples/murmuration/scene.json', actual)
+                self.assertNotIn('examples/murmuration/scene.json', actual) # export-example-absent: asserts private scene is excluded
                 self.assertIn('examples/murmuration/launch/skim.json.in', actual)
                 self.assertIn('examples/cake/scene.json.in', actual)
                 for name in ('vignette.slang', 'chromatic-dispersion.slang', 'glare.slang',

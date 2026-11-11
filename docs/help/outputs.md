@@ -4,7 +4,9 @@ PNG filename frame patterns (two or more # characters or printf-style %d/%04d) a
 directory (no extension or trailing /): NNNNNN.png frames plus channel PNGs
 PATH/%06d.exr: one multilayer OpenEXR per frame, scene-linear premultiplied, before exposure
 .mp4 H.264 (requires opaque final alpha on every composited frame); .mov ProRes 4444 RGBA (keeps final alpha)
---at SECONDS: one still; needs .png, directory or EXR. --frame-start/--frame-end N: inclusive
+--at SECONDS: one still; needs .png, directory or EXR. EXR stills also require %06d
+in the filename, even with --at; a plain still.exr is refused.
+--frame-start/--frame-end N: inclusive
 absolute frame indices, default the whole clip; not with --at.
 Sidecars: OUT/meta.json for directories; OUT.meta.json for files (fps, per-frame camera and depth unit, object_ids pass_index -> node,
 exposure, warnings [{code,requested,dropped}] for omitted/substituted effects); camera.json in directories or OUT.camera.json for files when camera is a channel (videos always; vork help camera-json).
@@ -29,9 +31,13 @@ film, opaque black on opaque film. Channel selection never changes combined.
 
 meta.json is version 3: frame times are numeric evaluation seconds; fps is a
 number or rational string. camera.json remains version 2.
-An overwrite invalidates previous completion metadata and removes owned old
-frames/channels before writing. Save outputs elsewhere to retain them; serialize
-writers per destination (concurrent writes fail "output already in use").
+Before writing, a run invalidates previous completion metadata, camera and timing
+sidecars. Explicit frame ranges and --at stills preserve numbered PNG/EXR frames
+outside the selection; selected frames and their old channels are removed, even
+if rendering then fails. Whole-clip renders remove all owned old frames/channels,
+including trailing frames. Unrelated files survive. Metadata and sidecars describe
+only the current invocation, not accumulated frames. Serialize writers per
+destination (concurrent writes fail "output already in use").
 Only consume a shot after success with fresh meta.json; partial files can remain
 on failure. Cleanup also matches native non-UTF-8 filenames.
 

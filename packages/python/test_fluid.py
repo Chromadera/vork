@@ -1,8 +1,11 @@
 """Physical-unit and scheduling invariants, without GPU dependencies."""
+import inspect
+import re
 import unittest
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vork import fluid
 from vork.fluid import build
 
 class BuilderTest(unittest.TestCase):
@@ -10,6 +13,37 @@ class BuilderTest(unittest.TestCase):
         args=dict(callbacks='',extent=[3,1,3],particle_budget=1000,speed=3.)
         args.update(changes)
         return build(**args)
+
+    def test_documented_output_keys_match_builder(self):
+        help_text = (Path(__file__).resolve().parents[2] /
+                     'libraries/fluid/HELP.txt').read_text()
+        documents = {'help': help_text, 'module': fluid.__doc__,
+                     'build': inspect.getdoc(build)}
+        for label, document in documents.items():
+            keys = re.findall(r'(geometry|buffers)\["([^"\n]+)"\]', document)
+            with self.subTest(document=label):
+                self.assertTrue(keys)
+                scene = self.make(whitewater_budget=8)
+                for table, key in keys:
+                    self.assertIn(key, scene[table], (label, table, key))
+                self.assertEqual({key for table, key in keys if table == 'geometry'},
+                                 set(scene['geometry']))
+                # The default topic is the first contract an author sees.
+                if label == 'help':
+                    self.assertIn('geometry["water"]', document.split('<!-- all -->')[0])
+        for budget in (0, 8):
+            with self.subTest(whitewater_budget=budget):
+                scene = self.make(whitewater_budget=budget)
+                self.assertEqual(set(scene['geometry']),
+                                 {'water', 'floor_film'} | ({'whitewater'} if budget else set()))
+                for geometry in scene['geometry'].values():
+                    references = list(geometry['attributes'].values())
+                    references += [geometry[k] for k in ('widths', 'count', 'ids')
+                                   if k in geometry]
+                    for key in references:
+                        self.assertIn(key, scene['buffers'])
+                self.assertEqual(any(k.startswith('white_') for k in scene['buffers']),
+                                 bool(budget))
 
     def test_froude_scale_and_capillarity(self):
         a=self.make(surface_tension=0.)

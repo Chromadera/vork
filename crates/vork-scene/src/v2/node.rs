@@ -142,7 +142,7 @@ pub enum NodeKind {
         #[schemars(extend("x-source" = "Blender 5.2.1 Light.energy (Add Light default)", "x-help-path" = "light.energy", "x-help" = "number|null; sun W/m²; local W; environment multiplier"))]
         energy: Option<f32>,
         #[serde(default = "constants::sun_angle")]
-        #[schemars(extend("x-source" = "Blender 5.2.1 SunLight.angle (Add Light default)", "x-help-path" = "light.angle", "x-help" = "number; sun"))]
+        #[schemars(extend("x-source" = "Blender 5.2.1 SunLight.angle (Add Light default)", "x-help-path" = "light.angle", "x-help" = "number; sun full angular diameter in radians; 0 = sharp shadows"))]
         angle: f32,
         #[serde(default)]
         #[schemars(extend("x-source" = "Blender 5.2.1 Light.shadow_soft_size (Add Light default)", "x-help-path" = "light.radius", "x-help" = "number; point/spot emitter radius (shadow softness)"))]
@@ -154,9 +154,9 @@ pub enum NodeKind {
         #[schemars(extend("x-source" = "Blender 5.2.1 SpotLight.spot_blend", "x-help-path" = "light.spot_blend", "x-help" = "number; 0..1"))]
         spot_blend: f32,
         #[serde(default = "constants::area_dimension")]
-        #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight.size (Add Light default)", "x-help-path" = "light.size", "x-help" = "number; rectangle full side, ellipse diameter; size_y sets the second axis"))]
+        #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight.size (Add Light default)", "x-help-path" = "light.size", "x-help" = "number; only rectangle or ellipse lights; rectangle full side, ellipse diameter; size_y sets the second axis"))]
         size: f32,
-        #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight square/disk sizing", "x-help-path" = "light.size_y", "x-help" = "number|null; second side/diameter; omitted = size (square/disk)"))]
+        #[schemars(extend("x-source" = "Blender 5.2.1 AreaLight square/disk sizing", "x-help-path" = "light.size_y", "x-help" = "number|null; only rectangle or ellipse lights; second side/diameter; omitted = size (square/disk)"))]
         size_y: Option<f32>,
         #[schemars(extend("x-source" = "vork (explicit contract/technique choice)", "x-help-path" = "light.image", "x-help" = "image-name|inline image|null; LM-63 Type C IES (path only); non-environment lights; emits -Z, no peak normalization"))]
         #[schemars(with = "Option<NameOr<Image>>")]

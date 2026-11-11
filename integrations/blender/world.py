@@ -14,6 +14,10 @@ class UnsupportedWorld(ValueError):
     pass
 
 
+class UnsupportedWorldVolume(UnsupportedWorld):
+    """A volume cannot be replaced by fallback World illumination."""
+
+
 def unsupported(node, socket, reason):
     raise UnsupportedWorld(f'World {node.name!r}.{socket}: {reason}')
 
@@ -147,29 +151,15 @@ class WorldImport:
 
 
 def medium(socket):
-    """Pure Volume Scatter has scattering and no added absorption."""
+    """Keep world fog independent of its surface illumination, including bakes."""
     if not socket.is_linked:
         return {}
-    node = socket.links[0].from_node
-    if node.mute:
-        unsupported(node, 'Volume', 'muted-node bypass is not translated')
-    if node.type != 'VOLUME_SCATTER':
-        unsupported(node, 'Volume', f'{node.type} medium is not translated')
-    if node.phase != 'HENYEY_GREENSTEIN':
-        unsupported(node, 'Phase', f'{node.phase} phase is not translated')
-    color = list(constant(node, 'Color')[:3])
-    density = float(constant(node, 'Density'))
-    anisotropy = float(constant(node, 'Anisotropy'))
-    if not all(math.isfinite(v) and v >= 0 for v in color):
-        unsupported(node, 'Color', 'scattering colour must be finite and nonnegative')
-    if not math.isfinite(density) or density < 0:
-        unsupported(node, 'Density', 'density must be finite and nonnegative')
-    if not math.isfinite(anisotropy) or not -1 <= anisotropy <= 1:
-        unsupported(node, 'Anisotropy', 'phase anisotropy must be finite and in [-1, 1]')
-    # Volume Scatter: scattering density*color per metre, no absorption.
-    return {'world_medium': {'program': 'std/fog', 'inputs': {
-        'density': density, 'scattering': color, 'absorption': [0, 0, 0], 'anisotropy': anisotropy,
-    }}}
+    from .volume import homogeneous
+    try:
+        source = homogeneous(socket)
+    except ValueError as error:
+        raise UnsupportedWorldVolume(f'World {error}') from error
+    return {'world_medium': {'program': {'source': source}}}
 
 
 def translate(world, *, bake_directory=None, on_bake=None):

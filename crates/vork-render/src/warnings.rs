@@ -79,5 +79,5 @@ mod tests {
 pub(crate) fn compatibility(name: &str, requested: serde_json::Value) {
     let rewrite = if name == "std/particles" { "an import of fluid.particles" }
         else { "authored Slang" };
-    record("compatibility_04", requested, format!("{name} is removed in 0.6; rewrite as {rewrite}; see upgrade notes"));
+    record("compatibility_04", requested, format!("{name} is deprecated and will be removed in a future release; rewrite as {rewrite}; see upgrade notes"));
 }

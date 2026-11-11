@@ -1,6 +1,10 @@
 IMAGES
 Use color_space Non-Color for data PNGs. Nested camera textures inherit shot profile
 and timing.
+Missing sampled image files, including environment images, use one magenta texel
+and emit a warning naming the file to restore. Corrupt images, IES profiles and
+colour-transform library data remain errors. Movie plates and outputs are video-only;
+add sound to the rendered movie in an external editor.
 16-bit integer and floating-point image inputs avoid block compression but use half-float texture precision; exact source integer codes are not preserved.
 
 <!-- all -->

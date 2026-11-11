@@ -8,6 +8,7 @@ test('shape options suggest names and reject the misspelling', () => {
     assert.throws(() => generate({raduis:2}), /unknown option "raduis"; did you mean "radius"\? Valid names:/);
     assert.throws(() => generate({zzzzzzzz:2}), error => !error.message.includes('did you mean') && /Valid names:/.test(error.message) && ['radius','size','segments'].every(name => error.message.includes(name)));
   }
+  assert.throws(() => sdk.sweep('pipe',{profile:[],path:[],twits:2}), /did you mean "twist"/);
   assert.throws(() => sdk.extrude('plate',{outline:[],depht:2}), /did you mean "depth"/);
 });
 

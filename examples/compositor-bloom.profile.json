@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "level": 0,
+  "settings": {
+    "seed": 0,
+    "denoise": false
+  },
+  "description": "Draft quality/cost level."
+}

@@ -1,7 +1,7 @@
 void cloth_segments(float3 p,float3 q,float3 a,float3 b,out float s,out float t);
 bool cloth_body_cross(float3 p,float3 q,float3 a,float3 b,float3 c,out float t,out float3 weights) {
  float3 d=q-p,e=b-a,f=c-a,h=cross(d,f);float det=dot(e,h);t=0;weights=0;
- if(abs(det)<1e-12)return false;
+ if(abs(det)<=1e-6*length(d)*length(e)*length(f))return false;
  float3 s=p-a;float u=dot(s,h)/det;if(u<0||u>1)return false;
  float3 k=cross(s,e);float v=dot(d,k)/det;if(v<0||u+v>1)return false;
  t=dot(f,k)/det;weights=float3(1-u-v,u,v);return t>=0&&t<=1;
@@ -51,8 +51,20 @@ void cloth_body_generate(uint i) {
   float3 a=body_a_load(f),b=body_b_load(f),c=body_c_load(f),w;float3 q=cloth_closest(p,a,b,c,w);float d=dot(p-q,p-q);
   if(d<best){best=d;near=q;bary=w;uint3 ids=cloth_body_indices(f);normal=cloth_unit(w.x*collider_normal_load(ids.x)+w.y*collider_normal_load(ids.y)+w.z*collider_normal_load(ids.z));nearest_face=f;}
  }
- float offset=dot(near,normal)+THICKNESS;
- if(dot(p,normal)<offset) {
+ // A supporting plane is a face contact only within that face's Voronoi
+ // region. In particular, an open rim must not extend to an infinite wall.
+ // Use the geometric face normal: split/interpolated vertex normals do not
+ // define either the projection region or the signed face distance.
+ float3 a=body_a_load(nearest_face),b=body_b_load(nearest_face),c=body_c_load(nearest_face);
+ normal=cloth_unit(cross(b-a,c-a));
+ float signed_distance=dot(p-a,normal);
+ float3 projected=p-signed_distance*normal,w;
+ float3 closest=cloth_closest(projected,a,b,c,w);
+ float face_epsilon=2.5e-5*THICKNESS;
+ bool face_region=dot(projected-closest,projected-closest)<=face_epsilon*face_epsilon;
+ float offset=dot(a,normal)+THICKNESS;
+ if(face_region&&signed_distance<THICKNESS) {
+  near=closest;bary=w;
   float3 previous=bary.x*body_old_a_load(nearest_face)+bary.y*body_old_b_load(nearest_face)+bary.z*body_old_c_load(nearest_face);
   cloth_register(i,2,uint4(i,nearest_face,0,0),uint4(i,0,0,0),float4(1,0,0,0),float4(normal,offset),near-previous);
  }
@@ -82,7 +94,7 @@ void cloth_body_generate(uint i) {
     float s,r;cloth_segments(x,y,a,b,s,r);float3 p=lerp(x,y,s),q=lerp(a,b,r),d=p-q;
     float l=length(d);if(l>=2*THICKNESS)continue;
     float3 hint=cloth_unit(lerp(collider_normal_load(a_id),collider_normal_load(b_id),r));
-    float3 n=hint;if(l>1e-8){n=d/l;if(dot(d,hint)<0)n=-n;}
+    float3 n=hint;if(l>1e-6*THICKNESS){n=d/l;if(dot(d,hint)<0)n=-n;}
     if(dot(d,n)>=THICKNESS)continue;
     float3 previous=lerp(collider_previous_load(a_id),collider_previous_load(b_id),r);
     cloth_register(i,4,uint4(u,v,a_id,b_id),uint4(u,v,0,0),float4(1-s,s,0,0),float4(n,dot(q,n)+THICKNESS),q-previous);

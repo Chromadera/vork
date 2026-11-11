@@ -28,7 +28,7 @@ impl Plan {
         let bytes=u64::from(leaves)*8;
         let limits=r.device.limits();
         ensure!(bytes<=limits.max_buffer_size && bytes<=u64::from(limits.max_storage_buffer_binding_size),
-            "mesh-source area tree needs {bytes} bytes; exceeds device storage limits");
+            "{}", crate::gpu_memory::limit_message("mesh-source area tree", format_args!("{bytes} bytes"), format_args!("storage binding={} bytes, buffer={} bytes",limits.max_storage_buffer_binding_size,limits.max_buffer_size), "reduce emissive mesh geometry"));
         let d=&r.device;
         let layout=d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {label:Some("mesh-source areas"),entries:&entries()});
         let hits=rt::hits_layout(d);

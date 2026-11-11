@@ -92,7 +92,7 @@ fn view_bindings_with_pool(shape: ViewShape, [w, h]: [u32; 2], samples: u32, poo
 pub(crate) fn check_view(limits: &wgpu::Limits, extent: [u32; 2], samples: u32, shape: ViewShape) -> Result<[u64; 5]> {
     let sizes=gpu_memory::frame_bindings(limits, extent, samples, |extent, samples| view_bindings(limits, shape, extent, samples))?;
     let allocation=sizes[3]*u64::from(VISIBILITY_REFLECTION_WORDS);
-    ensure!(allocation<=limits.max_buffer_size,"reflection record fields need {allocation} bytes in one allocation; device max_buffer_size={} bytes",limits.max_buffer_size);
+    ensure!(allocation<=limits.max_buffer_size,"{}", crate::gpu_memory::limit_message("reflection record fields", format_args!("{allocation} bytes at {}x{}",extent[0],extent[1]), format_args!("max_buffer_size={} bytes",limits.max_buffer_size), "lower the resolution, or use --profile std/path"));
     Ok(sizes)
 }
 
@@ -106,10 +106,10 @@ pub(crate) fn check_packet_minimum(limits:&wgpu::Limits,extent:[u32;2],samples:u
     let local=[extent[0],extent[1].min(TILE)];
     let pool=u64::from(local[0])*u64::from(local[1])*u64::from(samples.saturating_sub(VISIBILITY_SLOTS));
     let fields=view_bindings_with_pool(shape,local,samples,pool);
-    for (label,bytes) in fields {gpu_memory::storage_binding(limits,label,bytes)?;}
+    for (label,bytes) in fields {gpu_memory::storage_binding(limits,label,bytes, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;}
     let (label,bytes)=view_bindings_with_pool(shape,extent,samples,0)[4];
-    gpu_memory::storage_binding(limits,label,bytes)?;
-    ensure!(fields[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size,"camera packet reflection allocation exceeds device limit");
+    gpu_memory::storage_binding(limits,label,bytes, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;
+    ensure!(fields[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size,"{}", crate::gpu_memory::limit_message("camera packet reflection allocation", format_args!("{} bytes",fields[3].1*u64::from(VISIBILITY_REFLECTION_WORDS)), format_args!("max_buffer_size={} bytes",limits.max_buffer_size), "reduce resolution or choose --profile std/draft for a lower sample and reflection budget"));
     Ok(())
 }
 
@@ -211,7 +211,7 @@ fn occupancy_row_bytes(width:u32,samples:u32,boundaries:u32)->u64 {
 fn occupancy_bands(limits:&wgpu::Limits,memory:u64,metadata:u64,row_bytes:u64,height:u32,rows:u32)->Result<(u32,u32)> {
     if row_bytes==0 {return Ok((height.div_ceil(rows),rows));}
     let minimum=height.min(TILE);
-    gpu_memory::storage_binding(limits,"camera metadata and one tile row of dielectric occupancy",metadata+row_bytes*u64::from(minimum))?;
+    gpu_memory::storage_binding(limits,"camera metadata and one tile row of dielectric occupancy",metadata+row_bytes*u64::from(minimum), "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;
     let available=limits.max_storage_buffer_binding_size.min(limits.max_buffer_size)-metadata;
     let budget=available.min(memory/EVALUATION_MEMORY_SHARE);
     // Device limits are hard; the memory target may yield to one tile row.
@@ -694,7 +694,7 @@ impl Fragments {
         let lists = fragment_list_bytes(pixels,samples,s.plan.transparent,explicit_depth);
         let limits = d.limits();
         let limit = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
-        ensure!(header + lists <= limit, "transparent fragment lists need {} bytes, beyond the device storage binding limit", header + lists);
+        ensure!(header + lists <= limit, "{}", crate::gpu_memory::limit_message("transparent fragment lists", format_args!("{} bytes",header+lists), format_args!("{limit} bytes"), "reduce resolution or samples with --set samples=N"));
         // A closed transparent solid lists its front and rear face at a pixel;
         // a larger reservation grows to the binding limit.
         let most = ((limit - header - lists) / record).min(u64::from(u32::MAX));
@@ -879,9 +879,9 @@ impl View {
         } else {check_view(&limits, extent, samples, shape)?};
         if packets {
             guide_bytes=view_bindings_with_pool(shape,extent,samples,0)[4].1;
-            for (label,bytes) in view_bindings_with_pool(shape,storage_extent,samples,pool) {gpu_memory::storage_binding(&limits,label,bytes)?;}
-            gpu_memory::storage_binding(&limits,"reflection guides",guide_bytes)?;
-            ensure!(record_bytes*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size,"camera packet reflection allocation exceeds device limit");
+            for (label,bytes) in view_bindings_with_pool(shape,storage_extent,samples,pool) {gpu_memory::storage_binding(&limits,label,bytes, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;}
+            gpu_memory::storage_binding(&limits,"reflection guides",guide_bytes, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;
+            ensure!(record_bytes*u64::from(VISIBILITY_REFLECTION_WORDS)<=limits.max_buffer_size,"{}", crate::gpu_memory::limit_message("camera packet reflection allocation", format_args!("{} bytes",record_bytes*u64::from(VISIBILITY_REFLECTION_WORDS)), format_args!("max_buffer_size={} bytes",limits.max_buffer_size), "reduce resolution or choose --profile std/draft for a lower sample and reflection budget"));
         }
         let occupancy_row=occupancy_row_bytes(w,samples,shape.boundaries);
         let metadata_size=metadata_size-occupancy_row*u64::from(packet_rows.min(TILE));
@@ -999,12 +999,12 @@ impl View {
         // Each occupied slot appends at most one ID; evaluation reservations do not
         // enlarge this list. Per-sample bins retain their evaluation capacity.
         let bin_bytes=u64::from(installed.materials)*24+if direct {0} else if implicit_slots {slot_records*4} else {u64::from(evaluation_capacity)*16};
-        crate::gpu_memory::storage_binding(&limits,"camera material bins",bin_bytes)?;
+        crate::gpu_memory::storage_binding(&limits,"camera material bins",bin_bytes, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;
         let evaluation_bins=s.transients.buffer(d,"camera material bins",bin_bytes,wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::COPY_SRC);
         // The allocator holds this view's capacities: its own buffer, never a
         // transient another view of the same size would share.
         let work_words=header+if s.plan.effects.probes {u64::from(evaluation_capacity)*work_stride} else {0};
-        crate::gpu_memory::storage_binding(&limits,"camera indirect work",work_words*4)?;
+        crate::gpu_memory::storage_binding(&limits,"camera indirect work",work_words*4, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;
         // Only the header is initial state. Each active work record is written
         // by StoredEvaluation before indirect_material reads it.
         let evaluation_allocator=gpu_memory::buffer(d,&wgpu::BufferDescriptor {
@@ -1052,7 +1052,7 @@ impl View {
 
         // Reuse this band's per-camera-ray containment across every slot and lobe.
         let occupancy_bytes=occupancy_row*u64::from(band_rows);
-        gpu_memory::storage_binding(&limits,"camera evaluation metadata and dielectric occupancy",metadata_size+occupancy_bytes)?;
+        gpu_memory::storage_binding(&limits,"camera evaluation metadata and dielectric occupancy",metadata_size+occupancy_bytes, "reduce resolution or choose --profile std/draft for a lower sample and reflection budget")?;
         let evaluation_metadata=s.transients.buffer(d,"camera evaluation metadata",metadata_size+occupancy_bytes,wgpu::BufferUsages::STORAGE);
 
         let config_size=std::mem::size_of::<CameraConfig>();
@@ -1709,6 +1709,20 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn reflection_allocation_limit_explains_recovery() {
+        let limits = wgpu::Limits {max_storage_buffer_binding_size:1<<30,max_buffer_size:1<<30,..Default::default()};
+        // A glass scene retains whole-frame reflection records. Geometry count
+        // does not enter this allocation: four dense records per pixel suffice.
+        let shape = ViewShape {transparent:true,diffusion:false,reflections:true,screen_refraction:true,boundaries:0,table_only:true,reserved:0};
+        assert!(!packet_eligible(shape,32));
+        let error=check_view(&limits,[2000,1333],32,shape).unwrap_err().to_string();
+        for text in ["1194368000 bytes", "1073741824 bytes", "lower the resolution", "--profile std/path"] {
+            assert!(error.contains(text), "missing {text:?}: {error}");
+        }
+        check_view(&limits,[1000,667],32,shape).unwrap();
+    }
+
+    #[test]
     fn overflow_estimate_fits_all_bindings_and_measured_demand_is_mandatory() {
         let limits = wgpu::Limits {max_storage_buffer_binding_size:1<<29,max_buffer_size:1<<40,..Default::default()};
         let extent = [1920,1080];
@@ -1757,7 +1771,8 @@ mod tests {
         let shape=ViewShape {transparent:true,diffusion:false,reflections:false,screen_refraction:false,boundaries:0,table_only:true,reserved:0};
         let check=|extent,samples| check_view(&limits,extent,samples,shape);
         let error=check([3840,2160],64).unwrap_err().to_string();
-        assert!(error.contains("camera evaluation metadata needs") && error.contains("3840x2160 with 64 samples")
+        assert!(error.contains("camera evaluation metadata") && error.contains("requested ")
+            && error.contains("vork help limits") && error.contains("3840x2160 with 64 samples")
             && error.contains("max_storage_buffer_binding_size=2147483644"),"{error}");
         let samples:u32=error.split("camera budget ceiling at this extent=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
         let [w,h]:[u32;2]=error.split("resolution to ").nth(1).unwrap().split(' ').next().unwrap()

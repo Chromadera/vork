@@ -1,6 +1,6 @@
 PROGRAMS
-For standard geometry use std box, sphere, grid, cylinder, cone, torus, capsule
-and revolve builders; options and units: vork help std --all.
+For standard geometry use std box, sphere, grid, cylinder, cone, torus, capsule,
+revolve and sweep builders; options and units: vork help std --all.
 Use std/openpbr data inputs first (vork help materials). Data materials share
 the shipped evaluator; custom surfaces can add code to the scene kernel and
 increase first-render compilation time. Use programs for custom logic.

@@ -56,7 +56,7 @@ impl Plan {
             let members=by_solid.remove(&solid).unwrap_or_default();
             if members.iter().any(|&i|draws[i].evaluated()) {dynamic.push((u64::from(node[8])*4,members));}
         }
-        crate::gpu_memory::storage_binding(&r.device.limits(),"shadow containment index",words.len() as u64*4)?;
+        crate::gpu_memory::storage_binding(&r.device.limits(),"shadow containment index",words.len() as u64*4, "reduce solid-boundary geometry or the number of shadow lights")?;
         Ok(Some(Self {template:init(&r.device,"shadow containment topology",bytemuck::cast_slice(&words),wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC),count,slot:0,pipeline:Default::default(),dynamic}))
     }
 }

@@ -297,7 +297,7 @@ pub(super) fn pass(
     ensure!(
         storage_textures<=limits.max_storage_textures_per_shader_stage && buffers <= limits.max_storage_buffers_per_shader_stage
             && textures <= limits.max_sampled_textures_per_shader_stage,
-        "compositor pass exceeds device binding limits"
+        "{}", crate::gpu_memory::limit_message("compositor pass", format_args!("{storage_textures} storage textures, {buffers} storage buffers, {textures} sampled textures"), format_args!("{} storage textures, {} storage buffers, {} sampled textures",limits.max_storage_textures_per_shader_stage,limits.max_storage_buffers_per_shader_stage,limits.max_sampled_textures_per_shader_stage), "reduce compositor pass image and buffer inputs")
     );
     ensure!(
         group[0] > 0
@@ -306,14 +306,14 @@ pub(super) fn pass(
             && group[1] <= limits.max_compute_workgroup_size_y
             && u64::from(group[0]) * u64::from(group[1])
                 <= u64::from(limits.max_compute_invocations_per_workgroup),
-        "compositor workgroup exceeds device limits"
+        "{}", crate::gpu_memory::limit_message("compositor workgroup", format_args!("{}x{} threads ({} invocations)",group[0],group[1],u64::from(group[0])*u64::from(group[1])), format_args!("{}x{} threads, {} invocations; each axis must be positive",limits.max_compute_workgroup_size_x,limits.max_compute_workgroup_size_y,limits.max_compute_invocations_per_workgroup), "set the compositor program workgroup to positive dimensions within these limits")
     );
     let groups = [w.div_ceil(group[0]), h.div_ceil(group[1]), 1];
     ensure!(
         groups
             .iter()
             .all(|n| *n <= limits.max_compute_workgroups_per_dimension),
-        "compositor dispatch exceeds device limits"
+        "{}", crate::gpu_memory::limit_message("compositor dispatch", format_args!("{groups:?} workgroups at {w}x{h}"), format_args!("{} workgroups per axis",limits.max_compute_workgroups_per_dimension), "reduce compositor image resolution or increase the program workgroup within its limits")
     );
     let d = &r.device;
     let module=if r.check_only {

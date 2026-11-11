@@ -473,6 +473,10 @@ def attach(
 ):
     """Attach compute cloth to an identity root mesh; preserve its surface material.
 
+    Modifies scene in place and returns None, with no returned output map.
+    Read the node's geometry reference for its generated private geometry;
+    that geometry references the generated buffers.
+
     Collider is a named native triangle mesh and may move or deform. Positions
     and pins are world metres. Density is kg/m², stretch modulus N/m, bending
     rigidity N·m; acceleration's Slang body returns m/s² including gravity.

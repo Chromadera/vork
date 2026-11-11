@@ -23,28 +23,30 @@ def run(args):
     args[0] = shutil.which(args[0]) or args[0]
     subprocess.run(args, check=True)
 
+# pip supplies only the SDK; use the renderer installed by npm on PATH.
+os.environ['PATH'] = str(Path('node_modules/.bin').resolve()) + os.pathsep + os.environ['PATH']
 run(['npx', '--no-install', 'vork', '--version'])
 run([sys.executable, '-c', 'from vork._engine import engine; import subprocess; subprocess.run([engine(), "--version"], check=True)'])
 run(['node', '--input-type=module', '-e', 'import {extrude} from "@voyager-so/vork"; console.log(Object.keys(extrude("shape", {outline:[[0,0],[1,0],[0,1]]})));'])
 run([sys.executable, '-c', 'from vork import std; print(list(std("rounded_box", name="ball")))'])
-from vork._engine import engine
-runtime = Path(engine(require_native=True)).parent
-# Check both actual package-manager layouts, not just the artifact manifests.
+# Check the installed npm runtime and the SDK-only pip metadata.
 target = {'linux': 'linux-x64', 'darwin': 'darwin-arm64', 'win32': 'windows-x64'}[sys.platform]
 npm_runtime = Path('node_modules/@voyager-so') / ('vork-' + target) / 'runtime'
+runtime = npm_runtime.resolve()
+from importlib.metadata import distribution
+assert not distribution('vork').requires
+assert not distribution('vork').entry_points
 companion = 'vork-slang-filesystem.exe' if os.name == 'nt' else 'vork-slang-filesystem'
-for installed in (runtime, npm_runtime):
-    adapter = installed / companion
-    assert adapter.is_file(), f'missing installed Slang filesystem adapter: {adapter}'
-    assert os.access(adapter, os.X_OK), f'adapter is not executable: {adapter}'
-assert (runtime / companion).read_bytes() == (npm_runtime / companion).read_bytes()
+adapter = npm_runtime / companion
+assert adapter.is_file(), f'missing installed Slang filesystem adapter: {adapter}'
+assert os.access(adapter, os.X_OK), f'adapter is not executable: {adapter}'
 
 if a.starter_render:
     # No development toolchain or engine override may hide a broken package.
     for key in ('VORK_BIN', 'VORK_SLANGC', 'VORK_SLANG_FILESYSTEM', 'VORK_OIDN'):
         os.environ.pop(key, None)
     for name, command in [('npm', ['npx', '--no-install', 'vork']),
-                          ('pip', [str(Path(sys.executable).parent / ('vork.exe' if os.name == 'nt' else 'vork'))])]:
+                          ('pip', [shutil.which('vork')])]:
         starter = Path(name + '-starter')
         run(command + ['init', str(starter), '--language', 'json'])
         # Fresh per-install receipts force the installed companion to execute.
@@ -68,7 +70,7 @@ if a.gpu:
     from vork import std
     scene.update(std('rounded_box', name='ball'))
     Path('smoke.json').write_text(json.dumps(scene))
-    for i, command in enumerate([['npx', '--no-install', 'vork'], [str(Path(sys.executable).parent / ('vork.exe' if sys.platform == 'win32' else 'vork'))]]):
+    for i, command in enumerate([['npx', '--no-install', 'vork'], [shutil.which('vork')]]):
         run(command + ['setup'])
         run(command + ['render', 'smoke.json', '--out', ('npm.png' if i == 0 else 'pip.png')])
     run(['node', '--input-type=module', '-e', 'import {render} from "@voyager-so/vork"; render("smoke.json", {out:"ts-api.png"});'])

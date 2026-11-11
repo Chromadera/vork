@@ -837,6 +837,7 @@ impl<'a> TextureInstaller<'a> {
             &self.r.device.limits(),
             "material table (records and program inputs)",
             records.len() as u64,
+            "reduce material count or material program input sizes",
         )?;
         if self.table.entries.is_empty() {
             let white = self.upload(None, false, true)?;
@@ -886,9 +887,17 @@ impl<'a> TextureInstaller<'a> {
         if let Some(view) = self.file_views.get(&memo) {
             return Ok(view.clone());
         }
-        let source =
-            std::fs::read(&path).with_context(|| format!("read image {}", path.display()))?;
         let ies = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ies"));
+        let source = match std::fs::read(&path) {
+            Ok(source) => source,
+            Err(error) if !ies && error.kind() == std::io::ErrorKind::NotFound => {
+                let data = decoded_data(crate::texture_source::missing_image(&path))?;
+                let view = self.upload(Some((&Image::from(data), blake3::hash(b"missing-image-magenta"))), srgb, true)?;
+                self.file_views.insert(memo, view.clone());
+                return Ok(view);
+            }
+            Err(error) => return Err(error).with_context(|| format!("read image {}; restore the file or correct its path", path.display())),
+        };
         let mut key = blake3::Hasher::new();
         if ies {
             key.update(b"ies-cycles-linear-v1");
@@ -906,7 +915,7 @@ impl<'a> TextureInstaller<'a> {
                     &source,
                     self.r.device.limits().max_texture_dimension_2d,
                 )
-                .with_context(|| format!("decode image {}", path.display()))?,
+                .with_context(|| format!("decode image {}; restore a valid image or correct its path", path.display()))?,
             )?;
             let _ = write_decoded(&cached_path, &data);
             data
@@ -1705,16 +1714,16 @@ pub(crate) struct ImageDecoders {
 }
 impl ImageDecoders {
     pub(crate) fn finish(&mut self) -> Result<()> {
-        let mut failure = None;
+        let mut failures = Vec::new();
         for handle in std::mem::take(&mut self.handles) {
             let result = handle
                 .join()
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("image decoder worker panicked")));
             if let Err(error) = result {
-                failure.get_or_insert(error);
+                failures.push(error);
             }
         }
-        failure.map_or(Ok(()), Err)
+        vork_scene::v2::diagnostics::joined(failures)
     }
 }
 impl Drop for ImageDecoders {
@@ -1899,11 +1908,13 @@ pub(crate) fn load_cached(
         .min(count);
     let (ready, batches) = std::sync::mpsc::channel();
     for worker in 0..workers {
+        let warnings = crate::warnings::Collector::current();
         let source = source.clone();
         let cache = cache.clone();
         let ready = ready.clone();
         let path = path.to_owned();
         let handle = std::thread::spawn(move || -> Result<()> {
+            let _scope = warnings.as_ref().map(|collector| collector.enter());
             let prepared = source
                 .document
                 .images()
@@ -1913,16 +1924,18 @@ pub(crate) fn load_cached(
                     let index = image.index();
                     prepare_cached(image, &source, &cache)
                         .map(|prepared| (index, prepared))
-                        .with_context(|| format!("load {} image {index}", path.display()))
+                        .with_context(|| format!("load {} image {index}; restore a valid image or re-export the asset", path.display()))
                 })
-                .collect::<Result<Vec<_>>>();
-            let prepared = match prepared {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let _ = ready.send(Err(anyhow::anyhow!("{error:#}")));
-                    return Err(error);
-                }
-            };
+                .collect::<Vec<_>>();
+            let mut errors = Vec::new();
+            let prepared = prepared.into_iter().filter_map(|result|match result {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {errors.push(error); None}
+            }).collect::<Vec<_>>();
+            if let Err(error) = vork_scene::v2::diagnostics::joined(errors) {
+                let _ = ready.send(Err(error));
+                return Ok(());
+            }
             let mut metadata = Vec::with_capacity(prepared.len());
             let mut tasks = Vec::new();
             for (index, (image, key, task)) in prepared {
@@ -1934,11 +1947,11 @@ pub(crate) fn load_cached(
             }
             let _ = ready.send(Ok(metadata));
             drop(ready);
-            let mut failure = None;
+            let mut failures = Vec::new();
             for task in tasks {
                 let result = source
                     .decode(task.index, Some(&task.encoded))
-                    .with_context(|| format!("load {} image {}", path.display(), task.index));
+                    .with_context(|| format!("load {} image {}; restore a valid image or re-export the asset", path.display(), task.index));
                 drop(task.encoded);
                 match result {
                     Ok(data) => {
@@ -1947,19 +1960,21 @@ pub(crate) fn load_cached(
                     }
                     Err(error) => {
                         let _ = task.pixels.send(Err(anyhow::anyhow!("{error:#}")));
-                        failure.get_or_insert(error);
+                        failures.push(error);
                     }
                 }
             }
-            failure.map_or(Ok(()), Err)
+            vork_scene::v2::diagnostics::joined(failures)
         });
         decoders.handles.push(handle);
     }
     drop(ready);
     let mut images = Vec::with_capacity(count);
+    let mut errors = Vec::new();
     for _ in 0..workers {
         let batch = match batches.recv() {
-            Ok(batch) => batch?,
+            Ok(Ok(batch)) => batch,
+            Ok(Err(error)) => {errors.push(error); continue;}
             Err(_) => {
                 decoders.finish()?;
                 bail!("image decoder returned no metadata");
@@ -1969,6 +1984,10 @@ pub(crate) fn load_cached(
             image.pending = pixels;
             images.push((index, (image, key)));
         }
+    }
+    if !errors.is_empty() {
+        if let Err(error) = decoders.finish() {errors.push(error);}
+        vork_scene::v2::diagnostics::joined(errors)?;
     }
     images.sort_unstable_by_key(|(index, _)| *index);
     let images: Vec<_> = images.into_iter().map(|(_, image)| image).collect();
@@ -2040,7 +2059,21 @@ fn prepare_cached<'a>(
     context: &'a std::sync::Arc<ImageSource>,
     cache: &disk_cache::Store,
 ) -> Result<PreparedImage<'a>> {
-    let (encoded, settings) = encoded_image(&image, &context.buffers, Some(context.base.as_path()))?;
+    let (encoded, settings) = match encoded_image(&image, &context.buffers, Some(context.base.as_path())) {
+        Ok(encoded) => encoded,
+        Err(error) if error.chain().any(|cause|
+            cause.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            || cause.downcast_ref::<gltf::Error>().is_some_and(|error|
+                matches!(error, gltf::Error::Io(error) if error.kind() == std::io::ErrorKind::NotFound))) => {
+            image_format(&image.source())?;
+            let data = decoded_data(crate::texture_source::missing_image(&context.base.join(match image.source() {
+                gltf::image::Source::Uri {uri,..} => uri,
+                _ => return Err(error),
+            })))?;
+            return Ok((Image::from(data), blake3::hash(b"missing-image-magenta"), None));
+        }
+        Err(error) => return Err(error).context("restore the image or correct its path"),
+    };
     let mut key = blake3::Hasher::new();
     // The store supplies format identity. Keep source settings and encoded
     // content at the existing granularity; never rehash decoded pixels.
@@ -2129,6 +2162,57 @@ fn compact_decoded_roundtrip() {
         assert_eq!(decoded.pixels, data.pixels);
         std::fs::remove_file(path).unwrap();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn missing_sampled_images_substitute_but_corrupt_images_and_ies_refuse() -> Result<()> {
+    let renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
+    let root = std::env::temp_dir().join(format!("vork-missing-images-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
+    let collector = crate::warnings::Collector::default();
+    let _scope = collector.enter();
+    let slots = Default::default();
+    let mut installer = TextureInstaller::new(&renderer, &slots);
+    for name in ["missing.png", "another.jpg"] {
+        let view = installer.file_image(root.join(name), true)?;
+        assert_eq!((view.texture().width(), view.texture().height()), (1, 1));
+    }
+    assert!(installer.file_image(root.join("missing.ies"), false).is_err());
+    std::fs::write(root.join("corrupt.png"), b"not an image")?;
+    assert!(installer.file_image(root.join("corrupt.png"), true).is_err());
+    std::fs::write(root.join("mesh.gltf"), br#"{"asset":{"version":"2.0"},"images":[{"uri":"imported.png"}]}"#)?;
+    let cache = disk_cache::Store::for_test(root.join("cache"));
+    let mut decoders = ImageDecoders::default();
+    let ((_, _, images), _) = load_cached(&root.join("mesh.gltf"), &cache, &mut decoders, 1024)?;
+    decoders.finish()?;
+    assert_eq!(images[0].data()?.pixels, [255, 0, 255, 255]);
+    assert_eq!(collector.snapshot().iter().filter(|warning| warning.code == "missing_image").count(), 3);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn all_imported_image_errors_are_collected() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("vork-image-errors-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
+    let mut images = Vec::new();
+    for index in 0..9 {
+        let name = format!("broken-{index}.png");
+        std::fs::write(root.join(&name), b"not a png")?;
+        images.push(serde_json::json!({"uri":name}));
+    }
+    let path = root.join("asset.gltf");
+    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"asset":{"version":"2.0"},"images":images}))?)?;
+    let cache = disk_cache::Store::for_test(root.join("cache"));
+    let mut decoders = ImageDecoders::default();
+    let error = match load_cached(&path, &cache, &mut decoders, 1024) {
+        Ok(_) => anyhow::bail!("corrupt images were admitted"), Err(error) => format!("{error:#}"),
+    };
+    for index in 0..9 {assert!(error.contains(&format!("image {index}")), "{error}");}
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2380,6 +2464,13 @@ pub(crate) struct OpenPbrRecord {
     pub(crate) shading: u8,
 }
 impl OpenPbrRecord {
+    /// Scalar table coverage already has raster visibility, controls and shadows.
+    /// Keep previs camera transport conservative for varying coverage and glass.
+    pub(crate) fn previs_requires_path(&self, animated: &std::collections::BTreeSet<String>) -> bool {
+        self.has_opacity && (self.transmissive
+            || ["geometry_opacity", "alpha_cutoff"].iter().any(|input|
+                self.builder.bound(input) || animated.contains(*input)))
+    }
     pub(crate) fn spatial_subsurface(&self) -> bool {
         self.capabilities.spatial_subsurface
     }
@@ -2536,6 +2627,15 @@ pub(crate) fn install_openpbr(
         let (view, sampler) = t.scene_image(image, image_def, base)?;
         Ok(t.slot(view, sampler))
     })?;
+    Ok(openpbr_pending(scene, name, animated, values))
+}
+
+fn openpbr_pending(
+    scene: &::vork_scene::v2::Scene,
+    name: Option<&str>,
+    animated: &std::collections::BTreeSet<String>,
+    values: OpenPbrRecord,
+) -> PendingMaterial {
     let record = values.builder.record;
     let material = name.and_then(|name| scene.materials.get(name));
     let mut pending = PendingMaterial {
@@ -2566,7 +2666,7 @@ pub(crate) fn install_openpbr(
         pending.integrate_opacity(material.and_then(|m|m.opacity), values.transmissive, false);
     }
     if pending.record.tag[0]==0 && pending.record.get("alpha_cutoff")[0]>=0. && !pending.record.bound("alpha_cutoff") && !animated.contains("alpha_cutoff") && !pending.transmissive {pending.record.extra[1]=3.;}
-    Ok(pending)
+    pending
 }
 
 /// The same record layout and closure evaluation as Slang modules, checked in as
@@ -2901,6 +3001,38 @@ mod tests {
         assert!(material(0.,[1.;3],false,false,true,None));
         assert!(material(0.,[0.5;3],false,false,false,Some("transmission_depth")));
         assert!(material(1.,[1.;3],false,false,false,Some("transmission_color")));
+    }
+
+    #[test]
+    fn previs_scalar_alpha_changes_only_its_material_slot() -> Result<()> {
+        let mut s=scene(serde_json::json!({
+            "opaque":{"inputs":{}},
+            "alpha":{"inputs":{"geometry_opacity":0.35}},
+            "cutoff":{"inputs":{"geometry_opacity":0.35,"alpha_cutoff":0.5}},
+            "continuous":{"opacity":"transmittance","inputs":{"geometry_opacity":0.35}},
+            "glass":{"inputs":{"geometry_opacity":0.35,"transmission_weight":1.}}
+        }));
+        s.animation.clear();
+        let tracks=Default::default();
+        for (name, slot) in [("opaque",0.),("alpha",2.),("cutoff",3.),("continuous",1.)] {
+            let v=openpbr_values(&s,Some(name),&tracks,|_|Ok(0))?;
+            assert!(!v.previs_requires_path(&tracks),"{name}");
+            let material=openpbr_pending(&s,Some(name),&tracks,v);
+            assert_eq!(material.record.extra[1],slot,"{name}");
+            assert_eq!(material.alpha_mask, name=="alpha" || name=="cutoff");
+        }
+        assert!(openpbr_values(&s,Some("glass"),&tracks,|_|Ok(0))?.previs_requires_path(&tracks));
+        for input in ["geometry_opacity","alpha_cutoff"] {
+            s.materials.get_mut("alpha").unwrap().inputs.clear();
+            s.materials.get_mut("alpha").unwrap().inputs.insert(input.into(),
+                serde_json::from_value(serde_json::json!({"image":"d"}))?);
+            assert!(openpbr_values(&s,Some("alpha"),&tracks,|_|Ok(1))?.previs_requires_path(&tracks));
+        }
+        for input in ["geometry_opacity","alpha_cutoff"] {
+            let tracks=std::collections::BTreeSet::from([input.to_owned()]);
+            assert!(openpbr_values(&s,Some("opaque"),&tracks,|_|Ok(0))?.previs_requires_path(&tracks));
+        }
+        Ok(())
     }
 
     #[test]

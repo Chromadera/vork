@@ -387,9 +387,9 @@ impl Pipeline {
         let volume_bounces = crate::constants::PATH_MAX_BOUNCES;
         #[cfg(any(test, feature = "test-support"))]
         let volume_bounces = if options.test_participating_media {options.test_volume_bounces} else {crate::constants::PATH_MAX_BOUNCES};
-        // Fog follows the ordinary pixel-bounded path dispatch. L4 qualification
-        // found no image change and lower waits without the old 32-row split.
-        let medium_batch_rows = None;
+        // Record one workgroup row per settings entry. At execution, measured
+        // GPU time combines adjacent entries into watchdog-safe row bands.
+        let medium_batch_rows = media.map(|_| TILE);
         #[cfg(any(test, feature = "test-support"))]
         let medium_batch_rows = if options.test_participating_media {
             (media.is_some() && options.test_convex_media && options.test_convex_work_limit.is_some()).then_some(options.test_medium_batch_rows.unwrap_or(32).max(TILE).next_multiple_of(TILE))
@@ -482,7 +482,7 @@ pub(crate) fn record(
         ensure!(
             bytes <= d.limits().max_buffer_size
                 && bytes <= u64::from(d.limits().max_storage_buffer_binding_size),
-            "path adaptive moments exceed device storage limit"
+            "{}", crate::gpu_memory::limit_message("path adaptive moments", format_args!("{bytes} bytes"), format_args!("storage binding={} bytes, buffer={} bytes",d.limits().max_storage_buffer_binding_size,d.limits().max_buffer_size), "reduce resolution")
         );
         // Interleaved captures retain their own convergence
         // history, just as their resolve keeps a separate exposure sum.
@@ -560,12 +560,26 @@ pub(crate) fn record(
         if rays_table.implicit[1]>0 || s.scene.propagation.is_some() || s.plan.effects.implicit {dispatch.all_targets()} else {dispatch}
     }).collect();
     recorder.compute(crate::graph::Pass::Path, "path transport", "path", false, dispatches);
+    if retained.medium_batch_rows == Some(TILE) { recorder.time_budget_last(); }
     if chunks > 1 { recorder.separate_last(); }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn path_layout_fits_every_backend_per_stage() {
+        for adaptive in [false, true] {
+            let globals = layout_entries(adaptive);
+            let materials = crate::pipelines::material_entries_for(
+                vork_slang::registry::MATERIAL_TEXTURE_CAPACITY,
+                vork_slang::registry::MATERIAL_SAMPLER_CAPACITY);
+            let hits = [crate::rt::hit_buffers_entry(0, wgpu::ShaderStages::COMPUTE)];
+            let groups: [&[wgpu::BindGroupLayoutEntry]; 3] = [&globals, &materials, &hits];
+            crate::pipelines::check_stage_limits("path layout", &groups, wgpu::ShaderStages::COMPUTE).unwrap();
+        }
+    }
+
     use super::*;
 
     #[test]

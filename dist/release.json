@@ -2,5 +2,6 @@
   "product": "vork",
   "repository": "voyager-so/vork",
   "license": "LicenseRef-vork-Preview",
-  "copyright": "See LICENSE"
+  "copyright": "See LICENSE",
+  "vorkUpdate": { "reason": "", "regression": false }
 }

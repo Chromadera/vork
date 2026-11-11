@@ -2,6 +2,52 @@
 use crate::*;
 use vork_scene::v2;
 
+/// Raster applies view membership while recording draws. Path camera rays still
+/// use the whole-scene TLAS, so accepting a subtree can render excluded objects
+/// (including a monitor reading its own initially empty capture).
+pub(crate) fn require_supported_roots(input: &v2::Scene, order: &[String]) -> Result<()> {
+    if !input.render.settings.integrator.is_path() { return Ok(()); }
+    ensure!(input.render.root.is_none(),
+        "render.root: path transport does not support subtree renders; use --profile std/final with depth of field and path-only effects disabled, or put the selected content in a separate scene and remove root");
+    for name in order {
+        ensure!(input.images[name].render.as_ref().unwrap().root.is_none(),
+            "images[{name:?}].render.root: path transport does not support subtree renders; use --profile std/final with depth of field and path-only effects disabled, or render the capture from a separate scene without root");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod subtree_tests {
+    use super::*;
+
+    #[test]
+    fn path_subtrees_refuse_without_a_rendering_device() -> Result<()> {
+        let mut value = serde_json::json!({"version":2,
+            "render":{"settings":{"integrator":"path"}},
+            "images":{"feed":{"render":{"root":"content"}}},
+            "nodes":[]});
+        let scene = |value| vork_scene::v2::from_test_value::<v2::Scene>(value);
+        let live = vec!["feed".to_owned()];
+        let input = scene(value.clone())?;
+        // Unused captures must not restrict the main view.
+        require_supported_roots(&input, &[])?;
+        let error = require_supported_roots(&input, &live).unwrap_err().to_string();
+        assert!(error.contains("images[\"feed\"].render.root"), "{error}");
+        assert!(error.contains("path transport does not support subtree renders"), "{error}");
+        value["render"]["root"] = "monitor".into();
+        let error = require_supported_roots(&scene(value.clone())?, &[]).unwrap_err().to_string();
+        assert_eq!(error,
+            "render.root: path transport does not support subtree renders; use --profile std/final with depth of field and path-only effects disabled, or put the selected content in a separate scene and remove root");
+        vork_scene::v2::replace_integrator(&mut value, serde_json::json!({"integrator":"raster"}));
+        require_supported_roots(&scene(value.clone())?, &live)?;
+        vork_scene::v2::replace_integrator(&mut value, serde_json::json!({"integrator":"path"}));
+        value["render"]["root"] = serde_json::Value::Null;
+        value["images"]["feed"]["render"]["root"] = serde_json::Value::Null;
+        require_supported_roots(&scene(value)?, &live)?;
+        Ok(())
+    }
+}
+
 pub(crate) const PUBLICATION_LAYOUT: [wgpu::BindGroupLayoutEntry; 2] = [
     wgpu::BindGroupLayoutEntry {
         binding: 0,
@@ -93,7 +139,7 @@ pub(crate) fn plan(
                     .resolution
                     .iter()
                     .all(|n| *n <= r.device.limits().max_texture_dimension_2d),
-                "render image {name}: resolution exceeds device limits"
+                "{}", crate::gpu_memory::limit_message(format_args!("render image {name}"), format_args!("{}x{} pixels",settings.resolution[0],settings.resolution[1]), format_args!("max_texture_dimension_2d={} pixels per axis",r.device.limits().max_texture_dimension_2d), "reduce image.render.resolution")
             );
             let (camera, exposure_samples, visibility_samples) = camera_sampling(&s.nodes, &settings, s.camera)?;
             let Subset {

@@ -198,9 +198,10 @@ Closure surface(ShadingContext ctx, Inputs inputs) {
     n += voronoi(p,5.,1.,VoronoiFeature.N_Sphere_Radius).radius;
     Closure c = {}; c.base_color = float3(n); return c;
 }"#;
-    Compiler::discover()
-        .compile_surface(&abi(), source, Path::new("procedurals.slang"), "proc")
-        .unwrap();
+    for home in ["blender", "std"] {
+        let source = source.replace("import blender.procedurals;", &format!("import {home}.procedurals;"));
+        Compiler::discover().compile_surface(&abi(), &source, Path::new("procedurals.slang"), "proc").unwrap();
+    }
 }
 
 #[test]
@@ -279,7 +280,10 @@ Closure surface(ShadingContext ctx,Inputs inputs) {
     c+=blackbody()+wavelength();
     Closure result={};result.base_color=c;return result;
 }"#;
-    Compiler::discover().compile_surface(&abi(),source,Path::new("color.slang"),"color").unwrap();
+    for imports in ["import std.color;", "import blender.color;", "import std.color; import blender.color;"] {
+        let source = source.replace("import std.color;\nimport blender.color;", imports);
+        Compiler::discover().compile_surface(&abi(),&source,Path::new("color.slang"),"color").unwrap();
+    }
 }
 
 #[test]
@@ -293,7 +297,10 @@ Closure surface(ShadingContext ctx, Inputs inputs) {
     WhiteBalanceInputs white; white.temperature=4300.; white.tint=-12.;
     Closure result={}; result.base_color=white_balance(float3(.4),white); return result;
 }"#;
-    Compiler::discover().compile_surface(&abi(),source,Path::new("balance.slang"),"balance").unwrap();
+    for home in ["blender", "std"] {
+        let source = source.replace("import blender.white_balance;", &format!("import {home}.white_balance;"));
+        Compiler::discover().compile_surface(&abi(),&source,Path::new("balance.slang"),"balance").unwrap();
+    }
 }
 
 #[test]
@@ -313,7 +320,10 @@ Closure surface(ShadingContext ctx,Inputs inputs) {
     p+=bump(height,ctx.NORMAL,float3(1.,0.,0.),float3(0.,1.,0.));
     Closure result={};result.base_color=p;return result;
 }"#;
-    Compiler::discover().compile_surface(&abi(),source,Path::new("vector.slang"),"vector").unwrap();
+    for home in ["blender", "std"] {
+        let source = source.replace("import blender.vector;", &format!("import {home}.vector;"));
+        Compiler::discover().compile_surface(&abi(),&source,Path::new("vector.slang"),"vector").unwrap();
+    }
 }
 
 #[test]
@@ -791,13 +801,12 @@ fn exponential_world_proof_refuses_vanished_positive_amplitude() {
 }
 
 #[test]
-fn compatibility_imports_keep_resolver_witnesses() -> anyhow::Result<()> {
+fn permanent_std_imports_have_no_compatibility_warnings() -> anyhow::Result<()> {
     let source = "import vork; import std.procedurals; import std.vector; struct Inputs {}; Closure surface(ShadingContext c, Inputs i) { Closure r={}; r.base_color=float3(noise(c.POSITION)); return r; }";
     let compiler = Compiler::discover();
     let prepared = compiler.prepare_bound_program(&abi(), source, Path::new("compatibility.slang"), "")?;
     let receipt = prepared.receipt();
-    assert!(receipt.compatibility_modules.iter().any(|n| n == "std/procedurals"));
-    assert!(receipt.compatibility_modules.iter().any(|n| n == "std/vector"));
+    assert!(receipt.compatibility_modules.is_empty());
     compiler.compile_surface(&abi(), source, Path::new("compatibility.slang"), "compat")?;
     let encoded = serde_json::to_vec(&receipt)?;
     let restored: vork_slang::InputIdentity = serde_json::from_slice(&encoded)?;

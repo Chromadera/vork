@@ -7,6 +7,15 @@ macOS and Linux provide install.sh as a separate release asset.
 The bundled Slang toolchain targets macOS 26; older macOS is unqualified.
 See README.md (Install) for binary setup.
 
+Device-limit errors report the requested size or count, the device limit, and a
+resource-specific remedy. For image and camera allocations, lower resolution
+with --set resolution=WxH; lower sample-dependent demand with --set samples=N
+or --profile std/draft. Reflection allocations can also shrink with a lower
+profile budget; std/path avoids the screen reflection record allocation when
+suggested by the error. Geometry and compute allocations instead need smaller
+meshes, buffer pools or fewer inputs. Denoising allocations can be avoided with
+--set denoise=false. Follow the remedy named by the failing resource.
+
 Homogeneous fog uses closed triangle carriers or constant/height world media
 through complete-camera path transport. Arbitrary smoke, grids, procedural density
 and custom surface callbacks remain unsupported. See vork help fog.
@@ -23,6 +32,11 @@ indirect clamping, adaptive sampling and denoising; it is not an unclamped oracl
 The indirect clamp limits each contribution's mean absolute RGB to 10, matching
 Cycles' brightness measure. It scales all channels uniformly to preserve hue;
 direct contributions are unclamped. Bright indirect lighting can still lose energy.
+Path transport refuses `render.root` and reachable `image.render.root` subtree
+renders on every device, including CPU Vulkan. Use `--profile std/final` with depth of
+field and path-only effects disabled for subtree rendering, or render the
+selected content in a separate scene without `root`. Computed attributes and their time/seek updates
+do not have a separate CPU restriction.
 A non-finite path contribution (an infinite light sample) is dropped as zero rather
 than refusing the frame. Each affected frame warns with its dropped count;
 `dropped_light_samples` records the count in frame metadata, even without `--diagnostics`.

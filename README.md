@@ -383,15 +383,13 @@ see [the method](benchmarks/README.md).
 
 ## Research-preview limits
 
-Current source builds support authored fog under the admission rules in
-`vork help fog`; `vork help limits` describes the installed binary's capabilities.
-
-The released 0.3 binary does not support participating media (fog, haze, smoke or
-volumes): it refuses used medium bindings and volume topology. On that release,
-bake an image plate and composite it, render the medium externally, or remove
-medium-only nodes, bindings and definitions for a dry alternative.
-Removed programs such as `std/fog` still fail lookup even in unused definitions;
-current media use authored programs. See `vork help upgrade`.
+Vork 0.5.0 supports authored homogeneous fog and certified exponential-height
+world fog under the admission rules in [`vork help fog`](docs/help/fog.md).
+Bind an authored medium material to an environment light or a closed triangle
+mesh. Removed programs such as `std/fog` fail lookup even in unused definitions;
+see `vork help upgrade`. The [Blender bridge](integrations/blender/README.md#fog-and-volumes)
+exports constant numeric World and mesh volume closures as authored homogeneous
+fog; textures, varying density and mixed surface/volume materials refuse with a fix.
 
 Large scenes
 and dense transparency can fail, including on Mac; reducing image resolution
@@ -411,7 +409,7 @@ unresolved thin features and no two-way rigid-body coupling. It is not a general
 replacement for a mature simulation package. The VFX camera solve and single-view
 relief are estimates, with limitations documented beside the example.
 
-Fog returns in 0.4 with a design independent of pause/resume. Broader simulation,
+Broader simulation,
 reliability and performance on demanding scenes remain future directions, without
 promised release dates. Read `vork help limits` before committing to a shot.
 
@@ -686,3 +684,11 @@ Assets and the stills in `docs/images/` retain their own licences; keep the exam
 credits with their renders.
 The optional [Blender bridge](integrations/blender/) has its own GPL licence and
 is not part of the renderer or SDK packages.
+
+Vork checks npm for a newer stable version at most once a day in a detached background worker
+after command completion, caches the result in your user cache directory, and shows a one-line
+notice on stderr on a later run, including when stderr is redirected for agents. Set
+VORK_NO_UPDATE_NOTIFIER (any value, including empty) to disable both checks and notices; CI also
+disables them. The check sends only a package-version request to the npm registry, with no
+identifiers or telemetry. Network and cache failures are silent and never change rendered files
+or exit status.

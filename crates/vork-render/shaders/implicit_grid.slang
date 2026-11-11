@@ -70,6 +70,11 @@ bool implicit_cell_negative_near(ImplicitCell cell,float3 p) {
 // conditioning rather than adding a scalar or coordinate epsilon here.
 bool implicit_negative_boundary<G:IImplicitGrid>(G grid,float threshold,int3 cell,float3 p,bool cell_negative,out bool valid) {
     valid=true;
+#ifdef VORK_APPROXIMATE_FIELD_ADMISSION
+    // Raster profiles approximate support with the already-loaded owning cell.
+    // Path retains the exact incident-neighborhood search.
+    return cell_negative;
+#else
     if(all(p>float3(0.)) && all(p<float3(1.))) return cell_negative;
     int3 lower=cell;uint3 alternatives=uint3(1u);
     for(uint axis=0u;axis<3u;axis++) if(p[axis]==0. || p[axis]==1.) {
@@ -94,6 +99,7 @@ bool implicit_negative_boundary<G:IImplicitGrid>(G grid,float threshold,int3 cel
         if(implicit_value(values,local)<0. || implicit_cell_negative_near(values,local)) admitted=true;
     }
     return admitted;
+#endif
 }
 
 struct ImplicitGridHit {

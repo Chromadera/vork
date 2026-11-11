@@ -453,7 +453,16 @@ impl Shot {
         let output_run = if no_write || gpu_only {
             None
         } else {
-            Some(crate::output_run::OutputRun::begin(&out)?)
+            // Explicit selections replace only their numbered files. A still
+            // alongside video uses its own absolute identity, not the video range.
+            let selected = if let Some(index) = still_index {
+                Some(index..=index)
+            } else if frame_start.is_some() || frame_end.is_some() {
+                Some(first_frame as u32..=last_frame as u32)
+            } else {
+                None
+            };
+            Some(crate::output_run::OutputRun::begin(&out, selected)?)
         };
         let outputs = Outputs::new(outputs);
         let readback = outputs.readback(
@@ -683,6 +692,7 @@ impl Shot {
         let mut frame_exposures = Vec::new();
         let mut first_frame_ms = 0.;
         let mut submit_cpu = vec![None; slots.len()];
+        let mut output_release_ms = vec![0.; slots.len()];
         // Frames the shader refused (non-finite radiance, say). A video cannot
         // skip a frame; per-frame files can, so the rest of the range renders.
         let mut refused: Vec<(u32, String)> = Vec::new();
@@ -714,6 +724,7 @@ impl Shot {
                     // past it once, and free the next entry's frame before reuse; a
                     // redone frame's entry was never delivered, so resubmission keeps
                     // it and frame f stays on encoder entry f % ring_entries.
+                    let release_start = Instant::now();
                     if slot.ring.frame.is_some() {
                         slot.advance_ring();
                         if let Some(previous) = slot.ring.frame.take() {
@@ -722,6 +733,7 @@ impl Shot {
                             }
                         }
                     }
+                    output_release_ms[i] = release_start.elapsed().as_secs_f64() * 1000.;
                     if gpu_only || (video && (directory_paths.is_empty() || still_pass)) {
                         slot.submit_indexed_outputs(&installed, &renderer, output_index(next_submit), frame_request(next_submit), crate::ReadbackOutputs::default()).map_err(device)?;
                     } else {
@@ -803,7 +815,7 @@ impl Shot {
             }
             metadata_frames.push(serde_json::json!({"index":output_index(frame),"time":frame_time(frame),"camera":installed.camera_name_at_request(&frame_request(frame))?,"depth_unit_m":p.camera.depth_unit_m,"terminated_medium_paths":p.timing.terminated_medium_paths,"discarded_medium_radiance":p.timing.discarded_medium_radiance,"dropped_path_samples":p.timing.dropped_path_samples,"dropped_light_samples":p.timing.dropped_light_samples,"exposure":p.exposure.map(|e|e.json())}));
             if let Some(e) = p.exposure { frame_exposures.push((index(frame), e)); }
-            samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"timing_source":diagnostics.then_some(p.timing.timing_source),"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"terminated_medium_paths":p.timing.terminated_medium_paths,"discarded_medium_radiance":p.timing.discarded_medium_radiance,"dropped_path_samples":p.timing.dropped_path_samples,"dropped_light_samples":p.timing.dropped_light_samples,"sample_count":p.timing.sample_count}));
+            samples.push(serde_json::json!({"frame":index(frame),"time":frame_time(frame),"cpu_thread_ms":cpu_thread_ms,"encode_push_wall_ms":encode_push_ms,"output_release_wall_ms":output_release_ms[i],"encode_pipe_wait_wall_ms":slot.ring.encoder_surfaces.iter().map(|s|s.pipe_wait_ms()).sum::<f64>(),"collect_wall_ms":collect_wall_ms,"cpu_prepare_ms":p.timing.cpu_prepare_ms,"cpu_submit_ms":p.timing.cpu_submit_ms,"cpu_finish_ms":p.timing.cpu_finish_ms,"denoise_wait_ms":p.timing.denoise_wait_ms,"denoise_pack_ms":p.timing.denoise_pack_ms,"denoise_filter_ms":p.timing.denoise_filter_ms,"denoise_upload_ms":p.timing.denoise_upload_ms,"timing_source":diagnostics.then_some(p.timing.timing_source),"gpu_ms":diagnostics.then_some(p.timing.gpu_ms),"gpu_elapsed_ms":diagnostics.then_some(p.timing.gpu_elapsed_ms),"gpu_spans_ms":diagnostics.then_some(&p.timing.gpu_spans_ms),"nonfinite":p.timing.nonfinite,"terminated_medium_paths":p.timing.terminated_medium_paths,"discarded_medium_radiance":p.timing.discarded_medium_radiance,"dropped_path_samples":p.timing.dropped_path_samples,"dropped_light_samples":p.timing.dropped_light_samples,"sample_count":p.timing.sample_count}));
             if !still_pass {
                 for writer in &png_outputs { writer.push(index(frame), p.clone())?; }
             }

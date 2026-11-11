@@ -1,0 +1,158 @@
+{
+  "version": 2,
+  "materials": {
+    "front": {
+      "inputs": {
+        "geometry_opacity": 0.35,
+        "base_weight": 0,
+        "specular_weight": 0,
+        "emission_luminance": 1,
+        "emission_color": [
+          0,
+          0.2,
+          1
+        ]
+      }
+    },
+    "back": {
+      "inputs": {
+        "base_weight": 0,
+        "specular_weight": 0,
+        "emission_luminance": 1,
+        "emission_color": [
+          1,
+          0.1,
+          0
+        ]
+      }
+    }
+  },
+  "buffers": {
+    "p": {
+      "type": "vec3",
+      "data": [
+        [
+          -1,
+          -1,
+          0
+        ],
+        [
+          1,
+          -1,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ],
+        [
+          -1,
+          1,
+          0
+        ]
+      ]
+    },
+    "n": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ]
+    },
+    "i": {
+      "type": "u32",
+      "data": [
+        0,
+        1,
+        2,
+        0,
+        2,
+        3
+      ]
+    }
+  },
+  "geometry": {
+    "quad": {
+      "attributes": {
+        "POSITION": "p",
+        "NORMAL": "n"
+      },
+      "indices": "i"
+    }
+  },
+  "nodes": [
+    {
+      "type": "mesh",
+      "name": "front",
+      "geometry": "quad",
+      "materials": [
+        "front"
+      ],
+      "scale": [
+        0.7,
+        0.7,
+        0.7
+      ]
+    },
+    {
+      "type": "mesh",
+      "name": "back",
+      "geometry": "quad",
+      "materials": [
+        "back"
+      ],
+      "translation": [
+        0,
+        0,
+        -0.5
+      ]
+    },
+    {
+      "type": "camera",
+      "translation": [
+        0,
+        0,
+        3
+      ],
+      "material": {
+        "program": "std/camera",
+        "inputs": {
+          "projection": "ortho",
+          "ortho_scale": 2.4
+        }
+      }
+    }
+  ],
+  "render": {
+    "resolution": [
+      192,
+      192
+    ],
+    "fps": 1,
+    "duration": 1,
+    "background": [
+      0.1,
+      0.25,
+      0.05
+    ]
+  }
+}

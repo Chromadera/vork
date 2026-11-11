@@ -229,7 +229,7 @@ pub(crate) enum HitBuffer {
 fn admit_static_hit_buffers(limits: &wgpu::Limits, buffers: &[HitBuffer]) -> Result<()> {
     for (index, buffer) in buffers.iter().enumerate() {
         if let HitBuffer::Static(buffer) = buffer {
-            crate::gpu_memory::storage_binding(limits, &format!("hit geometry buffer {index}"), buffer.size())?;
+            crate::gpu_memory::storage_binding(limits, &format!("hit geometry buffer {index}"), buffer.size(), "reduce geometry or instance count")?;
         }
     }
     Ok(())
@@ -773,7 +773,7 @@ fn point_shapes(r: &Renderer, draws: &[install::Draw]) -> Result<Vec<Option<Poin
 
 fn checked_placement_count(counts:impl IntoIterator<Item=u32>,limit:u32)->Result<u32> {
     let mut total=0u32;
-    for count in counts {total=total.checked_add(count).filter(|&n|n<=limit).context("point placements exceed TLAS instance capacity")?;}
+    for count in counts {total=total.checked_add(count).filter(|&n|n<=limit).with_context(|| crate::gpu_memory::limit_message("point placements in TLAS", format_args!("{} instances",u64::from(total)+u64::from(count)), format_args!("{limit} instances"), "reduce point pool size or instance count"))?;}
     Ok(total)
 }
 
@@ -835,7 +835,7 @@ pub(crate) fn draw_table(r: &Renderer, draws: &[install::Draw]) -> Result<(wgpu:
         constants::RAY_HIT_BUFFERS
     );
     admit_static_hit_buffers(&r.device.limits(), &buffers)?;
-    crate::gpu_memory::storage_binding(&r.device.limits(), "camera draw table", words.len() as u64 * 4)?;
+    crate::gpu_memory::storage_binding(&r.device.limits(), "camera draw table", words.len() as u64 * 4, "reduce geometry or instance count")?;
     let table = init(&r.device, "decoupled draw table", bytemuck::cast_slice(&words), wgpu::BufferUsages::STORAGE);
     // A binding array needs one element even without draws.
     if buffers.is_empty() {
@@ -971,8 +971,7 @@ fn alpha_table(
     ensure!(
         bytes <= u64::from(limits.max_storage_buffer_binding_size)
             && bytes <= limits.max_buffer_size,
-        "ray table needs {bytes} bytes; device storage binding limit is {}",
-        limits.max_storage_buffer_binding_size
+        "{}", crate::gpu_memory::limit_message("ray table", format_args!("{bytes} bytes"), format_args!("storage binding={} bytes, buffer={} bytes",limits.max_storage_buffer_binding_size,limits.max_buffer_size), "reduce geometry and light count or choose --profile std/draft for a lower sample budget")
     );
     let table = init(&r.device, "ray table", bytemuck::cast_slice(&words), wgpu::BufferUsages::STORAGE);
     if buffers.is_empty() {
@@ -1436,6 +1435,19 @@ fn surface_stages_required(nodes:&[Node], stages:&std::collections::BTreeMap<Str
     })
 }
 
+fn previs_requires_path<'a>(scene: &Scene, used_materials: impl IntoIterator<Item=&'a str>) -> Result<bool> {
+    if !scene.render.settings.previs {return Ok(false);}
+    let animated=materials::animated_inputs(scene)?;
+    for name in used_materials {
+        if scene.materials[name].program!="std/openpbr" {continue;}
+        let inputs=animated.get(name).cloned().unwrap_or_default();
+        if materials::openpbr_values(scene,Some(name),&inputs,|_|Ok(0))?.previs_requires_path(&inputs) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Resolve unsupported combinations from scene facts before resources or passes
 /// are chosen. Quality never controls admission; preserve the call budget.
 pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, _base:&Path, facts:crate::install::TransportFacts, stages:&std::collections::BTreeMap<String,crate::programs::Stages>)->Result<()> {
@@ -1455,16 +1467,9 @@ pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, _base:&Path
         }
     }
 
-    // The direct-only look uses ray camera visibility for authored table alpha.
-    // This retains transparent emission without the indirect receiver stages.
-    let mut previs_coverage=false;
-    if scene.render.settings.previs {
-        let animated=materials::animated_inputs(scene)?;
-        for name in stages.keys().filter(|name|scene.materials[*name].program=="std/openpbr") {
-            let inputs=animated.get(name).cloned().unwrap_or_default();
-            previs_coverage |= materials::openpbr_values(scene,Some(name),&inputs,|_|Ok(0))?.has_opacity;
-        }
-    }
+    // Scalar table alpha uses each material's existing raster coverage slot.
+    // Varying coverage and glass retain complete-camera transport until qualified.
+    let previs_coverage=previs_requires_path(scene, stages.keys().map(String::as_str))?;
     let requires_path=facts.media || facts.hair || ies || previs_coverage || crate::catcher::has_mattes(scene);
     if requires_path && !scene.render.settings.integrator.is_path() {
         if facts.media || facts.hair {promote_transport_owner(scene);} else {promote_to_path(scene);}
@@ -1477,6 +1482,67 @@ pub(crate) fn resolve_scene_providers(r:&Renderer, scene:&mut Scene, _base:&Path
 #[cfg(test)]
 mod transport_owner_tests {
     use super::*;
+
+    #[test]
+    fn scalar_table_alpha_does_not_promote_other_materials() -> Result<()> {
+        let mut scene:Scene=vork_scene::v2::from_test_value(serde_json::json!({"version":2,
+            "nodes":[{"type":"camera"}],
+            "materials":{"opaque":{},"alpha":{"inputs":{"geometry_opacity":0.35}}}}))?;
+        scene.render.settings=vork_scene::Profile::load("std/previs")?.resolve(&Default::default())?;
+        assert!(!previs_requires_path(&scene,["opaque","alpha"])?);
+        scene.animation=vork_scene::v2::from_test_value::<Scene>(serde_json::json!({"version":2,
+            "nodes":[{"type":"camera"}],
+            "animation":[{"tracks":[{"path":["materials","alpha","inputs","geometry_opacity"],"keys":[[0,0.35],[1,0.7]]}]}]}))?.animation;
+        assert!(previs_requires_path(&scene,["opaque","alpha"])?);
+        assert!(!previs_requires_path(&scene,["opaque"])?);
+        Ok(())
+    }
+
+    #[test]
+    fn previs_scalar_coverage_retains_emission_and_controls() -> Result<()> {
+        let Some(r)=crate::test_renderer()? else {return Ok(());};
+        for (background, overlapping, cutoff) in [(false,false,None),(true,false,None),(false,true,None),(false,false,Some(0.5)),(false,false,Some(0.2))] {
+            let mut document:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/previs-scalar-alpha.json"))?;
+            document["render"]["resolution"]=serde_json::json!([32,32]);
+            if background {document["nodes"].as_array_mut().unwrap().remove(1);}
+            if overlapping {document["materials"]["back"]["inputs"]["geometry_opacity"]=0.6.into();}
+            if let Some(cutoff)=cutoff {document["materials"]["front"]["inputs"]["alpha_cutoff"]=cutoff.into();}
+            let mut outputs=Vec::new();
+            for continuous in [false,true] {
+                let mut document=document.clone();
+                if continuous {
+                    for material in document["materials"].as_object_mut().unwrap().values_mut() {
+                        material["opacity"]="transmittance".into();
+                    }
+                }
+                let mut scene:Scene=vork_scene::v2::from_test_value(document)?;
+                scene.render.settings=vork_scene::Profile::load("std/previs")?.resolve(&Default::default())?;
+                scene.render.settings.samples=512;
+                let mut installed=r.install(scene,Path::new("."))?;
+                assert!(!installed.render.settings.integrator.is_path());
+                let mut frame=installed.create_frame_slot(&r,crate::frame::ReadbackPrecision::Float)?;
+                let output=installed.render_frame(&r,&mut frame,0.)?;
+                assert!(!output.ids.is_empty());
+                assert!(output.depth_f32.as_ref().unwrap().iter().all(|v|v.is_finite()));
+                assert!(output.normals_f32.as_ref().unwrap().iter().flatten().all(|v|v.is_finite()));
+                outputs.push(output.linear_rgba.unwrap());
+            }
+            // Coverage and continuous composition converge in scene-linear space.
+            // Independent visibility samples retain Bernoulli noise; compare the
+            // interior mean and RMSE, rather than requiring matching sample hashes.
+            for c in 0..3 {
+                let mut bias=0.;let mut squared=0.;let mut maximum=0_f64;
+                for y in 8..24 {for x in 8..24 {
+                    let delta=f64::from(outputs[0][y*32+x][c]-outputs[1][y*32+x][c]);
+                    bias+=delta;squared+=delta*delta;maximum=maximum.max(delta.abs());
+                }}
+                eprintln!("previs alpha: background={background}, overlap={overlapping}, cutoff={cutoff:?}, channel={c}: bias={}, RMSE={}, max={maximum}",bias/256.,(squared/256.).sqrt());
+                assert!((bias/256.).abs()<0.015 && (squared/256.).sqrt()<0.06 && maximum<0.2,
+                    "background={background}, overlap={overlapping}, cutoff={cutoff:?}, channel={c}: bias={}, RMSE={}, max={maximum}",bias/256.,(squared/256.).sqrt());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn dry_promotions_preserve_the_resolved_denoiser() -> Result<()> {

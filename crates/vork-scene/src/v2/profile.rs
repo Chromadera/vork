@@ -217,24 +217,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn secondary_compilation_bounds_are_draft_only_and_inherited() {
+    fn profile_strategies_are_level_based_and_inherited() {
         for level in 0..=3 {
             let profile=Profile::parse("renamed.json",format!(r#"{{"version":1,"level":{level},"settings":{{}}}}"#).as_bytes()).unwrap();
             for denoise in [false,true] {
                 let intent=serde_json::from_value(serde_json::json!({"samples":64,"denoise":denoise})).unwrap();
                 let settings=profile.resolve(&intent).unwrap();
                 assert_eq!(settings.bounded_secondary_compilation,level==0);
+                assert_eq!(settings.approximate_field_boundaries,level!=2);
                 let mut scene=Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"}]}"#).unwrap();
                 scene.apply_settings(settings.clone(),"renamed").unwrap();
                 let capture:ImageRender=serde_json::from_value(serde_json::json!({"resolution":[16,16]})).unwrap();
                 assert_eq!(capture.resolve(&scene.render).settings.bounded_secondary_compilation,level==0);
+                assert_eq!(capture.resolve(&scene.render).settings.approximate_field_boundaries,level!=2);
                 let mut fallback=settings;
                 fallback.without_fast_denoiser(level,true);
                 assert_eq!(fallback.bounded_secondary_compilation,level==0);
+                assert_eq!(fallback.approximate_field_boundaries,level!=2);
             }
         }
         assert!(!Settings::default().bounded_secondary_compilation);
+        assert!(!Settings::default().approximate_field_boundaries);
         assert!(!Profile::load(DEFAULT_PROFILE).unwrap().resolve(&Default::default()).unwrap().bounded_secondary_compilation);
+        assert!(Profile::load(DEFAULT_PROFILE).unwrap().resolve(&Default::default()).unwrap().approximate_field_boundaries);
     }
 
     #[test]
@@ -399,6 +404,13 @@ mod tests {
             assert!(error.contains("--profile"), "{error}");
         }
     }
+}
+
+/// Normalize inline resource declarations without reading assets or validating a
+/// complete scene, for CPU-only code-generation corpus tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn lower_inline_resources_for_test(value: &mut serde_json::Value) {
+    super::inline::lower(value);
 }
 
 /// Test equivalent of the public scene reader's inline-resource lowering, with

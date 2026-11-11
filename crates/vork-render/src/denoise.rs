@@ -477,11 +477,56 @@ pub(crate) fn open_fast(r: &Renderer) -> std::result::Result<(), String> {
 /// Apply the default denoising choice for this device at render start. Called only
 /// for a library draft or final profile whose call did not ask for denoising itself.
 pub(crate) fn resolve_default(r: &Renderer, scene: &mut vork_scene::Scene, profile: &str, level: u8, keep_samples: bool) {
-    if scene.render.settings.integrator.denoiser().is_none() { return; }
-    let Err(reason) = open_fast(r) else { return };
-    scene.render.settings.without_fast_denoiser(level, keep_samples);
+    let Some(reason) = resolve_default_with(&mut scene.render.settings, level, keep_samples, || open_fast(r)) else { return };
     eprintln!("No fast GPU denoiser for {} ({reason}): {profile} renders {} samples without denoising. --set denoise=true uses the slow CPU denoiser anyway; --set samples=N sets the budget.",
         r.adapter_info.name, scene.render.settings.samples);
+}
+
+/// Capability-result injection keeps simulated failures out of device discovery
+/// and lets tests exercise the same default decision without a GPU or OIDN.
+fn resolve_default_with(
+    settings: &mut vork_scene::v2::Settings,
+    level: u8,
+    keep_samples: bool,
+    open: impl FnOnce() -> std::result::Result<(), String>,
+) -> Option<String> {
+    if settings.integrator.denoiser().is_none() { return None; }
+    let Err(reason) = open() else { return None };
+    settings.without_fast_denoiser(level, keep_samples);
+    Some(reason)
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::resolve_default_with;
+    use vork_scene::v2::{CallOverrides, Profile};
+
+    #[test]
+    fn injected_capability_results_preserve_default_and_explicit_budgets() {
+        for name in ["std/draft", "std/final"] {
+            let profile = Profile::load(name).unwrap();
+            for explicit in [false, true] {
+                let call = if explicit {
+                    CallOverrides::resolve([("samples".into(), serde_json::json!(7))]).unwrap()
+                } else { Default::default() };
+                let settings = profile.resolve(&call.settings).unwrap();
+                let mut available = settings.clone();
+                assert!(resolve_default_with(&mut available, profile.level, explicit, || Ok(())).is_none());
+                assert_eq!(available, settings);
+                let mut unavailable = settings.clone();
+                assert_eq!(resolve_default_with(&mut unavailable, profile.level, explicit,
+                    || Err("injected unavailable device".into())).as_deref(), Some("injected unavailable device"));
+                assert!(unavailable.integrator.denoiser().is_none());
+                assert_eq!(unavailable.samples, if explicit {7} else if name == "std/draft" {16} else {32});
+            }
+            let call = CallOverrides::resolve([("denoise".into(), serde_json::json!(false))]).unwrap();
+            let mut disabled = profile.resolve(&call.settings).unwrap();
+            let original = disabled.clone();
+            assert!(resolve_default_with(&mut disabled, profile.level, false,
+                || panic!("explicit denoise=false must not probe capabilities")).is_none());
+            assert_eq!(disabled, original);
+        }
+    }
 }
 
 /// The device an open denoiser runs on, for output metadata.

@@ -152,3 +152,8 @@ pipelines through `PipelineCache`. `metal::release_archive_files_for_exit` remov
 live caches' backing files for a process exit that skips destructors (vork's
 one-shot `_exit`) and stops new ones; regression `exit_release_removes_backing_files_and_stops_new_ones`
 and vork-cli `tests/metal_archive.rs`.
+
+Local no-op test oracle: `src/noop/command.rs` retains the native acceleration
+structure Build/Update modes in its command stream and exposes per-queue submitted Build/Update counters. Nonzero mock scratch sizes keep core from skipping descriptor recording; no native acceleration structure executes. The renderer's `rt_refit_tests.rs` observes actual
+wgpu-core selection, including force_rebuild, without GPU hardware. Remove when
+upstream provides equivalent no-op command inspection.

@@ -61,8 +61,7 @@ impl Plan {
         let allocation = u64::from(side).pow(2) * 8;
         ensure!(
             side > 0 && side <= limits.max_texture_dimension_2d && allocation <= max_allocation,
-            "fibre transport atlas {side}x{side} requires {allocation} bytes for each count/identity target; device limits are {} pixels and {max_allocation} bytes",
-            limits.max_texture_dimension_2d
+            "{}", crate::gpu_memory::limit_message("fibre transport atlas", format_args!("{side}x{side} pixels, {allocation} bytes per count/identity target"), format_args!("{} pixels per axis and {max_allocation} bytes per allocation",limits.max_texture_dimension_2d), "reduce render resolution or shadow light count")
         );
         let mut faces = Vec::with_capacity(count);
         for (light, sun) in suns.iter().enumerate() {

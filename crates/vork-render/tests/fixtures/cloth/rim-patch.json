@@ -1,0 +1,1391 @@
+{
+  "version": 2,
+  "buffers": {
+    "bowl_NORMAL": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 0,
+      "count": 1920
+    },
+    "bowl_POSITION": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 23040,
+      "count": 1920
+    },
+    "bowl_indices": {
+      "type": "u32",
+      "file": "rim-patch.bin",
+      "offset": 46080,
+      "count": 1920
+    },
+    "patch_POSITION": {
+      "type": "vec3",
+      "data": [
+        [
+          0.272,
+          0.4862857142857143,
+          -0.20800000000000002
+        ],
+        [
+          0.28800000000000003,
+          0.4891428571428572,
+          -0.20800000000000002
+        ],
+        [
+          0.272,
+          0.488,
+          -0.192
+        ],
+        [
+          0.28800000000000003,
+          0.4908571428571429,
+          -0.192
+        ]
+      ]
+    },
+    "patch_TEXCOORD_0": {
+      "type": "vec2",
+      "data": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    "patch_indices": {
+      "type": "u32",
+      "data": [
+        0,
+        2,
+        1,
+        1,
+        2,
+        3
+      ]
+    },
+    "cloth_a4895eb44afc_p": {
+      "type": "vec3",
+      "data": [
+        [
+          0.272,
+          0.4862857142857143,
+          -0.20800000000000002
+        ],
+        [
+          0.28800000000000003,
+          0.4891428571428572,
+          -0.20800000000000002
+        ],
+        [
+          0.272,
+          0.488,
+          -0.192
+        ],
+        [
+          0.28800000000000003,
+          0.4908571428571429,
+          -0.192
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_normal": {
+      "type": "vec3",
+      "data": [
+        [
+          -0.17482090031876832,
+          0.9789970417850917,
+          -0.1048925401912569
+        ],
+        [
+          -0.1748209003187683,
+          0.9789970417850917,
+          -0.1048925401912569
+        ],
+        [
+          -0.1748209003187683,
+          0.9789970417850917,
+          -0.1048925401912569
+        ],
+        [
+          -0.1748209003187683,
+          0.9789970417850917,
+          -0.1048925401912569
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_tangent": {
+      "type": "vec4",
+      "data": [
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          1,
+          0,
+          0,
+          1
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_old": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_velocity": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_predicted": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_indices": {
+      "type": "u32",
+      "data": [
+        0,
+        2,
+        1,
+        1,
+        2,
+        3
+      ]
+    },
+    "cloth_a4895eb44afc_triangles": {
+      "type": "f32",
+      "data": [
+        0,
+        2,
+        1,
+        1,
+        2,
+        3
+      ]
+    },
+    "cloth_a4895eb44afc_mass": {
+      "type": "f32",
+      "data": [
+        114726.21583419022,
+        57363.10791709511,
+        57363.10791709511,
+        114726.21583419022
+      ]
+    },
+    "cloth_a4895eb44afc_edges": {
+      "type": "f32",
+      "data": [
+        0,
+        2,
+        1,
+        3,
+        1,
+        2,
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    "cloth_a4895eb44afc_rest": {
+      "type": "f32",
+      "data": [
+        0.016091574674661407,
+        0.016091574674661407,
+        0.02265626011611318,
+        0.016253100175231898,
+        0.016253100175231898
+      ]
+    },
+    "cloth_a4895eb44afc_lambda": {
+      "type": "f32",
+      "data": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "cloth_a4895eb44afc_edge_colors": {
+      "type": "f32",
+      "data": [
+        0,
+        2,
+        3,
+        5
+      ]
+    },
+    "cloth_a4895eb44afc_stretch_compliance": {
+      "type": "f32",
+      "data": [
+        5.941413169404928e-05,
+        5.941413169404928e-05,
+        5.888966899309304e-05,
+        6.061290358194948e-05,
+        6.061290358194948e-05
+      ]
+    },
+    "cloth_a4895eb44afc_hinges": {
+      "type": "f32",
+      "data": [
+        2,
+        1,
+        0,
+        3
+      ]
+    },
+    "cloth_a4895eb44afc_bend_rest": {
+      "type": "f32",
+      "data": [
+        -2.5629267294575138e-17
+      ]
+    },
+    "cloth_a4895eb44afc_bend_lambda": {
+      "type": "f32",
+      "data": [
+        0
+      ]
+    },
+    "cloth_a4895eb44afc_bend_colors": {
+      "type": "f32",
+      "data": [
+        0,
+        1
+      ]
+    },
+    "cloth_a4895eb44afc_bend_compliance": {
+      "type": "f32",
+      "data": [
+        169.80907128503074
+      ]
+    },
+    "cloth_a4895eb44afc_incident_offsets": {
+      "type": "f32",
+      "data": [
+        0,
+        1,
+        3,
+        5,
+        6
+      ]
+    },
+    "cloth_a4895eb44afc_incidents": {
+      "type": "f32",
+      "data": [
+        0,
+        0,
+        1,
+        0,
+        1,
+        1
+      ]
+    },
+    "cloth_a4895eb44afc_neighbour_offsets": {
+      "type": "f32",
+      "data": [
+        0,
+        2,
+        5,
+        8,
+        10
+      ]
+    },
+    "cloth_a4895eb44afc_neighbours": {
+      "type": "f32",
+      "data": [
+        2,
+        1,
+        2,
+        0,
+        3,
+        0,
+        1,
+        3,
+        2,
+        1
+      ]
+    },
+    "cloth_a4895eb44afc_self_order": {
+      "type": "f32",
+      "data": [
+        0,
+        1
+      ]
+    },
+    "cloth_a4895eb44afc_snapshot": {
+      "type": "vec3",
+      "data": [
+        [
+          0.272,
+          0.4862857142857143,
+          -0.20800000000000002
+        ],
+        [
+          0.28800000000000003,
+          0.4891428571428572,
+          -0.20800000000000002
+        ],
+        [
+          0.272,
+          0.488,
+          -0.192
+        ],
+        [
+          0.28800000000000003,
+          0.4908571428571429,
+          -0.192
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_rest_position": {
+      "type": "vec3",
+      "data": [
+        [
+          0.272,
+          0.4862857142857143,
+          -0.20800000000000002
+        ],
+        [
+          0.28800000000000003,
+          0.4891428571428572,
+          -0.20800000000000002
+        ],
+        [
+          0.272,
+          0.488,
+          -0.192
+        ],
+        [
+          0.28800000000000003,
+          0.4908571428571429,
+          -0.192
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_self_lo": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_self_hi": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_contact_status": {
+      "type": "u32",
+      "data": [
+        0
+      ]
+    },
+    "cloth_a4895eb44afc_contact_key": {
+      "type": "vec4",
+      "file": "rim-patch.bin",
+      "offset": 53760,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_ids": {
+      "type": "vec4",
+      "file": "rim-patch.bin",
+      "offset": 53760,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_weights": {
+      "type": "vec4",
+      "file": "rim-patch.bin",
+      "offset": 53760,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_plane": {
+      "type": "vec4",
+      "file": "rim-patch.bin",
+      "offset": 53760,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_kind": {
+      "type": "f32",
+      "file": "rim-patch.bin",
+      "offset": 86528,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_lambda": {
+      "type": "f32",
+      "file": "rim-patch.bin",
+      "offset": 86528,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_owner": {
+      "type": "f32",
+      "file": "rim-patch.bin",
+      "offset": 86528,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_count": {
+      "type": "f32",
+      "data": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "cloth_a4895eb44afc_contact_motion": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 94720,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_contact_tangent_lambda": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 94720,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_uv": {
+      "type": "vec2",
+      "data": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    "cloth_a4895eb44afc_collider_offsets": {
+      "type": "f32",
+      "file": "rim-patch.bin",
+      "offset": 119296,
+      "count": 1921
+    },
+    "cloth_a4895eb44afc_collider_faces": {
+      "type": "f32",
+      "file": "rim-patch.bin",
+      "offset": 126980,
+      "count": 1920
+    },
+    "cloth_a4895eb44afc_collider_triangles": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 134660,
+      "count": 640
+    },
+    "cloth_a4895eb44afc_collider_current": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 142340,
+      "count": 1920
+    },
+    "cloth_a4895eb44afc_collider_previous": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 142340,
+      "count": 1920
+    },
+    "cloth_a4895eb44afc_collider_normal": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 142340,
+      "count": 1920
+    },
+    "cloth_a4895eb44afc_body_a": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 165380,
+      "count": 1024
+    },
+    "cloth_a4895eb44afc_body_b": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 165380,
+      "count": 1024
+    },
+    "cloth_a4895eb44afc_body_c": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 165380,
+      "count": 1024
+    },
+    "cloth_a4895eb44afc_body_old_a": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 165380,
+      "count": 1024
+    },
+    "cloth_a4895eb44afc_body_old_b": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 165380,
+      "count": 1024
+    },
+    "cloth_a4895eb44afc_body_old_c": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 165380,
+      "count": 1024
+    },
+    "cloth_a4895eb44afc_body_lo": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 94720,
+      "count": 2048
+    },
+    "cloth_a4895eb44afc_body_hi": {
+      "type": "vec3",
+      "file": "rim-patch.bin",
+      "offset": 94720,
+      "count": 2048
+    }
+  },
+  "geometry": {
+    "bowl": {
+      "attributes": {
+        "POSITION": "bowl_POSITION",
+        "NORMAL": "bowl_NORMAL"
+      },
+      "indices": "bowl_indices",
+      "material_ranges": [
+        {
+          "start": 0,
+          "count": 1920,
+          "material_index": 0
+        }
+      ]
+    },
+    "patch": {
+      "attributes": {
+        "POSITION": "patch_POSITION",
+        "TEXCOORD_0": "patch_TEXCOORD_0"
+      },
+      "indices": "patch_indices"
+    },
+    "cloth_a4895eb44afc_mesh": {
+      "attributes": {
+        "POSITION": "cloth_a4895eb44afc_p",
+        "TEXCOORD_0": "patch_TEXCOORD_0",
+        "NORMAL": "cloth_a4895eb44afc_normal",
+        "TANGENT": "cloth_a4895eb44afc_tangent"
+      },
+      "indices": "cloth_a4895eb44afc_indices",
+      "status": {
+        "buffer": "cloth_a4895eb44afc_contact_status",
+        "message": "cloth node 'patch': self-contact capacity exceeded (512 slots per vertex; reported value is a lower bound on required slots). Reduce collision_margin or initial intersections; reduce dt for fast motion or extreme folding"
+      }
+    }
+  },
+  "materials": {
+    "glass": {
+      "inputs": {
+        "base_weight": 0,
+        "specular_roughness": 0.025,
+        "specular_ior": 1.46,
+        "transmission_weight": 1,
+        "transmission_color": [
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    "patch": {
+      "inputs": {
+        "base_color": [
+          0.8,
+          0.12,
+          0.035
+        ],
+        "specular_roughness": 0.7,
+        "emission_color": [
+          1,
+          0.15,
+          0.03
+        ],
+        "emission_luminance": 0.15
+      }
+    },
+    "cloth_a4895eb44afc_integrate": {
+      "program": "cloth_a4895eb44afc_integrate",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    },
+    "cloth_a4895eb44afc_solve": {
+      "program": "cloth_a4895eb44afc_solve",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    },
+    "cloth_a4895eb44afc_publish": {
+      "program": "cloth_a4895eb44afc_publish",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    },
+    "cloth_a4895eb44afc_refit": {
+      "program": "cloth_a4895eb44afc_refit",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    },
+    "cloth_a4895eb44afc_snapshot": {
+      "program": "cloth_a4895eb44afc_snapshot",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    },
+    "cloth_a4895eb44afc_self_refit": {
+      "program": "cloth_a4895eb44afc_self_refit",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    },
+    "cloth_a4895eb44afc_self_generate": {
+      "program": "cloth_a4895eb44afc_self_generate",
+      "inputs": {
+        "body": {
+          "geometry": "bowl"
+        }
+      }
+    }
+  },
+  "nodes": [
+    {
+      "name": "patch",
+      "type": "mesh",
+      "geometry": "cloth_a4895eb44afc_mesh",
+      "materials": [
+        "patch"
+      ]
+    },
+    {
+      "name": "bowl",
+      "type": "mesh",
+      "geometry": "bowl",
+      "materials": [
+        "glass"
+      ]
+    },
+    {
+      "name": "camera",
+      "type": "camera",
+      "translation": [
+        0.28,
+        0.8385714285714285,
+        0.35000000000000003
+      ],
+      "target": [
+        0.31500000000000006,
+        0.4535714285714286,
+        -0.225
+      ],
+      "material": {
+        "program": "std/camera",
+        "inputs": {
+          "projection": "ortho",
+          "ortho_scale": 0.3
+        }
+      }
+    },
+    {
+      "name": "world",
+      "type": "light",
+      "shape": "environment",
+      "color": [
+        0.45,
+        0.55,
+        0.7
+      ],
+      "energy": 0.3
+    }
+  ],
+  "render": {
+    "camera": "camera",
+    "fps": 480,
+    "duration": "1/240",
+    "resolution": [
+      320,
+      240
+    ],
+    "background": [
+      0.035,
+      0.045,
+      0.065
+    ]
+  },
+  "programs": {
+    "cloth_a4895eb44afc_integrate": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){cloth_integrate(ctx,inputs);}\n",
+      "schedule": "simulation",
+      "dispatch": 4,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    },
+    "cloth_a4895eb44afc_solve": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){cloth_solve(ctx,inputs);}\n",
+      "schedule": "simulation",
+      "dispatch": 64,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    },
+    "cloth_a4895eb44afc_publish": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){cloth_publish(ctx,inputs);}\n",
+      "schedule": "simulation",
+      "dispatch": 4,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    },
+    "cloth_a4895eb44afc_refit": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){cloth_collider_update(ctx.id.x,inputs,ctx.dt==0);}\n",
+      "schedule": "simulation",
+      "dispatch": 64,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    },
+    "cloth_a4895eb44afc_snapshot": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){float3 p=p_load(ctx.id.x);if(all((asuint(p)&uint3(0x7f800000u))!=uint3(0x7f800000u)))snapshot_store(ctx.id.x,p);}\n",
+      "schedule": "simulation",
+      "dispatch": 4,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    },
+    "cloth_a4895eb44afc_self_refit": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){cloth_self_refit(ctx.id.x);}\n",
+      "schedule": "simulation",
+      "dispatch": 64,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    },
+    "cloth_a4895eb44afc_self_generate": {
+      "source": "uint triangles_load(uint i){return uint(triangles_raw_load(i));}\nuint edges_load(uint i){return uint(edges_raw_load(i));}\nuint edge_colors_load(uint i){return uint(edge_colors_raw_load(i));}\nuint hinges_load(uint i){return uint(hinges_raw_load(i));}\nuint bend_colors_load(uint i){return uint(bend_colors_raw_load(i));}\nuint incident_offsets_load(uint i){return uint(incident_offsets_raw_load(i));}\nuint incidents_load(uint i){return uint(incidents_raw_load(i));}\nuint neighbour_offsets_load(uint i){return uint(neighbour_offsets_raw_load(i));}\nuint neighbours_load(uint i){return uint(neighbours_raw_load(i));}\nuint self_order_load(uint i){return uint(self_order_raw_load(i));}\nuint collider_offsets_load(uint i){return uint(collider_offsets_raw_load(i));}\nuint collider_faces_load(uint i){return uint(collider_faces_raw_load(i));}\nstatic const bool CLOTH_HAS_UV=true;\nfloat2 cloth_uv(uint i){return uv_load(i);}\nstatic const uint CLOTH_VERTICES=4u;\nstatic const uint CLOTH_EDGES=5u;\nstatic const uint CLOTH_HINGES=1u;\nstatic const uint CLOTH_EDGE_COLORS=3u;\nstatic const uint CLOTH_BEND_COLORS=1u;\nstatic const uint CLOTH_ITERATIONS=32u;\nstatic const uint CLOTH_ROUNDS=8u;\nstatic const uint CLOTH_FACES=2u;\nstatic const uint SELF_LEAVES=2u;\nstatic const uint CONTACT_CAPACITY=512u;\nstatic const float DAMPING=0.8;\nstatic const float SELF_MARGIN=0.0045;\nstatic const uint COLLIDER_VERTICES=1920u;\nstatic const uint BODY_TRIANGLES=640u;\nstatic const uint BODY_LEAVES=1024u;\nstatic const float THICKNESS=0.0015;\nstruct Inputs {Geometry body;};\nfloat3 cloth_force(uint i,float3 p,float3 v,float time){return float3(0,-9.81,0);}\n#include \"cloth/solver.slang\"\n#include \"cloth/body.slang\"\n#include \"cloth/self.slang\"\n\nvoid compute(ComputeContext ctx,Inputs inputs){cloth_self_generate(ctx.id.x);}\n",
+      "schedule": "simulation",
+      "dispatch": 4,
+      "bindings": {
+        "p": "cloth_a4895eb44afc_p",
+        "normal": "cloth_a4895eb44afc_normal",
+        "tangent": "cloth_a4895eb44afc_tangent",
+        "old": "cloth_a4895eb44afc_old",
+        "velocity": "cloth_a4895eb44afc_velocity",
+        "predicted": "cloth_a4895eb44afc_predicted",
+        "triangles_raw": "cloth_a4895eb44afc_triangles",
+        "mass": "cloth_a4895eb44afc_mass",
+        "edges_raw": "cloth_a4895eb44afc_edges",
+        "rest": "cloth_a4895eb44afc_rest",
+        "lambda": "cloth_a4895eb44afc_lambda",
+        "edge_colors_raw": "cloth_a4895eb44afc_edge_colors",
+        "stretch_compliance": "cloth_a4895eb44afc_stretch_compliance",
+        "hinges_raw": "cloth_a4895eb44afc_hinges",
+        "bend_rest": "cloth_a4895eb44afc_bend_rest",
+        "bend_lambda": "cloth_a4895eb44afc_bend_lambda",
+        "bend_colors_raw": "cloth_a4895eb44afc_bend_colors",
+        "bend_compliance": "cloth_a4895eb44afc_bend_compliance",
+        "incident_offsets_raw": "cloth_a4895eb44afc_incident_offsets",
+        "incidents_raw": "cloth_a4895eb44afc_incidents",
+        "neighbour_offsets_raw": "cloth_a4895eb44afc_neighbour_offsets",
+        "neighbours_raw": "cloth_a4895eb44afc_neighbours",
+        "self_order_raw": "cloth_a4895eb44afc_self_order",
+        "snapshot": "cloth_a4895eb44afc_snapshot",
+        "rest_position": "cloth_a4895eb44afc_rest_position",
+        "self_lo": "cloth_a4895eb44afc_self_lo",
+        "self_hi": "cloth_a4895eb44afc_self_hi",
+        "contact_status": "cloth_a4895eb44afc_contact_status",
+        "contact_key": "cloth_a4895eb44afc_contact_key",
+        "contact_ids": "cloth_a4895eb44afc_contact_ids",
+        "contact_weights": "cloth_a4895eb44afc_contact_weights",
+        "contact_plane": "cloth_a4895eb44afc_contact_plane",
+        "contact_kind": "cloth_a4895eb44afc_contact_kind",
+        "contact_lambda": "cloth_a4895eb44afc_contact_lambda",
+        "contact_owner": "cloth_a4895eb44afc_contact_owner",
+        "contact_count": "cloth_a4895eb44afc_contact_count",
+        "contact_motion": "cloth_a4895eb44afc_contact_motion",
+        "contact_tangent_lambda": "cloth_a4895eb44afc_contact_tangent_lambda",
+        "uv": "cloth_a4895eb44afc_uv",
+        "collider_offsets_raw": "cloth_a4895eb44afc_collider_offsets",
+        "collider_faces_raw": "cloth_a4895eb44afc_collider_faces",
+        "collider_triangles": "cloth_a4895eb44afc_collider_triangles",
+        "collider_current": "cloth_a4895eb44afc_collider_current",
+        "collider_previous": "cloth_a4895eb44afc_collider_previous",
+        "collider_normal": "cloth_a4895eb44afc_collider_normal",
+        "body_a": "cloth_a4895eb44afc_body_a",
+        "body_b": "cloth_a4895eb44afc_body_b",
+        "body_c": "cloth_a4895eb44afc_body_c",
+        "body_old_a": "cloth_a4895eb44afc_body_old_a",
+        "body_old_b": "cloth_a4895eb44afc_body_old_b",
+        "body_old_c": "cloth_a4895eb44afc_body_old_c",
+        "body_lo": "cloth_a4895eb44afc_body_lo",
+        "body_hi": "cloth_a4895eb44afc_body_hi"
+      }
+    }
+  },
+  "simulation": {
+    "t0": 0,
+    "dt": 0.0020833333333333333,
+    "seed": 17,
+    "state": [
+      "cloth_a4895eb44afc_p",
+      "cloth_a4895eb44afc_normal",
+      "cloth_a4895eb44afc_tangent",
+      "cloth_a4895eb44afc_old",
+      "cloth_a4895eb44afc_velocity",
+      "cloth_a4895eb44afc_predicted",
+      "cloth_a4895eb44afc_triangles",
+      "cloth_a4895eb44afc_mass",
+      "cloth_a4895eb44afc_edges",
+      "cloth_a4895eb44afc_rest",
+      "cloth_a4895eb44afc_lambda",
+      "cloth_a4895eb44afc_edge_colors",
+      "cloth_a4895eb44afc_stretch_compliance",
+      "cloth_a4895eb44afc_hinges",
+      "cloth_a4895eb44afc_bend_rest",
+      "cloth_a4895eb44afc_bend_lambda",
+      "cloth_a4895eb44afc_bend_colors",
+      "cloth_a4895eb44afc_bend_compliance",
+      "cloth_a4895eb44afc_incident_offsets",
+      "cloth_a4895eb44afc_incidents",
+      "cloth_a4895eb44afc_neighbour_offsets",
+      "cloth_a4895eb44afc_neighbours",
+      "cloth_a4895eb44afc_self_order",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_rest_position",
+      "cloth_a4895eb44afc_self_lo",
+      "cloth_a4895eb44afc_self_hi",
+      "cloth_a4895eb44afc_contact_status",
+      "cloth_a4895eb44afc_contact_key",
+      "cloth_a4895eb44afc_contact_ids",
+      "cloth_a4895eb44afc_contact_weights",
+      "cloth_a4895eb44afc_contact_plane",
+      "cloth_a4895eb44afc_contact_kind",
+      "cloth_a4895eb44afc_contact_lambda",
+      "cloth_a4895eb44afc_contact_owner",
+      "cloth_a4895eb44afc_contact_count",
+      "cloth_a4895eb44afc_contact_motion",
+      "cloth_a4895eb44afc_contact_tangent_lambda",
+      "cloth_a4895eb44afc_uv",
+      "cloth_a4895eb44afc_collider_offsets",
+      "cloth_a4895eb44afc_collider_faces",
+      "cloth_a4895eb44afc_collider_triangles",
+      "cloth_a4895eb44afc_collider_current",
+      "cloth_a4895eb44afc_collider_previous",
+      "cloth_a4895eb44afc_collider_normal",
+      "cloth_a4895eb44afc_body_a",
+      "cloth_a4895eb44afc_body_b",
+      "cloth_a4895eb44afc_body_c",
+      "cloth_a4895eb44afc_body_old_a",
+      "cloth_a4895eb44afc_body_old_b",
+      "cloth_a4895eb44afc_body_old_c",
+      "cloth_a4895eb44afc_body_lo",
+      "cloth_a4895eb44afc_body_hi"
+    ],
+    "init": [
+      "cloth_a4895eb44afc_integrate",
+      "cloth_a4895eb44afc_refit",
+      "cloth_a4895eb44afc_publish"
+    ],
+    "steps": [
+      "cloth_a4895eb44afc_integrate",
+      "cloth_a4895eb44afc_refit",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_snapshot",
+      "cloth_a4895eb44afc_self_refit",
+      "cloth_a4895eb44afc_self_generate",
+      "cloth_a4895eb44afc_solve",
+      "cloth_a4895eb44afc_publish"
+    ]
+  }
+}

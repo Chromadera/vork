@@ -105,6 +105,9 @@ pub struct Settings {
     /// Draft-only native secondary compilation strategy; never an authored scene knob.
     #[serde(skip)]
     pub bounded_secondary_compilation: bool,
+    /// Raster profiles use owning-cell admission instead of incident-neighborhood search.
+    #[serde(skip)]
+    pub approximate_field_boundaries: bool,
     /// Internal blocking-look policy, retained when an effect needs ray camera visibility.
     pub previs: bool,
     /// Internal scene-linear spatial reconstruction; independent of optional OIDN.
@@ -132,6 +135,7 @@ impl Settings {
         settings.promotion_denoise = Some(intent.denoise);
         settings.seed = intent.seed;
         settings.bounded_secondary_compilation = level == 0;
+        settings.approximate_field_boundaries = matches!(level,0|1|3);
         settings.previs = level == 3;
         settings.reconstruct = level == 1 && !intent.denoise;
         match &mut settings.integrator {
@@ -168,7 +172,7 @@ impl Settings {
     }
     /// An integrator's settings with its default sample budget and aperture sampling.
     pub fn with_integrator(integrator: Integrator) -> Self {
-        Self { promotion_denoise: None, bounded_secondary_compilation: false, previs: false, reconstruct: false, seed: 0, samples: integrator.default_samples(), integrator }
+        Self { promotion_denoise: None, bounded_secondary_compilation: false, approximate_field_boundaries: false, previs: false, reconstruct: false, seed: 0, samples: integrator.default_samples(), integrator }
     }
 }
 // Omitted `integrator` is raster; samples and aperture sampling default by integrator.
@@ -189,7 +193,7 @@ impl<'de> Deserialize<'de> for Settings {
         let defaults = Self::with_integrator(integrator);
         Ok(Self {
             promotion_denoise: Some(defaults.integrator.denoiser().is_some()),
-            bounded_secondary_compilation: false,
+            bounded_secondary_compilation: false, approximate_field_boundaries: false,
             previs,
             reconstruct,
             seed,

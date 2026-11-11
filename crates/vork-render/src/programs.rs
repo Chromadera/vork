@@ -37,7 +37,22 @@ pub(crate) fn material_source(scene: &v2::Scene, base: &Path, name: &str) -> Res
         // Bundled modules own their imports. A scene's directory must not
         // multiply their reflection/native tags or invalidate setup's artifacts.
         Ok((source.to_owned(), PathBuf::from(format!("{name}.slang"))))
-    } else { program_source(base, name, &scene.programs[name]) }
+    } else {
+        let program=&scene.programs[name];
+        let (source,origin)=program_source(base,name,program)?;
+        // Slang checks unused entry bodies too. A matching compute declaration of
+        // this authored module supplies its API, but no implementation that a
+        // surface could accidentally execute.
+        let compute=if program.is_compute() {Some(program)} else {
+            scene.programs.values().find(|candidate|candidate.is_compute()
+                && ((program.file.is_some() && candidate.file==program.file)
+                    || (program.source.is_some() && candidate.source==program.source)))
+        };
+        if let Some(compute)=compute {
+            let declarations=crate::compute::stage_declarations(scene,compute)?;
+            Ok((format!("{declarations}\n#line 1\n{source}"),origin))
+        } else {Ok((source,origin))}
+    }
 }
 
 /// ShadingContext as far as shading provides it, and every OpenPBR Closure
@@ -247,6 +262,10 @@ pub(crate) fn pack_inputs(
         let expected = match field.ty {
             vork_slang::Type::FloatGrid => v2::BufferType::F32,
             vork_slang::Type::VectorGrid => v2::BufferType::Vec3,
+            vork_slang::Type::Geometry => {
+                let binding:v2::GeometryBinding=serde_json::from_value(value.clone())?;
+                return crate::geometry_reference::handle(scene,&binding.geometry);
+            }
             vork_slang::Type::Attribute(width) => {
                 let binding: v2::AttributeBinding=serde_json::from_value(value.clone()).with_context(||format!("input {name}: Attribute inputs require {{attribute, channel?, factor?}}"))?;
                 let names=crate::attributes::names(scene)?;
@@ -738,11 +757,11 @@ fn validate_bound_geometry(
 }
 
 /// Map `f` over `items` on up to one thread per core, keeping their order.
-fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
+pub(crate) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
     parallel_map_with_limit(items, usize::MAX, f)
 }
 
-fn parallel_map_with_limit<T: Sync, R: Send>(items: &[T], limit: usize, f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
+pub(crate) fn parallel_map_with_limit<T: Sync, R: Send>(items: &[T], limit: usize, f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
     let warning_collector = crate::warnings::Collector::current();
     let cursor = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -753,14 +772,26 @@ fn parallel_map_with_limit<T: Sync, R: Send>(items: &[T], limit: usize, f: impl 
             loop {
                 let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(item) = items.get(index) else { break };
-                results.push((index, f(item)?));
+                results.push((index, f(item)));
             }
             Ok::<_, anyhow::Error>(results)
         })).collect();
         let mut results = Vec::new();
         for job in jobs { results.extend(job.join().expect("program worker panicked")?); }
         results.sort_by_key(|(index, _)| *index);
-        Ok(results.into_iter().map(|(_, result)| result).collect())
+        let mut values = Vec::new();
+        let mut errors = Vec::new();
+        for (_, result) in results {
+            match result {
+                Ok(value) => values.push(value),
+                Err(error) => errors.push(error),
+            }
+        }
+        if !errors.is_empty() {
+            let messages = errors.iter().map(|error| format!("{error:#}")).collect::<Vec<_>>().join("\n");
+            return Err(errors.remove(0).context(messages));
+        }
+        Ok(values)
     })
 }
 
@@ -1010,7 +1041,7 @@ impl Native {
 /// Path kernels keep each material dispatch out of line in Slang (docs/design/implementation.md).
 const PATH_NOINLINE: &str = "#ifdef VORK_PATH_SLANG_OUTLINE\n[noinline]\n#endif\n";
 const CLAMPS: &str = "o.closure.geometry_opacity=clamp(o.closure.geometry_opacity,0.,1.);o.closure.transmission_weight=clamp(o.closure.transmission_weight,0.,1.);\n";
-fn native(abi: &Abi, programs: &[Program], physical_hair: bool, coverage_only: bool) -> Result<Native> {
+pub(crate) fn native(abi: &Abi, programs: &[Program], physical_hair: bool, coverage_only: bool) -> Result<Native> {
     let retained=|p:&Program|!coverage_only || p.capabilities.opacity || p.capabilities.hair;
     let scattering = if physical_hair { "h[2].w!=0." } else { "false" };
     let (c, k) = (abi.context_vec4s(), abi.closure_vec4s());
@@ -1203,6 +1234,27 @@ fn native(abi: &Abi, programs: &[Program], physical_hair: bool, coverage_only: b
 #[cfg(test)]
 mod help_tests {
     use super::*;
+    #[test]
+    fn parallel_errors_follow_input_order() {
+        if std::thread::available_parallelism().map_or(1, usize::from) < 2 { return; }
+        let second_started = std::sync::atomic::AtomicBool::new(false);
+        let error = parallel_map_with_limit(&[0, 1, 2], 2, |i| -> Result<()> {
+            match i {
+                0 => {
+                    while !second_started.load(std::sync::atomic::Ordering::Acquire) { std::thread::yield_now(); }
+                    Ok(())
+                }
+                1 => {
+                    second_started.store(true, std::sync::atomic::Ordering::Release);
+                    anyhow::bail!("first error")
+                }
+                _ => anyhow::bail!("later error"),
+            }
+        }).unwrap_err();
+        assert_eq!(error.root_cause().to_string(), "first error");
+        assert!(error.to_string().starts_with("first error"), "{error:#}");
+    }
+
     #[test]
     #[ignore = "requires pinned Slang toolchain"]
     fn volume_receivers_retain_coverage_ids_hair_and_shader_capacity() -> Result<()> {
@@ -1525,6 +1577,46 @@ impl InputAnimation {
 mod bundled_origin_tests {
     use super::*;
     #[test]
+    #[ignore = "requires pinned Slang"]
+    fn mixed_surface_compute_installs_bugbash_file() -> Result<()> {
+        let base=Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mixed-programs");
+        for name in ["scene.json","geometry-scene.json"] {
+            Renderer::check(&base.join(name),&vork_scene::Profile::load("std/final")?,false)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires pinned Slang"]
+    fn mixed_surface_compute_discovers_and_compiles_surface() -> Result<()> {
+        // BB039/BB055: pins.slang combines surface(), compute(), typed buffer
+        // accessors and a Geometry input in one authored module.
+        let mut scene = crate::test_scene(serde_json::json!({
+            "version":2,"nodes":[{"type":"camera","name":"camera"}],"render":{},
+            "buffers":{"p":{"type":"vec3","data":[[0.,0.,0.]]}},
+            "programs":{"mixed":{"source":"struct Inputs { Geometry paddle; }; Closure surface(ShadingContext c, Inputs i){return unlit(float3(.2,.4,.6));} void compute(ComputeContext c, Inputs i){positions_store(c.id.x,positions_load(c.id.x)+geometry_POSITION_load(i.paddle,0u));}","bindings":{"positions":"p"},"dispatch":1,"schedule":"install"}}
+        }),Path::new("."))?;
+        let (source,origin)=material_source(&scene,Path::new("."),"mixed")?;
+        let compiler=Compiler::discover();
+        compiler.prepare_program(&abi(),&source,&origin)?;
+        let (stages,_)=compiler.stages(&abi(),&source,&origin)?;
+        assert!(stages.contains("surface") && stages.contains("compute"));
+        compiler.compile_surface(&abi(),&source,&origin,"mixedsurface")?;
+        let mut alias=scene.programs["mixed"].clone();
+        alias.dispatch=None;
+        alias.schedule=None;
+        alias.bindings.clear();
+        scene.programs.insert("surface_alias".into(),alias);
+        let (source,origin)=material_source(&scene,Path::new("."),"surface_alias")?;
+        compiler.compile_surface(&abi(),&source,&origin,"mixedalias")?;
+        let invalid=source.replace("float3(.2,.4,.6)","positions_load(0u)");
+        assert!(compiler.compile_surface(&abi(),&invalid,&origin,"invalidsurface").is_err(),
+            "compute-only accessors must not acquire surface implementations");
+        Ok(())
+    }
+
+
+    #[test]
     fn launch_analysis_keeps_failures_in_traversal_order() -> Result<()> {
         let renderer = pollster::block_on(Renderer::create(|_| Ok(true), true))?;
         let mut scene = crate::test_scene(serde_json::json!({
@@ -1603,6 +1695,18 @@ mod bundled_origin_tests {
     }
 
     #[test]
+    fn admission_parallel_map_preserves_results_and_propagates_errors() -> Result<()> {
+        assert_eq!(parallel_map(&[3, 1, 2], |n| Ok(n * 2))?, [6, 2, 4]);
+        assert!(parallel_map::<u32, u32>(&[], |_| unreachable!())?.is_empty());
+        let error = parallel_map(&[0, 1, 2], |n| {
+            anyhow::ensure!(*n != 1, "authored surface compilation failed");
+            Ok(*n)
+        }).unwrap_err();
+        assert!(error.to_string().contains("authored surface compilation failed"));
+        Ok(())
+    }
+
+    #[test]
     fn launch_analysis_worker_limit_and_result_order() -> Result<()> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let active = AtomicUsize::new(0);
@@ -1622,6 +1726,19 @@ mod bundled_origin_tests {
         assert_eq!(results[3], Err("third"));
         assert_eq!(results[11], Ok(11));
         Ok(())
+    }
+
+    #[test]
+    fn workers_report_every_failure_and_finish_all_inputs() {
+        let visited = std::sync::Mutex::new(Vec::new());
+        let items = (0..9).collect::<Vec<_>>();
+        let error = parallel_map_with_limit(&items, 2, |index| -> Result<()> {
+            visited.lock().unwrap().push(*index);
+            anyhow::bail!("broken program {index}")
+        }).unwrap_err();
+        let message = format!("{error:#}");
+        assert_eq!(visited.lock().unwrap().len(), items.len());
+        for index in items { assert!(message.contains(&format!("broken program {index}")), "{message}"); }
     }
 
     #[test]
@@ -1698,19 +1815,23 @@ mod bundled_origin_tests {
         std::fs::create_dir_all(&root)?;
         let store=disk_cache::Store::for_test(root.join("cache"));
         let compiler=Compiler::discover(); let abi=abi(); let origin=root.join("main.slang");
-        let source="import std.vector; struct Inputs {}; float3 display(DisplayContext ctx, Inputs i){return float3(0.25);}";
-        let key=blake3::hash(b"compatibility-warning");
-        for warm in [false, true] {
-            let collector=crate::warnings::Collector::default();
-            let _scope=collector.enter();
-            let _:vork_slang::DisplayProgram=cached_proof(&store,key,&compiler,&abi,source,&origin,|compiler| {
-                assert!(!warm, "second call must use the stored proof");
-                compiler.compile_display(&abi,source,&origin,"compat")
-            })?;
-            let warnings=collector.snapshot();
-            assert_eq!(warnings.len(),1);
-            assert_eq!(warnings[0].code,"compatibility_04");
-            assert_eq!(warnings[0].requested["module"],"std/vector");
+        for (module, deprecated) in [("std/vector", false), ("std/procedurals", false), ("std/particles", true)] {
+            let source=format!("import {}; struct Inputs {{}}; float3 display(DisplayContext ctx, Inputs i){{return float3(0.25);}}",module.replace('/', "."));
+            let key=blake3::hash(module.as_bytes());
+            for warm in [false, true] {
+                let collector=crate::warnings::Collector::default();
+                let _scope=collector.enter();
+                let _:vork_slang::DisplayProgram=cached_proof(&store,key,&compiler,&abi,&source,&origin,|compiler| {
+                    assert!(!warm, "second call must use the stored proof");
+                    compiler.compile_display(&abi,&source,&origin,"compat")
+                })?;
+                let warnings=collector.snapshot();
+                assert_eq!(warnings.len(),usize::from(deprecated),"{module}, warm={warm}");
+                if deprecated {
+                    assert_eq!(warnings[0].code,"compatibility_04");
+                    assert_eq!(warnings[0].requested["module"],module);
+                }
+            }
         }
         std::fs::remove_dir_all(root)?;
         Ok(())

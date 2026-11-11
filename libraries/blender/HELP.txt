@@ -4,6 +4,8 @@ Programs: blender/filmic: render.display program; look, exposure, gamma and dith
 blender/filmic look: none|very_high_contrast|high_contrast|medium_high_contrast|medium_contrast|
   medium_low_contrast|low_contrast|very_low_contrast.
 Filmic reads libraries/blender/filmic.exr beside vork.
+Shared colour, procedural, bump and white-balance maths lives in std.
+Existing blender imports re-export the same functions and types.
 Modules: blender.nodes
 (Diffuse_BSDF, Glass_BSDF, Transparent_BSDF, Fresnel, Layer_Weight_Fresnel, Math, Normal_Map);
 blender.texture_coordinate (Generated, Normal, UV, Object, Camera, Window, Reflection);

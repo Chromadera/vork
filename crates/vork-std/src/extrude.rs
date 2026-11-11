@@ -17,7 +17,10 @@ fn default_name() -> String {
 pub(crate) struct Options {
     #[serde(default = "default_name")]
     name: String,
-    outline: Vec<[f32; 2]>,
+    #[serde(default)]
+    outline: Option<Vec<[f32; 2]>>,
+    #[serde(default)]
+    d: Option<String>,
     #[serde(default)]
     holes: Vec<Vec<[f32; 2]>>,
     #[serde(default = "default_depth")]
@@ -128,7 +131,46 @@ fn geometry(mut o: Options) -> Result<serde_json::Value> {
         (1..=32).contains(&o.bevel_resolution),
         "bevel_resolution must be in 1..32"
     );
-    let mut contours: Vec<Vec<Point>> = std::iter::once(&o.outline)
+    ensure!(
+        o.outline.is_some() != o.d.is_some(),
+        "extrude requires exactly one of outline or d"
+    );
+    if let Some(d) = &o.d {
+        ensure!(
+            o.holes.is_empty(),
+            "holes cannot be combined with d; use SVG subpaths"
+        );
+        let path = vork_path::parse(d)?;
+        // Bound flattening error relative to the authored geometry, in object-space metres.
+        let bounds = path
+            .iter()
+            .flat_map(|e| match e {
+                lyon_path::Event::Begin { at } => vec![at],
+                lyon_path::Event::Line { to, .. } => vec![to],
+                lyon_path::Event::Quadratic { ctrl, to, .. } => vec![ctrl, to],
+                lyon_path::Event::Cubic {
+                    ctrl1, ctrl2, to, ..
+                } => vec![ctrl1, ctrl2, to],
+                _ => vec![],
+            })
+            .fold(
+                (
+                    point(f32::INFINITY, f32::INFINITY),
+                    point(f32::NEG_INFINITY, f32::NEG_INFINITY),
+                ),
+                |(lo, hi), p| (lo.min(p), hi.max(p)),
+            );
+        let extent = (bounds.1 - bounds.0).x.max((bounds.1 - bounds.0).y);
+        ensure!(extent.is_finite() && extent > 0., "d must enclose an area");
+        let mut contours = vork_path::flatten(&path, extent * 0.0001)?;
+        ensure!(!contours.is_empty(), "d must enclose an area");
+        // SVG fill implicitly closes open subpaths. Extrude retains its existing
+        // one-outline-with-holes contract, including intersection validation below.
+        o.outline = Some(contours.remove(0).points);
+        o.holes = contours.into_iter().map(|c| c.points).collect();
+    }
+    let outline = o.outline.as_ref().unwrap();
+    let mut contours: Vec<Vec<Point>> = std::iter::once(outline)
         .chain(&o.holes)
         .map(|c| c.iter().map(|&[x, y]| point(x, y)).collect())
         .collect();
@@ -394,6 +436,37 @@ mod tests {
         serde_json::from_value(g["buffers"][format!("e_{key}")]["data"].clone()).unwrap()
     }
     const SQUARE: [[f32; 2]; 4] = [[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]];
+
+    #[test]
+    fn svg_and_outline_produce_the_same_mesh() {
+        for bevel in [0., 0.03] {
+            let outline = extrude(json!({"name":"e", "outline":SQUARE,
+                "holes":[[[-0.3,-0.3],[-0.3,0.3],[0.3,0.3],[0.3,-0.3]]], "bevel_depth":bevel}))
+            .unwrap();
+            let svg = extrude(
+                json!({"name":"e", "d":"M-1-1h2v2h-2z M -0.3 -0.3 v 0.6 h 0.6 v -0.6 z", "bevel_depth":bevel}),
+            )
+            .unwrap();
+            assert_eq!(svg, outline);
+            watertight(&svg, "e").unwrap();
+        }
+        for options in [
+            json!({}),
+            json!({"outline":SQUARE,"d":"M0 0L1 0L0 1Z"}),
+            json!({"d":"M0 0h1v1z","holes":[SQUARE]}),
+            json!({"d":"M0 0L"}),
+        ] {
+            assert!(extrude(options).is_err());
+        }
+    }
+
+    #[test]
+    fn svg_curves_extrude_watertight() {
+        let mesh =
+            extrude(json!({"name":"e", "d":"M1 0 A1 1 0 0 1 -1 0 A1 1 0 0 1 1 0Z", "depth":0.3}))
+                .unwrap();
+        watertight(&mesh, "e").unwrap();
+    }
 
     #[test]
     fn plate_with_holes_is_closed_outward_and_exact() {

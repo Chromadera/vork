@@ -18,6 +18,18 @@ pub use command::CommandBuffer;
 #[derive(Clone, Debug)]
 pub struct Api;
 pub struct Context;
+#[derive(Debug, Default)]
+pub struct Queue {
+    acceleration_structure_builds: AtomicU64,
+    acceleration_structure_updates: AtomicU64,
+}
+impl Queue {
+    /// Submitted native Build/Update descriptor counts for CPU-only oracles.
+    pub fn acceleration_structure_build_counts(&self) -> (u64, u64) {
+        (self.acceleration_structure_builds.load(Ordering::Relaxed),
+         self.acceleration_structure_updates.load(Ordering::Relaxed))
+    }
+}
 #[derive(Debug)]
 pub struct Encoder;
 #[derive(Debug)]
@@ -38,7 +50,7 @@ impl crate::Api for Api {
     type Adapter = Context;
     type Device = Context;
 
-    type Queue = Context;
+    type Queue = Queue;
     type CommandEncoder = CommandBuffer;
     type CommandBuffer = CommandBuffer;
 
@@ -60,7 +72,7 @@ impl crate::Api for Api {
     type ComputePipeline = Resource;
 }
 
-crate::impl_dyn_resource!(Buffer, CommandBuffer, Context, Fence, Resource);
+crate::impl_dyn_resource!(Buffer, CommandBuffer, Context, Fence, Queue, Resource);
 
 impl crate::DynAccelerationStructure for Resource {}
 impl crate::DynBindGroup for Resource {}
@@ -270,7 +282,7 @@ impl crate::Adapter for Context {
     ) -> DeviceResult<crate::OpenDevice<Api>> {
         Ok(crate::OpenDevice {
             device: Context,
-            queue: Context,
+            queue: Queue::default(),
         })
     }
     unsafe fn texture_format_capabilities(
@@ -301,7 +313,7 @@ impl crate::Adapter for Context {
     }
 }
 
-impl crate::Queue for Context {
+impl crate::Queue for Queue {
     type A = Api;
 
     unsafe fn submit(
@@ -312,6 +324,12 @@ impl crate::Queue for Context {
     ) -> DeviceResult<()> {
         // All commands are executed synchronously.
         for cb in command_buffers {
+            for mode in cb.acceleration_structure_build_modes() {
+                match mode {
+                    crate::AccelerationStructureBuildMode::Build => &self.acceleration_structure_builds,
+                    crate::AccelerationStructureBuildMode::Update => &self.acceleration_structure_updates,
+                }.fetch_add(1, Ordering::Relaxed);
+            }
             // SAFETY: Caller is responsible for ensuring synchronization between commands and
             // other mutations.
             unsafe {
@@ -382,7 +400,7 @@ impl crate::Device for Context {
 
     unsafe fn create_command_encoder(
         &self,
-        desc: &crate::CommandEncoderDescriptor<Context>,
+        desc: &crate::CommandEncoderDescriptor<Queue>,
     ) -> DeviceResult<CommandBuffer> {
         Ok(CommandBuffer::new())
     }
@@ -485,7 +503,13 @@ impl crate::Device for Context {
         &self,
         _desc: &crate::GetAccelerationStructureBuildSizesDescriptor<'a, Buffer>,
     ) -> crate::AccelerationStructureBuildSizes {
-        Default::default()
+        // Nonzero mock sizes let core record native Build/Update descriptors;
+        // a zero scratch size short-circuits the whole tracked build path.
+        crate::AccelerationStructureBuildSizes {
+            acceleration_structure_size: 256,
+            update_scratch_size: 256,
+            build_scratch_size: 256,
+        }
     }
     unsafe fn get_acceleration_structure_device_address(
         &self,

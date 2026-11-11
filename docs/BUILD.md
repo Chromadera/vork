@@ -91,8 +91,9 @@ uses Vulkan. Install FFmpeg/ffprobe for video commands and encoding tests
 (`brew install ffmpeg` on macOS, `sudo apt-get install ffmpeg` on Ubuntu).
 
 The public workspace includes CPU unit tests and small fixtures. The text tests
-use the bundled Liberation Sans font under SIL OFL 1.1; its copyright and licence
-are in `crates/vork-std/tests/fonts/OFL.txt`. Renderer fixtures are synthetic scene,
+use bundled Liberation Sans and Noto Sans Arabic/Devanagari fonts under SIL OFL
+1.1; their licences are in `crates/vork-std/tests/fonts/OFL.txt` and
+`crates/vork-text/tests/fonts/OFL.txt`. Renderer fixtures are synthetic scene,
 shader and glTF inputs shipped with the source. No asset downloads are needed to
 run the default tests. Corpus-dependent tests that require unshipped assets are
 excluded from the public source; they are not part of its test coverage.

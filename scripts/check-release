@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='vork-release-') as tmp:
             p.error(f'installed {name} render produced no PNG')
     if nvidia:
         # A default render on NVIDIA must not silently lose the GPU denoiser.
-        scene_path = package / 'examples/release-check-gpu-denoiser.json'
+        scene_path = package / 'examples/release-check-gpu-denoiser.json' # export-example-generated: written immediately below
         scene_path.write_text(json.dumps(scene))
         run = subprocess.run([str(binary), 'render', str(scene_path), '--profile', 'std/draft', '--at', '0', '--channels', 'color',
                               '--out', str(root / 'gpu-denoiser')], cwd=root, env=env, capture_output=True, text=True)

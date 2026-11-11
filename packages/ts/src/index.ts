@@ -119,6 +119,7 @@ export { box, sphere, grid, cylinder, cone, torus, capsule, revolve, roundedBox 
 export type { GeometryFragment } from './lib/shapes.js';
 export { text, type TextOptions } from './lib/text.js';
 export { extrude, type ExtrudeOptions } from './lib/extrude.js';
+export { sweep, type SweepOptions } from './lib/sweep.js';
 export { render, type RenderOptions, type RenderResult, type RenderWarning, type ExposureSummary } from './lib/render.js';
 export { environmentImage, sky, type EnvironmentImageOptions, type EnvironmentFragment } from './lib/environment.js';
 

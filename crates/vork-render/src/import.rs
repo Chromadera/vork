@@ -11,7 +11,14 @@ pub(crate) fn open(path: &Path) -> Result<gltf::Gltf> {
             "unsupported asset format .{extension}: {}; supported formats are glTF 2.0 (.gltf and .glb)", path.display());
     }
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    crate::failure::contain("the glTF parser", || from_slice(&bytes))
+    let gltf = crate::failure::contain("the glTF parser", || from_slice(&bytes))?;
+    for node in gltf.document.nodes() {
+        if node.extension_value("EXT_mesh_gpu_instancing").is_some() {
+            crate::warnings::dropped("gltf_instancing", serde_json::json!({"file":path,"node":node.index(),"name":node.name(),"extension":"EXT_mesh_gpu_instancing"}),
+                "instance placements are ignored; using the node's mesh once. Export separate mesh nodes instead of EXT_mesh_gpu_instancing.".into());
+        }
+    }
+    Ok(gltf)
 }
 
 /// The document's buffers, read as `gltf::import_buffers` reads them (it checks each
@@ -312,7 +319,7 @@ pub(crate) struct GeometryUpload<'a> {
 fn admit_geometry_streams(limits: &wgpu::Limits, bytes: [u64; 3]) -> Result<u64> {
     let limit = limits.max_buffer_size.min(u64::from(limits.max_storage_buffer_binding_size));
     for (name, demand) in ["geometry vertices", "geometry attributes", "geometry indices"].into_iter().zip(bytes) {
-        crate::gpu_memory::storage_binding(limits, name, demand)?;
+        crate::gpu_memory::storage_binding(limits, name, demand, "reduce the geometry buffer size")?;
     }
     Ok(limit)
 }
@@ -748,6 +755,32 @@ impl GeometryUpload<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_node_instancing_warns_for_each_affected_node() {
+        let collector = crate::warnings::Collector::default();
+        let _scope = collector.enter();
+        let root = std::env::temp_dir().join(format!("vork-optional-instancing-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let data: Vec<u8> = [-1f32,0.,0., 1.,0.,0., 0.,1.,0., -3.,0.,0., -1.,0.,0., 1.,0.,0., 3.,0.,0.]
+            .into_iter().flat_map(f32::to_le_bytes).collect();
+        std::fs::write(root.join("mesh.bin"), data).unwrap();
+        let asset = serde_json::json!({"asset":{"version":"2.0"},"extensionsUsed":["EXT_mesh_gpu_instancing"],
+            "buffers":[{"uri":"mesh.bin","byteLength":84}],
+            "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":48}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[-1,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":4,"type":"VEC3"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+            "nodes":[{"name":"first","mesh":0,"extensions":{"EXT_mesh_gpu_instancing":{"attributes":{"TRANSLATION":1}}}},
+                {"name":"second","mesh":0,"translation":[0,2,0],"scale":[2,1,1],"extensions":{"EXT_mesh_gpu_instancing":{"attributes":{"TRANSLATION":1}}}}],
+            "scenes":[{"nodes":[0,1]}],"scene":0});
+        let path = root.join("scene.gltf");
+        std::fs::write(&path, serde_json::to_vec(&asset).unwrap()).unwrap();
+        super::open(&path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        let warnings = collector.snapshot();
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|warning| warning.code == "gltf_instancing" && warning.dropped.contains("Export separate mesh nodes")));
+    }
     #[test]
     fn cyclic_node_hierarchies_are_errors() {
         for nodes in [

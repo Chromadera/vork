@@ -64,7 +64,7 @@ fn help_routes_concepts_fields_and_diagnostics_without_losing_the_schema() {
     assert!(root.contains("Std builders return {buffers,geometry}"));
     let std_page = help("std");
     let programs_page = help("programs");
-    for builder in ["box", "sphere", "grid", "cylinder", "cone", "torus", "capsule", "revolve"] {
+    for builder in ["box", "sphere", "grid", "cylinder", "cone", "torus", "capsule", "revolve", "sweep"] {
         let signature = format!("{builder}:");
         assert!(!root.contains(&signature), "root includes advanced signature {signature}");
         assert!(std_all.lines().any(|line| line.starts_with(&signature)), "std --all missing {builder}");
@@ -392,5 +392,40 @@ fn quoted_help_arguments_match_separate_arguments() {
     for args in [vec!["nope --all"], vec!["programs extra"], vec!["field node.target extra"], vec!["field node.target", "other"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_vork")).arg("help").args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
+    }
+}
+
+#[test]
+fn deferred_help_contracts_are_explicit_on_public_routes() {
+    for args in [vec!["field", "image.file"], vec!["images", "--all"], vec![]] {
+        let text = help_args(&args);
+        assert!(text.contains("half-float"), "missing image precision: {args:?}");
+        assert!(!text.contains("exact data"));
+    }
+    for field in ["node.size", "node.size_y"] {
+        assert!(help_args(&["field", field]).contains("only rectangle or ellipse"));
+    }
+    let cameras = help("cameras");
+    for contract in ["full width", "full height", "width/height", "Horizontal", "Vertical", "Auto", "scene bounds"] {
+        assert!(cameras.contains(contract), "camera help lost {contract}");
+    }
+    assert!(help("outputs").contains("EXR stills also require %06d"));
+    assert!(help("profiles").contains("unchanged evaluated scene inputs, frame identity, render settings and backend"));
+    assert!(help("sdk").contains("Regenerate SDK-written scenes with the matching SDK after upgrading."));
+}
+
+#[test]
+fn fluid_help_names_geometry_and_buffer_output_namespaces() {
+    for args in [&["fluid"][..], &["fluid", "--all"][..]] {
+        let text = help_args(args);
+        for key in [
+            "geometry[\"water\"]", "buffers[\"surface\"]",
+            "geometry[\"floor_film\"]", "buffers[\"film_surface\"]",
+            "geometry[\"whitewater\"]", "buffers[\"white_draw_position\"]",
+            "buffers[\"white_width\"]", "buffers[\"white_count\"]",
+            "buffers[\"white_draw_id\"]", "whitewater_budget > 0",
+        ] {
+            assert!(text.contains(key), "{args:?} lost output contract {key}");
+        }
     }
 }

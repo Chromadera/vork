@@ -1,0 +1,218 @@
+{
+  "version": 2,
+  "render": {
+    "resolution": [
+      640,
+      360
+    ],
+    "display": {
+      "program": "std/agx"
+    }
+  },
+  "geometry": {
+    "box": {"attributes":{"POSITION":{"type":"vec3","file":"fog-interior.json.geometry.bin","offset":0,"count":24},"NORMAL":{"type":"vec3","file":"fog-interior.json.geometry.bin","offset":288,"count":24},"TEXCOORD_0":{"type":"vec2","file":"fog-interior.json.geometry.bin","offset":576,"count":24}},"indices":{"type":"u32","file":"fog-interior.json.geometry.bin","offset":768,"count":36}}
+  },
+  "programs": {"fog": {"file": "fog-constant.slang"}},
+  "materials": {
+    "mist": {
+      "program": "fog",
+      "inputs": {
+        "scattering": [
+          0.08,
+          0.08,
+          0.08
+        ],
+        "absorption": [
+          0.005,
+          0.005,
+          0.005
+        ],
+        "anisotropy": 0.2
+      }
+    },
+    "stone": {
+      "inputs": {
+        "base_color": [
+          0.24,
+          0.3,
+          0.38
+        ]
+      }
+    }
+  },
+  "nodes": [
+    {
+      "type": "camera",
+      "translation": [
+        0,
+        1.7,
+        5
+      ]
+    },
+    {
+      "type": "light",
+      "shape": "environment",
+      "color": [
+        0.4,
+        0.5,
+        0.7
+      ],
+      "energy": 0.04
+    },
+    {
+      "type": "light",
+      "shape": "spot",
+      "translation": [
+        -2,
+        3.6,
+        1.5
+      ],
+      "rotation": [
+        -0.25268400030018495,
+        -0.20906461293484896,
+        -0.05601869420181802,
+        0.9430295273800398
+      ],
+      "energy": 1800,
+      "spot_size": 0.49,
+      "spot_blend": 0.08,
+      "radius": 0.05
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "mist"
+      ],
+      "scale": [
+        6,
+        4,
+        10
+      ],
+      "translation": [
+        0,
+        2,
+        -1
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "scale": [
+        6,
+        0.15,
+        10
+      ],
+      "translation": [
+        0,
+        -0.075,
+        -1
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "scale": [
+        6,
+        0.15,
+        10
+      ],
+      "translation": [
+        0,
+        4.075,
+        -1
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "scale": [
+        0.15,
+        4,
+        10
+      ],
+      "translation": [
+        -3.075,
+        2,
+        -1
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "scale": [
+        6,
+        4,
+        0.15
+      ],
+      "translation": [
+        0,
+        2,
+        -6.075
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "scale": [
+        0.3,
+        3,
+        0.3
+      ],
+      "translation": [
+        -0.9,
+        1.5,
+        -2
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "scale": [
+        0.3,
+        3,
+        0.3
+      ],
+      "translation": [
+        0.9,
+        1.5,
+        -3
+      ]
+    },
+    {
+      "type": "mesh",
+      "geometry": "box",
+      "materials": [
+        "stone"
+      ],
+      "translation": [
+        3.075,
+        2,
+        -1
+      ],
+      "scale": [
+        0.15,
+        4,
+        10
+      ]
+    }
+  ]
+}

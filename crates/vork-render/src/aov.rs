@@ -58,8 +58,7 @@ pub(crate) fn check_storage(limits: &wgpu::Limits, render: &vork_scene::v2::Rend
         let prefix = if name == "AOV output planes" {u64::from(crate::constants::PACKED_OUTPUT_PLANES)*4} else {0};
         let bytes = count.checked_mul(16).and_then(|n| n.checked_add(prefix)).and_then(|n| n.checked_mul(u64::from(w))).and_then(|n| n.checked_mul(u64::from(h)));
         anyhow::ensure!(bytes.is_some_and(|bytes| bytes <= limits.max_storage_buffer_binding_size && bytes <= limits.max_buffer_size),
-            "render.aovs: {count} declared; {name} at {w}x{h} needs {} bytes; device max_storage_buffer_binding_size is {} bytes and max_buffer_size is {} bytes",
-            bytes.map_or_else(|| "more than u64::MAX".to_owned(), |n| n.to_string()), limits.max_storage_buffer_binding_size, limits.max_buffer_size);
+            "{}", crate::gpu_memory::limit_message(format_args!("render.aovs: {count} declared; {name}"), format_args!("{} bytes at {w}x{h}",bytes.map_or_else(|| "more than u64::MAX".to_owned(), |n| n.to_string())), format_args!("max_storage_buffer_binding_size={} bytes, max_buffer_size is {} bytes",limits.max_storage_buffer_binding_size,limits.max_buffer_size), "reduce resolution or the number of render.aovs"));
     }
     Ok(())
 }

@@ -2,9 +2,9 @@
 import ts from 'typescript';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-const modules = ['validate', 'constants', 'math', 'shapes', 'text', 'extrude'];
+const modules = ['validate', 'constants', 'math', 'shapes', 'text', 'extrude', 'sweep'];
 // Native loaders in crates/vork-std: only their help is generated here.
-const native = ['text', 'extrude'];
+const native = ['text', 'extrude', 'sweep'];
 const paths = modules.map(name => fileURLToPath(new URL(`src/lib/${name}.ts`, import.meta.url)));
 const program = ts.createProgram(paths, {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, strict: true});
 const checker = program.getTypeChecker();
@@ -115,7 +115,7 @@ for (const [index, path] of paths.entries()) {
 }
 output += `const stdFunctions = {${entries.join(',\n')}};\nfunction stdEvaluate(name,args) {\n  if (!Object.hasOwn(stdFunctions,name)) throw new Error('unknown standard-library function '+name+'; see vork help std');\n  const fn=stdFunctions[name];\n  if (fn.keys === null) { if (!Array.isArray(args)) throw new TypeError('argument must be an array'); }\n  else { checkOptions(args,fn.keys); for (const key of fn.required) if (!Object.hasOwn(args,key)) throw new TypeError('missing option: '+key); }\n  return fn.invoke(args);\n}\n`;
 // Builder signatures live in the advanced std reference.
-const shapeLines = help.split('\n').filter(line => /^(box|sphere|grid|cylinder|cone|torus|capsule|revolve|rounded_box|text|extrude):/.test(line));
+const shapeLines = help.split('\n').filter(line => /^(box|sphere|grid|cylinder|cone|torus|capsule|revolve|rounded_box|text|extrude|sweep):/.test(line));
 const sceneGeometryHelp = 'Scene geometry: {std: NAME, ...options}; omit name: the table key or inline position owns identity.';
 const apiShapeLines = [];
 const indexPath = new URL('../../docs/help/index.md', import.meta.url);

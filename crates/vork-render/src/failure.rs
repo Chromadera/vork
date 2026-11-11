@@ -142,7 +142,7 @@ mod tests {
             assert!(suggests_setup(&error), "{error:#}");
         }
         assert!(matches!(device(slang()).downcast_ref::<FailureKind>(), Some(FailureKind::Setup)));
-        let limit = || anyhow::Error::from(vork_encode::DeviceLimit("dimensions exceed device limits")).context("open encoder");
+        let limit = || anyhow::Error::from(vork_encode::DeviceLimit("test device refusal".into())).context("open encoder");
         for error in [limit(), setup(limit())] {
             assert_eq!(exit_code(&error), 4);
             assert!(!suggests_setup(&error), "{error:#}");

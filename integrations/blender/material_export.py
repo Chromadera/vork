@@ -253,40 +253,24 @@ class MaterialWriter:
         engine = bpy.context.scene.render.engine
         target = 'CYCLES' if engine == 'CYCLES' else 'EEVEE'
         output = material.node_tree.get_output_node(target) if material.use_nodes else None
-        if output is not None and not output.inputs['Surface'].is_linked and output.inputs['Volume'].is_linked:
-            volume = output.inputs['Volume'].links[0].from_node
-            if volume.type in ('EMISSION','VOLUME_SCATTER'):
-                compiler = Compiler(material, self.image, engine=engine, best_effort=self.best_effort,
-                                    medium=True, available_attributes=available_attributes)
-                compiler.validate_graph(output)
-                if output.inputs['Displacement'].is_linked:
-                    if not self.best_effort:
-                        raise UnsupportedMaterial(f'{material.name}: medium displacement is not translated')
-                    compiler.report(output, 'Displacement', 'medium displacement is not translated', 'retain exported boundary geometry')
-                get = lambda name,w: compiler.input(volume.inputs[name],w)
-                if volume.mute:
-                    body = 'p.density=0.;p.color=float3(0.);p.absorption_color=float3(1.);p.emission_strength=0.;'
-                elif volume.type == 'EMISSION':
-                    color, strength = get('Color',3), get('Strength',1)
-                    body = f'p.density=0.;p.color=float3(0.);p.absorption_color=float3(1.);p.emission_color={color};p.emission_strength={strength};'
-                else:
-                    if volume.phase != 'HENYEY_GREENSTEIN':
-                        if not self.best_effort:
-                            raise UnsupportedMaterial(f'{material.name}: unsupported Volume Scatter phase {volume.phase}')
-                        compiler.report(volume, 'Phase', f'{volume.phase} phase is not represented', 'Henyey-Greenstein phase approximation')
-                    body = f'p.color={get("Color",3)};p.density={get("Density",1)};p.anisotropy={get("Anisotropy",1)};p.absorption_color=float3(1.);'
-                # Blender's Volume Scatter/Emission sockets convert through blender.volume.
-                source = 'import blender.volume;\n' + compiler.module_source()
-                source += ('\nMediumCoefficients medium(MediumContext medium_ctx,Inputs inputs) {'
-                           'ShadingContext ctx={};ctx.time=medium_ctx.time;float2 off=float2(0.);'
-                           'MediumPoint p={};'+body+'return principled_volume(p);}\n')
-                filename = key + '.slang'
-                (self.directory / filename).write_text(source)
-                self.programs[key] = dict(file=filename)
-                self.materials[key] = dict(program=key,inputs=compiler.inputs)
-                self.reports[key] = dict(material=material.name,status='partial' if compiler.substitutions else 'translated',
-                                         substitutions=compiler.substitutions,bakes=[],medium=volume.type,muted=volume.mute)
-                return key
+        if output is not None and output.inputs['Volume'].is_linked:
+            if output.inputs['Surface'].is_linked or output.inputs['Displacement'].is_linked:
+                raise UnsupportedMaterial(
+                    f'{material.name}: mixed surface/displacement and Volume export not supported; '
+                    'put homogeneous fog on a separate closed mesh with only Volume connected, '
+                    'or disconnect Volume for a surface-only export; see vork help fog')
+            from .volume import homogeneous
+            try:
+                source = homogeneous(output.inputs['Volume'])
+            except ValueError as error:
+                raise UnsupportedMaterial(f'{material.name}: {error}') from error
+            filename = key + '.slang'
+            (self.directory / filename).write_text(source)
+            self.programs[key] = dict(file=filename)
+            self.materials[key] = dict(program=key)
+            self.reports[key] = dict(material=material.name, status='translated',
+                                     substitutions=[], bakes=[], medium=True)
+            return key
         bakes, baked = [], {}
         if (bake_object is None) != (bake_resolution is None):
             raise ValueError('value baking requires both bake_object and bake_resolution')

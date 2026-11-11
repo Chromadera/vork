@@ -1,4 +1,4 @@
-# Exact example source files shared by archives and public source export.
+# Exact example and agent skill source files shared by archives and public source export.
 # Downloaded/generated runtime assets do not belong in this list.
 examples/assets/CC-BY-4.0.txt
 examples/assets/CC0-1.0.txt
@@ -199,3 +199,19 @@ examples/water/prepare_snapshot.py
 examples/water/scene.json
 examples/water/scene.std.bin
 examples/water/table.slang
+skills/vork/SKILL.md
+
+# Public authoring examples and their repository-authored/CC0 companions.
+examples/sweep.json
+examples/product-orbit.json
+examples/programs.json
+examples/compositor-bloom.json
+examples/fog-interior.json
+examples/assets/starter-geometry.bin
+examples/assets/brick.png
+examples/programs/stripes.slang
+examples/fog-interior.json.geometry.bin
+examples/fog-constant.slang
+examples/product-orbit.profile.json
+examples/programs.profile.json
+examples/compositor-bloom.profile.json

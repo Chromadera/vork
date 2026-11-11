@@ -45,7 +45,7 @@ impl Source {
             ensure!(fps.is_none_or(|fps|fps > vork_time::Time::ZERO),"EXR sequence framesPerSecond must be positive");
             return Ok(Self::Sequence {files,fps});
         }
-        Ok(Self::Video(Video::open(path)?))
+        Ok(Self::Video(Video::open(path).with_context(||format!("movie {}; restore a playable movie and install ffmpeg/ffprobe on PATH",path.display()))?))
     }
     pub(crate) fn open_gpu(path:&Path,r:&crate::Renderer)->Result<Self> {
         let mut source=Self::open(path)?;
@@ -92,7 +92,7 @@ impl Source {
             Self::Sequence {files,..} => {
                 let path=&files[index];
                 crate::texture_source::decode(path,&std::fs::read(path)?,max_side)
-                    .with_context(||format!("decode sequence frame {}",path.display()))
+                    .with_context(||format!("decode sequence frame {}; restore a valid frame or re-export the sequence",path.display()))
             }
             Self::Video(video) => video.frame_at(index,max_side),
         }
@@ -173,6 +173,8 @@ impl Video {
         }).saturating_sub(1)
     }
     fn open(path: &Path) -> Result<Self> {
+        crate::warnings::dropped("video_only", serde_json::json!({"file":path}),
+            "movie plates and outputs are video-only; any input audio is discarded. Add the soundtrack to the rendered video in an external editor.".into());
         // ffprobe and ffmpeg both apply container edit lists. Presentation times
         // are relative to the first displayed frame, never packet/decode order.
         let probe = Command::new("ffprobe").args(["-v","error","-select_streams","v:0","-show_frames","-show_streams","-show_entries",
@@ -214,12 +216,12 @@ impl Video {
     }
     #[cfg(test)]
     fn frame(&mut self, time: f64, max_side:u32) -> Result<image::DynamicImage> {
-        ensure!(self.size.iter().all(|&n|n<=max_side), "video {} exceeds GPU texture side {max_side}", self.path.display());
+        ensure!(self.size.iter().all(|&n|n<=max_side), "{}", crate::gpu_memory::limit_message(format_args!("video {}", self.path.display()), format_args!("{}x{}", self.size[0], self.size[1]), format_args!("max_texture_dimension_2d={max_side}"), "resize the source video or use a GPU with larger texture limits"));
         let index = self.frame_index(&Germ::point(vork_time::Clock::from(time).exact()));
         self.frame_at(index,max_side)
     }
     fn frame_at(&mut self,index:usize,max_side:u32)->Result<image::DynamicImage> {
-        ensure!(self.size.iter().all(|&n|n<=max_side), "video {} exceeds GPU texture side {max_side}", self.path.display());
+        ensure!(self.size.iter().all(|&n|n<=max_side), "{}", crate::gpu_memory::limit_message(format_args!("video {}", self.path.display()), format_args!("{}x{}", self.size[0], self.size[1]), format_args!("max_texture_dimension_2d={max_side}"), "resize the source video or use a GPU with larger texture limits"));
         let previous=self.last_request.replace(index);
         if let Some((_,frame)) = self.frames.iter().find(|(cached,_)|*cached==index) {return Ok(frame.clone());}
         // For a reverse walk retain the next predicted request too. The existing
@@ -256,7 +258,7 @@ impl Video {
         let mut bytes = vec![0; self.size[0] as usize * self.size[1] as usize * 8];
         let mut result=None;
         while session.next<=index {
-            session.stdout.read_exact(&mut bytes).with_context(||format!("decode video {} frame {}",self.path.display(),session.next))?;
+            session.stdout.read_exact(&mut bytes).with_context(||format!("decode video {} frame {}; restore or re-encode the movie",self.path.display(),session.next))?;
             #[cfg(test)] {self.decoded+=1;}
             if session.next==index || preceding==Some(session.next) {
                 let pixels=bytes.chunks_exact(2).map(|b|u16::from_le_bytes([b[0],b[1]])).collect();
@@ -274,8 +276,44 @@ impl Video {
 }
 
 #[cfg(test)]
+#[test]
+fn movie_inputs_warn_that_audio_is_discarded() -> Result<()> {
+    let path = std::env::temp_dir().join(format!("vork-audio-notice-{}.mp4", std::process::id()));
+    let status = Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=16x16:d=0.1",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1", "-shortest", "-c:v", "libx264", "-c:a", "aac"])
+        .arg(&path).status()?;
+    ensure!(status.success(), "make a movie with audio");
+    let collector = crate::warnings::Collector::default();
+    let _scope = collector.enter();
+    Source::open(&path)?;
+    let warnings = collector.snapshot();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code, "video_only");
+    assert!(warnings[0].dropped.contains("external editor"));
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_video_reports_dimensions_limit_and_remedy_before_decode() {
+        let mut video = Video {
+            path: "source.mp4".into(), times: vec![0.], keyframes: vec![], pts: vec![0],
+            timebase: Rational::from_integer(1.into()), last_request: None, decoded: 0,
+            size: [32, 16], session: None, hardware: false, frames: Default::default(),
+        };
+        for error in [video.frame(0., 8).unwrap_err(), video.frame_at(0, 8).unwrap_err()] {
+            let message = error.to_string();
+            for expected in ["source.mp4", "32x16", "max_texture_dimension_2d=8", "resize the source video", "vork help limits"] {
+                assert!(message.contains(expected), "{message}");
+            }
+        }
+        assert!(video.session.is_none());
+        assert!(video.last_request.is_none());
+    }
+
     #[test]
     fn exact_nominal_playback_and_timeline_share_boundaries()->Result<()> {
         for rate in ["24", "30000/1001", "60000/1001"] {
@@ -671,7 +709,7 @@ impl Installed {
     }
     pub(crate) fn encode(&self,r:&crate::Renderer,encoder:&mut wgpu::CommandEncoder,time:&Germ,fps:vork_time::Time)->Result<()> {
         let frame=self.source.lock().unwrap().frame_exact(time,fps,r.device.limits().max_texture_dimension_2d)?;
-        ensure!(frame.width()==self.texture.width() && frame.height()==self.texture.height(),"image {}: media frame dimensions changed",self.name);
+        ensure!(frame.width()==self.texture.width() && frame.height()==self.texture.height(),"image {}: media frame dimensions changed; re-export every frame at the same resolution",self.name);
         let rgba=frame.into_rgba32f();
         let pitch=(self.texture.width()*8).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)*wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let mut data=vec![0u8;pitch as usize*self.texture.height() as usize];

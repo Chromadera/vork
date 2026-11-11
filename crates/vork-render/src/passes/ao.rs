@@ -17,11 +17,11 @@ thread_local! {
 // Retain complete rows, reusing their records only after every ray batch finishes.
 fn accumulation_band(limits: &wgpu::Limits, width: u32, height: u32, budget: u32) -> Result<(u32, u64)> {
     let row = u64::from(width) * constants::GI_QUERY_BYTES;
-    gpu_memory::storage_binding(limits, "GI prepared queries: one row", row)?;
+    gpu_memory::storage_binding(limits, "GI prepared queries: one row", row, "reduce resolution or choose --profile std/draft for a lower sample budget")?;
     let rows = (limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / row)
         .min(u64::from(height)).min(u64::from((budget / width).max(1))) as u32;
     let bytes = row * u64::from(rows);
-    gpu_memory::storage_binding(limits, "GI prepared queries and accumulation", bytes)?;
+    gpu_memory::storage_binding(limits, "GI prepared queries and accumulation", bytes, "reduce resolution or choose --profile std/draft for a lower sample budget")?;
     Ok((rows, bytes))
 }
 
@@ -167,7 +167,7 @@ impl Resources {
             let (band_rows, accumulation_bytes) = accumulation_band(&limits, aw, ah, budget)?;
             let bands = ah.div_ceil(band_rows);
             let guide_bytes=u64::from(aw)*u64::from(ah)*32;
-            gpu_memory::storage_binding(&d.limits(),"GI independent pilot guide",guide_bytes)?;
+            gpu_memory::storage_binding(&d.limits(),"GI independent pilot guide",guide_bytes, "reduce resolution or choose --profile std/draft for a lower sample budget")?;
             let guide=s.transients.buffer(d,"GI independent pilot guide",guide_bytes,wgpu::BufferUsages::STORAGE);
             let hits={
                 let accumulation=s.transients.buffer(d,"GI prepared queries and accumulation",accumulation_bytes,wgpu::BufferUsages::STORAGE);
@@ -181,7 +181,7 @@ impl Resources {
             };
             let source_records=u64::from(bands)*(u64::from(batches)+1);
             anyhow::ensure!(source_records<=d.limits().max_buffer_size/256,
-                "GI dispatch uniforms need {} bytes; device max_buffer_size={} bytes",source_records*256,d.limits().max_buffer_size);
+                "{}", crate::gpu_memory::limit_message("GI dispatch uniforms", format_args!("{} bytes",source_records*256), format_args!("max_buffer_size={} bytes",d.limits().max_buffer_size), "reduce resolution or samples with --set samples=N"));
             let mut source_words=vec![0u32;source_records as usize*64];
             let topology=s.rays.as_ref().unwrap();
             for band in 0..bands {

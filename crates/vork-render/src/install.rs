@@ -43,17 +43,30 @@ pub(crate) fn admit_delivery_effects(r:&Renderer,scene:&Scene,base:&Path,allow_m
     let mut abi=programs::abi();abi.aov_count=scene.render.aovs.len();
     let compiler=vork_slang::Compiler::discover();
     let animated=materials::animated_inputs(scene)?;
+    // Compile every authored surface program once, in parallel, before the
+    // serial admission loop below consumes the results. Retain them directly:
+    // cache persistence can be disabled or refused, so prewarming alone would
+    // compile twice in that case.
+    let mut sources=std::collections::BTreeMap::new();
     for (name,stage) in &stages {
         let material=&scene.materials[name];
         if !stage.surface || material.program=="std/openpbr" {continue;}
-        let (source,origin)=programs::material_source(scene,base,&material.program)?;
-        let program=programs::compile(r,&compiler,&abi,&source,&origin)?;
+        if !sources.contains_key(&material.program) {sources.insert(material.program.clone(),programs::material_source(scene,base,&material.program)?);}
+    }
+    let unique:Vec<_>=sources.values().collect();
+    let compiled=programs::parallel_map(&unique,|(source,origin)| programs::compile(r,&compiler,&abi,source,origin))?;
+    let compiled:std::collections::BTreeMap<_,_>=sources.keys().zip(compiled).collect();
+    for (name,stage) in &stages {
+        let material=&scene.materials[name];
+        if !stage.surface || material.program=="std/openpbr" {continue;}
+        let program=&compiled[&material.program];
         if !program.capabilities.hair {continue;}
         let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?)))
             .collect::<Result<std::collections::BTreeMap<_,_>>>()?;
         let dynamic=animated.get(name).cloned().unwrap_or_default();
         let words=program.inputs.effect_words(&values,&dynamic)?;
-        if program.effect_probe()?.capabilities(&words).hair {hair_materials.insert(name.clone());}
+        // Hair is a closure type; only its bound scattering effect needs a path owner.
+        if program.effect_probe()?.capabilities(&words).physical_hair {hair_materials.insert(name.clone());}
     }
     let mut refused=std::collections::BTreeSet::new();
     let mut environments=Vec::new();
@@ -528,6 +541,7 @@ impl InstalledScene {
         // Captures retain their own scene producers. File images need no scene passes.
         output_dependencies.images &= scene.images.values().any(|i|i.render.is_some());
         let (allocation_dependencies, planned_image_order)=compositor::image_plan(&scene,&compositor,output_dependencies)?;
+        crate::render_images::require_supported_roots(&scene, &planned_image_order)?;
         effects.outputs = Some(allocation_dependencies);
         effects.denoise &= allocation_dependencies.beauty;
         if !allocation_dependencies.beauty && !allocation_dependencies.catcher {
@@ -669,12 +683,12 @@ impl InstalledScene {
         let required_locations=vork_slang::registry::VISIBILITY_LENS_LOCATION+1+attributes.saturating_sub(8);
         let limits=r.device.limits();
         ensure!(required_locations <= limits.max_vertex_attributes,
-            "material attribute vertex layout needs {required_locations} locations ({attributes} named attributes); device max_vertex_attributes={}", limits.max_vertex_attributes);
+            "{}", crate::gpu_memory::limit_message("material attribute vertex layout", format_args!("{required_locations} locations ({attributes} named attributes)"), format_args!("max_vertex_attributes={}",limits.max_vertex_attributes), "reduce named material attributes"));
 
         if attributes>8 {
             let varying_locations=14+attributes;
             ensure!(varying_locations<=limits.max_inter_stage_shader_variables,
-                "material attribute pipeline needs {varying_locations} inter-stage locations; device max_inter_stage_shader_variables={}",limits.max_inter_stage_shader_variables);
+                "{}", crate::gpu_memory::limit_message("material attribute pipeline", format_args!("{varying_locations} inter-stage locations"), format_args!("max_inter_stage_shader_variables={}",limits.max_inter_stage_shader_variables), "reduce named material attributes"));
         }
         let programs = programs::install(r, input, native_program_materials.iter().map(|(name, p)| (*name, p)), base)?;
         let mut physical_hair_materials = std::collections::HashSet::new();
@@ -685,6 +699,8 @@ impl InstalledScene {
                 }
             }
         }
+        let computed_attribute_sources: std::collections::HashSet<_> = input.programs.values()
+            .filter(|program| program.is_compute()).flat_map(|program| program.bindings.values()).collect();
         let animated_inputs = materials::animated_inputs(input)?;
         // One installed capability summary drives both graph reservation and
         // material validity. Program outputs need no sentinel input names.
@@ -817,9 +833,11 @@ impl InstalledScene {
             || nodes.iter().any(|node|matches!(node.node.kind,NodeKind::Asset{..})));
         let mut ray_refraction = crate::rt::ray_refraction(&scene);
         let mut ray_shadows = light_shadow_rays || ray_refraction || effects.probes || promoted_transport || program_trace || compute_trace;
+        let field_controls = !effects.path && input.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit));
         let mut slang = crate::slang_forward::SlangScene {
                 program_trace,
                 bounded_secondary_compilation: render.settings.bounded_secondary_compilation,
+                approximate_field_boundaries: render.settings.approximate_field_boundaries && field_controls,
                 propagation: propagation.clone(),
                 camera: camera_native,
                 environment: environment.primary.clone(),
@@ -833,7 +851,7 @@ impl InstalledScene {
                 probes: effects.probes,
                 fibre: effects.fibre,
                 denoise: effects.denoise,
-                field_controls: !effects.path && input.geometry.values().any(|g|matches!(g.topology,vork_scene::v2::Topology::Implicit)),
+                field_controls,
                 medium: medium.as_ref().map(|m|std::sync::Arc::new(m.native.clone())),
             };
         // Program input words follow the material records in one buffer.
@@ -1127,6 +1145,9 @@ impl InstalledScene {
                         let (id, words) = programs.pack(program, &image_words, input, base)
                             .with_context(|| format!("materials.{name}.inputs: program {}", program.name))?;
                         let authored = &input.materials[name];
+                        // Equal initial cells do not make distinct mutable grids aliases.
+                        let unique_inputs=animated_inputs.contains_key(name) || authored.inputs.values().any(|value|
+                            matches!(value,vork_scene::v2::Input::Grid(binding) if computed_attribute_sources.contains(&binding.grid)));
                         let mut material = materials::PendingMaterial::program(
                             id,
                             authored.double_sided,
@@ -1146,7 +1167,7 @@ impl InstalledScene {
                         material.lobes = capabilities.lobes;
                         material.lit = capabilities.lit;
                         material.source_emission = capabilities.emission;
-                        material.record.tag[3] = if animated_inputs.contains_key(name) {
+                        material.record.tag[3] = if unique_inputs {
                             let offset = material_words.len() as u32;
                             material_words.extend_from_slice(&words);
                             offset
@@ -1160,7 +1181,7 @@ impl InstalledScene {
                         if animated_inputs.contains_key(name) {
                             program_word_lengths.insert(material.record.tag[3], words.len());
                         }
-                        retain(material, !animated_inputs.contains_key(name) && !stages[name].medium)
+                        retain(material, !unique_inputs && !stages[name].medium)
                     } else {
                         let animated = animated_inputs.get(name);
                         let material = materials::install_openpbr(
@@ -1748,9 +1769,9 @@ impl InstalledScene {
             +u64::from(crate::passes::decoupled::evaluation_pages(&limits,slang.aov_count))
             +u64::from(constants::VISIBILITY_REFLECTION_WORDS)+u64::from(constants::RAY_HIT_BUFFERS)+crate::camera_native::TABLES.iter().map(|t|t.resources.len() as u64).sum::<u64>();
         ensure!(slang.samplers <= limits.max_binding_array_sampler_elements_per_shader_stage,
-            "scene needs {} material samplers; device max_binding_array_sampler_elements_per_shader_stage={}",slang.samplers,limits.max_binding_array_sampler_elements_per_shader_stage);
+            "{}", crate::gpu_memory::limit_message("scene material samplers", format_args!("{} samplers",slang.samplers), format_args!("max_binding_array_sampler_elements_per_shader_stage={}",limits.max_binding_array_sampler_elements_per_shader_stage), "reuse material image samplers or reduce material image inputs"));
         ensure!(descriptor_elements <= u64::from(limits.max_binding_array_elements_per_shader_stage),
-            "scene material/ray tables need {descriptor_elements} descriptors; device max_binding_array_elements_per_shader_stage={}", limits.max_binding_array_elements_per_shader_stage);
+            "{}", crate::gpu_memory::limit_message("scene material/ray tables", format_args!("{descriptor_elements} descriptors"), format_args!("max_binding_array_elements_per_shader_stage={}",limits.max_binding_array_elements_per_shader_stage), "reduce material image inputs or geometry buffer pool sizes"));
         // The shared builtin registry is point-capable. Preserve the no-point
         // proof by using the scene-keyed registry for its lean hit variants.
         let builtin=!slang.no_points && propagation.is_none() && !spectral && camera_programs.is_empty() && slang.environment.is_none() && programs.is_none() && medium.is_none()
@@ -1862,8 +1883,6 @@ impl InstalledScene {
         let mut generated_offsets = std::collections::HashMap::new();
         let mut instance_attribute_rows = std::collections::HashMap::new();
         let mut material_attribute_sources = Vec::new();
-        let computed_attribute_sources: std::collections::HashSet<_> = input.programs.values()
-            .filter(|program| program.is_compute()).flat_map(|program| program.bindings.values()).collect();
         for (draw_index, draw) in draws.iter().enumerate() {
             let (minimum, maximum) = draw.generated_bounds;
             let extent = maximum - minimum;
@@ -2282,7 +2301,28 @@ impl InstalledScene {
                 draw.displacement_leader = Some(*evaluations.entry(key).or_insert(index));
             }
         }
-        let (dense_destinations,dense_certificates)=medium.as_ref().map(|m|m.dense_bindings(input,medium_base,&draws,&native_ids)).transpose()?.unwrap_or_default();
+        let (mut dense_destinations,dense_certificates)=medium.as_ref().map(|m|m.dense_bindings(input,medium_base,&draws,&native_ids)).transpose()?.unwrap_or_default();
+        // Surface snapshots (including phased copies) have their own packed
+        // descriptors. Publish both cells and range into every retained copy.
+        if let Some(programs)=&programs {
+            for (name,&slot) in &native_ids {
+                for copy in std::iter::once(slot).chain(phased.iter().filter(|((s,_),_)|*s==slot).map(|(_, &copy)|copy)) {
+                    let record=records[copy];
+                    if record.tag[0]==0 {continue;}
+                    let layout=programs.input_layout(record.tag[0]);
+                    let base=record.tag[3] as usize;
+                    for field in &layout.fields {
+                        if !matches!(field.ty,vork_slang::Type::FloatGrid|vork_slang::Type::VectorGrid) {continue;}
+                        let Some(vork_scene::v2::Input::Grid(binding))=input.materials[name].inputs.get(&field.name) else {continue;};
+                        if input.buffers[&binding.grid].dims.is_none() || !computed_attribute_sources.contains(&binding.grid) {continue;}
+                        let descriptor=material_words[base-record_words as usize+field.offset];
+                        dense_destinations.push((binding.grid.clone(),record.tag[3]+descriptor+4));
+                    }
+                }
+            }
+        }
+        dense_destinations.sort();
+        dense_destinations.dedup();
         let dense=if scene_inputs {crate::dense::Dense::install(r,input,program_buffers.as_ref(),dense_destinations,dense_certificates)?} else {None};
         ensure!(!draws.iter().any(|d|d.computed) || render.settings.integrator.probe_volume().is_none(),
             "computed geometry cannot use CPU-planned probe support; automatic lighting selects complete path transport");
@@ -2630,11 +2670,7 @@ impl InstalledScene {
         let object_limit = limits.max_buffer_size.min(limits.max_storage_buffer_binding_size);
         ensure!(
             object_bytes <= object_limit,
-            "object storage exceeds device storage binding/allocation limit ({object_limit} bytes); \
-             required {object_bytes} bytes; backend {:?}; adapter {:?}; driver {:?}",
-            r.adapter_info.backend,
-            r.adapter_info.name,
-            r.adapter_info.driver
+            "{}", crate::gpu_memory::limit_message(format_args!("object storage (backend {:?}, adapter {:?}, driver {:?})",r.adapter_info.backend,r.adapter_info.name,r.adapter_info.driver), format_args!("{object_bytes} bytes"), format_args!("{object_limit} bytes"), "reduce geometry instance count")
         );
         let geometry_vertex_bytes = draws
             .iter()

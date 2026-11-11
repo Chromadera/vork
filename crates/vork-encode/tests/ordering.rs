@@ -138,6 +138,18 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
                 full.release(i as u64 - 3, surface).unwrap();
             }
             let source = texture();
+            // Distinct frames expose stale or prematurely reused pipe payloads
+            // when the three-entry staging ring wraps.
+            queue.write_texture(
+                source.as_image_copy(),
+                &[40u8, 40, 200 - i as u8 * 4, 128].repeat(64 * 32),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: None,
+                },
+                source.size(),
+            );
             let submission = copy(surface, &source);
             full.push(i as u64, source, surface, &submission).unwrap();
         }
@@ -195,7 +207,7 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
             .arg(root.join(format!("full.{extension}")))
             .args([
                 "-frames:v",
-                "1",
+                "33",
                 "-vf",
                 "scale=in_color_matrix=bt709:in_range=tv:out_range=pc",
                 "-f",
@@ -207,11 +219,14 @@ fn rejects_bad_sequences_and_finalizes_ordered_ring_entries() {
             .output()
             .unwrap();
         assert!(pixels.status.success());
-        for (actual, expected) in pixels.stdout[..3].iter().zip([200i16, 40, 40]) {
-            assert!(
-                (*actual as i16 - expected).abs() < 6,
-                "BGRA channel conversion"
-            );
+        assert_eq!(pixels.stdout.len(), 33 * 64 * 32 * 4);
+        for (i, frame) in pixels.stdout.chunks_exact(64 * 32 * 4).enumerate() {
+            for (actual, expected) in frame[..3].iter().zip([200i16 - i as i16 * 4, 40, 40]) {
+                assert!(
+                    (*actual as i16 - expected).abs() < 6,
+                    "frame {i}: ordered BGRA channel conversion"
+                );
+            }
         }
         if extension == "mov" {
             assert!(

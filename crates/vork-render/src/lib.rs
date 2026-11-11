@@ -416,6 +416,31 @@ fn gpu_order(adapters: &[wgpu::AdapterInfo]) -> Vec<usize> {
     order
 }
 
+// Adapter limits can exceed wgpu-core's fixed-capacity descriptor storage (the
+// no-op adapter intentionally advertises allocation-sized limits).
+fn bounded_device_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
+    limits.max_bind_groups = limits.max_bind_groups.min(wgpu::hal::MAX_BIND_GROUPS as u32);
+    limits.max_vertex_buffers = limits.max_vertex_buffers.min(wgpu::hal::MAX_VERTEX_BUFFERS as u32);
+    limits.max_color_attachments = limits.max_color_attachments.min(wgpu::hal::MAX_COLOR_ATTACHMENTS as u32);
+    limits
+}
+
+#[test]
+fn adapter_limits_respect_fixed_descriptor_capacities() {
+    let limits = bounded_device_limits(wgpu::Limits {
+        max_bind_groups: u32::MAX,
+        max_vertex_buffers: u32::MAX,
+        max_color_attachments: u32::MAX,
+        ..Default::default()
+    });
+    // max_bind_groups also bounds bind groups in each pipeline layout.
+    assert_eq!(limits.max_bind_groups, wgpu::hal::MAX_BIND_GROUPS as u32);
+    assert_eq!(limits.max_vertex_buffers, wgpu::hal::MAX_VERTEX_BUFFERS as u32);
+    assert_eq!(limits.max_color_attachments, wgpu::hal::MAX_COLOR_ATTACHMENTS as u32);
+    let defaults = wgpu::Limits::default();
+    assert_eq!(bounded_device_limits(defaults.clone()), defaults);
+}
+
 #[test]
 fn gpu_selection_follows_pci_bus_order_and_skips_software_adapters() {
     let card = |bus: &str, device_type| wgpu::AdapterInfo {
@@ -789,7 +814,7 @@ impl Renderer {
             material_table - features,
             info.name
         );
-        let mut limits = adapter.limits();
+        let mut limits = bounded_device_limits(adapter.limits());
         if prepare_release {
             // The no-op adapter checks shaders, not hardware admission. Keep a
             // finite ceiling, but admit production geometry (water needs 296 MiB
@@ -1935,3 +1960,6 @@ mod test_geometry;
 
 #[cfg(test)]
 mod metal_generated_tests;
+#[cfg(all(test, vork_private_tests))]
+#[path = "scene_code_budget_private.rs"]
+mod scene_code_budget;

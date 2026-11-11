@@ -31,15 +31,24 @@ TARGETS = {
 }
 
 
-def wheel(output, name, version, tag, files, requires=(), entry=None):
+def update_advice(policy):
+    advice = policy.get('vorkUpdate', {})
+    if (not isinstance(advice, dict) or set(advice) - {'reason', 'regression'}
+            or not isinstance(advice.get('reason', ''), str)
+            or len(advice.get('reason', '')) > 240
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in advice.get('reason', ''))
+            or not isinstance(advice.get('regression', False), bool)):
+        raise ValueError('vorkUpdate requires a single-line reason (at most 240 characters) and boolean regression')
+    return advice
+
+
+def wheel(output, name, version, tag, files):
     normalized = name.replace('-', '_')
     info = f'{normalized}-{version}.dist-info'
     files = dict(files)
-    files[f'{info}/METADATA'] = (f'Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nRequires-Python: >=3.11\nLicense-Expression: LicenseRef-vork-Preview\nLicense-File: LICENSE\nDescription-Content-Type: text/plain\n' + ''.join(f'Requires-Dist: {r}\n' for r in requires) + '\nNative vork engine and SDK distribution. See https://github.com/voyager-so/vork for usage and licence terms.\n').encode()
+    files[f'{info}/METADATA'] = (f'Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nRequires-Python: >=3.11\nLicense-Expression: LicenseRef-vork-Preview\nLicense-File: LICENSE\nDescription-Content-Type: text/markdown\n' + '\n' + ((ROOT / 'packages/python/README.md').read_text() if name == 'vork' else 'Native vork engine for internal qualification.\n')).encode()
     files[f'{info}/licenses/LICENSE'] = (ROOT / 'LICENSE').read_bytes()
     files[f'{info}/WHEEL'] = f'Wheel-Version: 1.0\nGenerator: vork\nRoot-Is-Purelib: {str(tag == "any").lower()}\nTag: py3-none-{tag}\n'.encode()
-    if entry:
-        files[f'{info}/entry_points.txt'] = b'[console_scripts]\nvork = vork._engine:main\n'
     records = []
     path = output / f'{normalized}-{version}-py3-none-{tag}.whl'
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
@@ -107,7 +116,7 @@ def main():
     runtime = {}
     for f in sorted(tree.rglob('*')):
         rel = f.relative_to(tree)
-        if rel.parts[0] in ('sdk', 'python', 'examples', 'README.md'):
+        if rel.parts[0] in ('sdk', 'python', 'examples', 'skills', 'README.md'):
             continue
         if rel.parts[0] not in (binary, companion, 'slang', 'oidn', 'shaders', 'LICENSE', 'NOTICE', 'licenses', 'libraries'):
             p.error(f'unexpected release content: {rel}')
@@ -147,6 +156,7 @@ def main():
             meta.pop(key, None)
         (main / 'README.md').write_text('# vork\n\nNative renderer and TypeScript SDK. Install with `npm install @voyager-so/vork`, then run `npx vork init my-shot`. Follow init\'s printed next steps in my-shot. The default `std/final` first render is warmed by setup; use `--profile std/draft` for quicker previews. Run `npx vork setup` explicitly after upgrades or driver changes; setup can take minutes and prints progress. Import the SDK from `@voyager-so/vork`. Keep optional dependencies enabled; reinstall dependencies on each machine. Requires Node 22.18+ (older Node emits EBADENGINE warnings; upgrade, or run TypeScript source with node --experimental-strip-types scene.ts where supported), a supported GPU and its drivers; Linux/Windows video also needs ffmpeg. See https://github.com/voyager-so/vork for platform requirements and examples.\n')
         meta.update(description='Native vork renderer, TypeScript SDK and scene schema', version=version, bin={'vork': 'cli.cjs'}, files=['dist', 'cli.cjs', 'LICENSE', 'README.md', 'scene.schema.json'], optionalDependencies={f'@voyager-so/vork-{t}': version for t in TARGETS}, repository=REPOSITORY)
+        meta['vorkUpdate'] = update_advice(json.loads((ROOT / 'dist/release.json').read_text()))
         meta['exports']['./package.json'] = './package.json'
         (main / 'package.json').write_text(json.dumps(meta, indent=2) + '\n')
         subprocess.run([shutil.which('npm'), 'pack', '--ignore-scripts', '--pack-destination', str(a.output.resolve())], cwd=main, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -161,8 +171,7 @@ def main():
     wheel(a.output, 'vork-native-' + a.platform, version, tag,
           {f'{module}/__init__.py': b''} | {f'{module}/runtime/{n}': f for n, f in runtime.items()})
     python = {f'vork/{f.relative_to(ROOT / "packages/python/vork").as_posix()}': f for f in (ROOT / 'packages/python/vork').rglob('*') if f.is_file() and '__pycache__' not in f.parts}
-    requires = [f'vork-native-{t}=={version}; {data[3]}' for t, data in TARGETS.items()]
-    wheel(a.output, 'vork', version, 'any', python, requires, entry=True)
+    wheel(a.output, 'vork', version, 'any', python)
 
 
 if __name__ == '__main__':

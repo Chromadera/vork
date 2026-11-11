@@ -2,6 +2,7 @@
 use anyhow::{Context, Result};
 use std::{
     fs,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
 };
 
@@ -44,13 +45,14 @@ fn png_suffix(value: &str) -> bool {
         })
 }
 
-fn owns(path: &Path, name: &std::ffi::OsStr) -> bool {
+fn owns(path: &Path, name: &std::ffi::OsStr, frames: Option<&RangeInclusive<u32>>) -> bool {
     if super::shot::directory_marked(path) || path.extension().is_none() {
         let Some(name) = name.to_str() else {
             return false;
         };
         let i = name.find('.').unwrap_or(name.len());
         numbered(&name[..i]) && png_suffix(&name[i..])
+            && frames.is_none_or(|frames| name[..i].parse::<u32>().is_ok_and(|n| frames.contains(&n)))
     } else if path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("exr"))
@@ -69,7 +71,8 @@ fn owns(path: &Path, name: &std::ffi::OsStr) -> bool {
             return false;
         };
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        (6..=digits).any(|n| stem.replace("%06d", &rest[..n]) == name)
+        (6..=digits).any(|n| stem.replace("%06d", &rest[..n]) == name
+            && frames.is_none_or(|frames| rest[..n].parse::<u32>().is_ok_and(|n| frames.contains(&n))))
     } else if path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("png"))
@@ -181,7 +184,9 @@ pub(crate) struct OutputRun {
 impl OutputRun {
     /// Called before any encoder attaches or frame writer opens a final path.
     /// Invalidation is eager, so process termination needs no destructor/handler.
-    pub(crate) fn begin(paths: &[PathBuf]) -> Result<Self> {
+    /// `frames` limits numbered PNG/EXR cleanup; None replaces the whole clip.
+    /// Completion, camera and timing sidecars always belong to this run alone.
+    pub(crate) fn begin(paths: &[PathBuf], frames: Option<RangeInclusive<u32>>) -> Result<Self> {
         let directories: Vec<_> = paths.iter().map(|path|fs::canonicalize(directory(path)))
             .collect::<std::io::Result<_>>()?;
         let namespaces: Vec<_> = paths.iter().map(|path|namespace(path)).collect();
@@ -220,7 +225,7 @@ impl OutputRun {
             };
             for entry in fs::read_dir(directory)? {
                 let entry = entry?;
-                if owns(path, &entry.file_name()) {
+                if owns(path, &entry.file_name(), frames.as_ref()) {
                     remove(&entry.path())?;
                 }
             }
@@ -264,6 +269,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selected_frames_preserve_other_invocations_even_on_failure() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("vork-output-range-{}", std::process::id()));
+        for destination in ["frames", "frames.v2/", "clip-%06d.exr", "repeat-%06d2-%06d.exr"] {
+            let path = root.join(destination);
+            let dir = directory(&path);
+            fs::create_dir_all(dir)?;
+            let names = |frame: u32| -> Vec<String> {
+                if destination.ends_with(".exr") {
+                    vec![destination.replace("%06d", &format!("{frame:06}"))]
+                } else {
+                    [".png", ".depth.png", ".aov.old.png"].iter()
+                        .map(|suffix| format!("{frame:06}{suffix}")).collect()
+                }
+            };
+            // First invocation saves frame 216 and publishes completion metadata.
+            let run = OutputRun::begin(std::slice::from_ref(&path), Some(216..=216))?;
+            for name in names(216) { fs::write(dir.join(name), "first success")?; }
+            run.complete(&[(sidecar(&path, "meta.json"), b"first metadata".to_vec())])?;
+            drop(run);
+            for frame in [217, 218, 219, 1_000_000] {
+                for name in names(frame) { fs::write(dir.join(name), "old")?; }
+            }
+            fs::write(dir.join("notes.png"), "unrelated")?;
+            for suffix in ["camera.json", "timings.json", "meta.json.pending"] {
+                fs::write(sidecar(&path, suffix), "old")?;
+            }
+            // A second invocation fails before saving anything. Only its inclusive
+            // interval and per-run sidecars may have been invalidated.
+            let run = OutputRun::begin(std::slice::from_ref(&path), Some(217..=218))?;
+            drop(run);
+            for frame in [217, 218] {
+                for name in names(frame) { assert!(!dir.join(name).exists()); }
+            }
+            for frame in [216, 219, 1_000_000] {
+                for name in names(frame) { assert!(dir.join(name).exists(), "preserve {frame}"); }
+            }
+            assert_eq!(fs::read(dir.join(&names(216)[0]))?, b"first success");
+            assert!(dir.join("notes.png").exists());
+            for suffix in ["meta.json", "camera.json", "timings.json", "meta.json.pending"] {
+                assert!(!sidecar(&path, suffix).exists());
+            }
+            // Retrying can complete, and publishes only this invocation's record.
+            let run = OutputRun::begin(std::slice::from_ref(&path), Some(217..=218))?;
+            for frame in [217, 218] {
+                for name in names(frame) { fs::write(dir.join(name), "retry success")?; }
+            }
+            run.complete(&[(sidecar(&path, "meta.json"), b"second metadata".to_vec())])?;
+            drop(run);
+            assert_eq!(fs::read(sidecar(&path, "meta.json"))?, b"second metadata");
+            for name in names(216) { assert_eq!(fs::read(dir.join(name))?, b"first success"); }
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn overwrite_cleans_only_owned_outputs_and_locks_until_finished() -> Result<()> {
         let root = std::env::temp_dir().join(format!("vork-output-run-{}", std::process::id()));
         fs::create_dir_all(&root)?;
@@ -303,8 +364,8 @@ mod tests {
             for suffix in ["meta.json", "camera.json", "timings.json"] {
                 fs::write(sidecar(&path, suffix), "old")?;
             }
-            let run = OutputRun::begin(std::slice::from_ref(&path))?;
-            let conflict = OutputRun::begin(std::slice::from_ref(&path))
+            let run = OutputRun::begin(std::slice::from_ref(&path), None)?;
+            let conflict = OutputRun::begin(std::slice::from_ref(&path), None)
                 .err()
                 .expect("locked output");
             assert!(conflict.chain().any(|error| error.is::<std::io::Error>()));
@@ -320,7 +381,7 @@ mod tests {
             // Abandoning a run, including abrupt termination, cannot expose old success.
             drop(run);
             assert!(!sidecar(&path, "meta.json").exists());
-            let run = OutputRun::begin(std::slice::from_ref(&path))?;
+            let run = OutputRun::begin(std::slice::from_ref(&path), None)?;
             run.complete(&[(sidecar(&path, "meta.json"), b"{}".to_vec())])?;
             assert_eq!(fs::read(sidecar(&path, "meta.json"))?, b"{}");
         }
@@ -340,14 +401,14 @@ mod tests {
             vec![root.join("clip-%06d.exr"), root.join("clip-%06d.exr")],
         ] {
             let sentinel = root.join("000000.png"); fs::write(&sentinel, "live")?;
-            assert!(format!("{:#}", OutputRun::begin(&paths).err().expect("overlap")).contains("overlapping"));
+            assert!(format!("{:#}", OutputRun::begin(&paths, None).err().expect("overlap")).contains("overlapping"));
             assert_eq!(fs::read(&sentinel)?, b"live");
         }
         let nested = root.join("container.png"); fs::create_dir_all(&nested)?;
         fs::write(nested.join("000000.png"), "live")?;
-        assert!(OutputRun::begin(&[nested.clone(), PathBuf::from(format!("{}/", nested.display()))]).is_err());
+        assert!(OutputRun::begin(&[nested.clone(), PathBuf::from(format!("{}/", nested.display()))], None).is_err());
         assert_eq!(fs::read(nested.join("000000.png"))?, b"live");
-        let distinct = OutputRun::begin(&[root.join("a.png"),root.join("b.png"),root.join("video.mp4")])?;
+        let distinct = OutputRun::begin(&[root.join("a.png"),root.join("b.png"),root.join("video.mp4")], None)?;
         drop(distinct);
         fs::remove_dir_all(root)?;
         Ok(())
@@ -357,12 +418,12 @@ mod tests {
     fn overlapping_process_cannot_delete_live_frames() -> Result<()> {
         const CHILD: &str = "VORK_OUTPUT_OVERLAP_CHILD";
         if let Some(root) = std::env::var_os(CHILD) {
-            assert!(OutputRun::begin(&[PathBuf::from(root).join("000000.png")]).is_err());
+            assert!(OutputRun::begin(&[PathBuf::from(root).join("000000.png")], None).is_err());
             return Ok(());
         }
         let root = std::env::temp_dir().join(format!("vork-output-process-{}", std::process::id()));
         fs::create_dir_all(&root)?;
-        let run = OutputRun::begin(std::slice::from_ref(&root))?;
+        let run = OutputRun::begin(std::slice::from_ref(&root), None)?;
         fs::write(root.join("000000.png"), "live")?;
         let status = std::process::Command::new(std::env::current_exe()?)
             .args(["--exact", "output_run::tests::overlapping_process_cannot_delete_live_frames"])
@@ -381,7 +442,7 @@ mod tests {
         fs::create_dir_all(&root)?;
         let path = root.join(std::ffi::OsString::from_vec(b"still-\xff.png".to_vec()));
         fs::write(&path, "previous color")?;
-        let run = OutputRun::begin(std::slice::from_ref(&path))?;
+        let run = OutputRun::begin(std::slice::from_ref(&path), None)?;
         assert!(
             !path.exists(),
             "deselected color must not survive a new run"
@@ -397,7 +458,7 @@ mod tests {
             std::env::temp_dir().join(format!("vork-output-invalidate-{}", std::process::id()));
         fs::create_dir_all(root.join("meta.json"))?;
         fs::write(root.join("000000.png"), "previous")?;
-        let error = OutputRun::begin(std::slice::from_ref(&root))
+        let error = OutputRun::begin(std::slice::from_ref(&root), None)
             .err()
             .expect("directory cannot be removed as a manifest");
         assert!(format!("{error:#}").contains("meta.json"));
@@ -413,7 +474,7 @@ mod tests {
         for path in &paths {
             fs::create_dir_all(path)?;
         }
-        let run = OutputRun::begin(&paths)?;
+        let run = OutputRun::begin(&paths, None)?;
         let metadata: Vec<_> = paths
             .iter()
             .map(|p| (sidecar(p, "meta.json"), b"{}".to_vec()))

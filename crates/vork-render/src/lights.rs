@@ -47,7 +47,7 @@ impl LightPlan {
             (dynamic || mask & consumers != 0).then_some(id)
         }).collect();
         ensure!(nodes.len() <= limits.max_storage_buffer_binding_size as usize / std::mem::size_of::<Light>(),
-            "lights exceed device light-buffer capacity");
+            "{}", crate::gpu_memory::limit_message("light buffer", format_args!("{} bytes",nodes.len()*std::mem::size_of::<Light>()), format_args!("max_storage_buffer_binding_size={} bytes",limits.max_storage_buffer_binding_size), "reduce light count"));
         Ok(Self { nodes, blackbody: None })
     }
     pub fn evaluate(
@@ -790,3 +790,18 @@ mod imported_camera_tests {
         Ok(())
     }
 }
+    #[test]
+    fn delivery_light_masks_warn_for_static_and_tracked_requests() -> Result<()> {
+        let mut scene = vork_scene::v2::Scene::from_json(br#"{"version":2,"nodes":[{"type":"camera"},
+            {"type":"light","name":"lamp","shape":"point","visible_shadow":false}],
+            "animation":[{"tracks":[{"path":["nodes","lamp","visible_shadow"],"keys":[[0,true],[1,false]]}]}]}"#)?;
+        scene.delivery = true;
+        let collector = crate::warnings::Collector::default();
+        let _scope = collector.enter();
+        validate_visibility(&scene)?;
+        let warnings = collector.snapshot();
+        for code in ["light_visibility", "light_visibility_track"] {
+            assert!(warnings.iter().any(|warning|warning.code == code), "{warnings:?}");
+        }
+        Ok(())
+    }

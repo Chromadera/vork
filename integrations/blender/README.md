@@ -6,11 +6,9 @@ This directory is a separate GPL-3.0-or-later Blender component; the boundary
 with vork is scene, geometry, shader and image files. The renderer and std do
 not import bpy or this component.
 
-The 0.2/0.3 releases do not support participating media. For those releases,
-use surface-only scenes: disconnect World and material Volume inputs before
-exporting. This removes the volume effect; selecting another profile does not
-restore it. The bridge still emits volume programs those releases cannot use; see
-[fog and volumes](#fog-and-volumes) for the limited 0.4 support and required scene rewrites.
+The bridge exports supported homogeneous World and mesh fog as authored medium
+programs. Unsupported volume graphs refuse, including in best-effort mode. See
+[fog and volumes](#fog-and-volumes) before exporting a scene with media.
 
 Export a scene headlessly:
 
@@ -64,34 +62,42 @@ An authored constant camera branch stays separate from World illumination.
 
 ### Fog and volumes
 
-Vork 0.4 stage 1 admits finite homogeneous fog in closed convex carriers and
-constant or exponential-height world fog through complete-camera path transport,
-including shadows and independent fog overlapping OpenPBR glass. See
-[`vork help fog`](../../docs/help/fog.md) and the complete
-[`examples/fog.json`](../../examples/fog.json). This requires 0.4;
-0.2/0.3 binaries do not gain it by selecting a different profile.
+Vork supports authored homogeneous fog in closed triangle meshes and
+constant or certified exponential-height world fog through complete-camera path
+transport. See [`vork help fog`](../../docs/help/fog.md) for admission rules.
 
-The bridge's existing World Volume Scatter lowering still emits the removed
-`std/fog` program. Rewrite that output to an authored `medium` program, with physical
-RGB `scattering = density * colour`, zero `absorption` and the original
-anisotropy strictly between -1 and 1. Attach it as `medium` on the environment
-light. This is an explicit scene rewrite, not a compatibility alias. For height
-haze multiply absorption and scattering by `exp(-falloff * (ctx.world_position.y - base_height))`, with coefficients at `base_height` and inverse-metre `falloff`; preserve zero channels explicitly when the exponential overflows. See the authored program in `examples/fog-height.slang`. Do not substitute height fog for arbitrary linked density graphs.
+The bridge translates a single Principled Volume, Volume Scatter (Henyey–Greenstein),
+Volume Absorption or Emission node connected to the active World or material Volume
+input. Coefficient inputs must be unlinked constant numbers. For Principled Volume,
+clear Density Attribute, Color Attribute and Temperature Attribute, and leave
+Blackbody Intensity at zero; attribute fields and blackbody conversion are not
+translated. Use Emission Color and Emission Strength for constant emission.
+The source node graph is left intact.
 
-Volume-only Scatter/Emission translation uses numeric `blender.volume` helper
-functions. Only homogeneous coefficients with bounded callback work and closed
-convex carriers (at most eight, each at most 32 triangles) fit stage 1. Combined
-surface/volume programs, subsurface surfaces (including animated/textured
-subsurface activation), general procedural density, grids and arbitrary
-Principled Volume graphs remain unsupported. Use a separate constant fog carrier
-overlapping `std/openpbr` glass with subsurface_weight zero, or render unsupported volumes externally and
-composite an image plate. `std/fog` and `blender/principled_volume` remain removed.
-Importing `blender.volume` alone is not an admission guarantee. The bridge's
-translation paths have not been newly qualified against Blender by this change.
+Principled Volume maps `scattering = density * colour` and
+`absorption = density * max(1 - colour, 0) * max(1 - sqrt(absorption_colour), 0)`.
+Emission is `emission_strength * emission_colour`. Volume Scatter adds no absorption;
+Volume Absorption uses `density * max(1 - colour, 0)`. Coefficients are per world
+metre, independent of carrier scaling. Anisotropy must be strictly between -1 and 1.
+World programs bind to the environment light's `medium`; material programs bind to
+closed triangle carriers with no surface or displacement connection.
+
+Textures, linked parameters, named attributes, shader mixtures, muted closures and
+mixed surface/volume materials refuse with an authoring fix, even in best-effort
+mode. Use constant parameters on a separate closed mesh, disconnect Volume for a
+surface-only export, or use an externally rendered image plate for arbitrary
+volume fields. The bridge does not translate exponential-height fields.
+
+Fog uses the renderer's complete-camera path transport and its admission rules:
+custom surface programs are not supported alongside fog. The bridge's translated
+surface graphs are custom programs; a fog-only export can be combined with native
+`std/openpbr` surfaces in the authored scene. Uniform World fog extinguishes distant
+environment light at infinity; illuminate it with local lights. Use a finite
+carrier when distant lighting must remain visible.
 
 `UnsupportedWorld` identifies the node/socket when the graph cannot be represented.
 Procedural colours, fractional mixtures, linked mapping parameters/strength,
-nonuniform/translated coordinate maps, other/linked volume graphs, groups, and distinct
+nonuniform/translated coordinate maps, unsupported volume graphs, groups, and distinct
 textured camera/lighting backgrounds need further graph translation or renderer
 support. Unsupported nodes are never silently replaced with a different node's
 image or constant. Source graphs and materials are not modified.
@@ -163,11 +169,8 @@ material viewport colour as a diffuse surface. Other shader branches remain
 translated. Each returned material ID has a `writer.reports[id]` record with its
 status and material/node/socket/reason/replacement substitutions. Persist these
 records with the scene; a partial status does not certify visual fidelity.
-Linked displacement and volume on surface materials are reported and omitted.
-The volume-only Emission and Volume Scatter lowering produces numeric
-medium programs subject to the [fog and volume limitations](#fog-and-volumes). Other volume-only graphs receive a transparent
-surface with an explicit
-missing transport report so they do not become opaque black occluders.
+Linked displacement on surface materials is reported and omitted in best-effort
+mode. Unsupported Volume graphs refuse export; see [fog and volumes](#fog-and-volumes).
 Strict translation remains the default. No source graph is modified.
 
 
@@ -249,17 +252,6 @@ normalization changes retain initial numeric data across the clip; shape and
 shadow toggles retain their initial configuration and report it. Animated material
 values remain source-frame snapshots and are explicitly reported.
 
-Volume-only Emission and Volume Scatter translations export numeric
-medium programs, leaving no opaque fallback shell. Stage 1 admission still requires
-the homogeneous coefficients, convex carriers and explicit scene rewrites described
-in [fog and volumes](#fog-and-volumes). Surface-dependent fields remain
-reported defaults because medium inputs have no surface UV/frame context.
-Unsupported scattering phases use a reported Henyey-Greenstein approximation.
-In best effort mode, Light Path uses reported primary-camera values; shadow and
-secondary-ray contexts are approximated. This is a named fidelity boundary.
-
-
-
 Generated coordinates in best effort use normalized imported rest bounds; source
 ORCO/manual texture-space data is not carried by glTF. Strict mode rejects that
 missing source context. Object and UV coordinates retain their explicit contracts.
@@ -280,7 +272,8 @@ translation rejects this approximation. The complete active shader graph must be
 proven opaque, nontransmitting and thick: Mix/Add Shader, reroutes, muted bypasses
 and group instances participate in that proof. Unsupported or dynamic transport
 fields keep the other Principled responses and report omitted subsurface.
-Bounded media also omit diffusion with a report while retaining the medium.
+Fog with translated custom surface programs refuses with instructions to use native
+`std/openpbr` surfaces; it never drops refraction or diffusion to admit fog.
 
 Denoising settings map to guides, prefilter and quality.
 

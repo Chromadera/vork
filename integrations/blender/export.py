@@ -25,7 +25,7 @@ from integrations.blender.pose import rotation as pose_rotation
 from integrations.blender.camera import camera_fit
 from integrations.blender.light_graph import translate as translate_light
 from integrations.blender.visibility import asset_overrides
-from integrations.blender.world import translate as translate_world, preprocess_image
+from integrations.blender.world import translate as translate_world, preprocess_image, UnsupportedWorld
 from integrations.blender.geometry import export_gltf, filter_material_overrides
 from integrations.blender.display import translate as translate_display
 from integrations.blender.material_export import MaterialWriter
@@ -85,9 +85,6 @@ writer = MaterialWriter(out, best_effort=True, curve_lookups=args.bake_curves)
 # Bake the same render-evaluated mesh/UV layout that glTF exported.
 with gltf_render_settings(sc):
     bindings = writer.write_asset(out/'scene.glb',bake_resolution=args.bake_values)
-    if any(r.get('medium') for r in writer.reports.values()):
-        writer.restrict_transport(transmission='native raster transmission with bounded media is not supported',
-                                  subsurface='native raster subsurface with bounded media is not supported')
 report['material_reports'] = writer.reports
 report['asset_reports'] = writer.asset_reports
 for name in sorted(used):
@@ -117,13 +114,22 @@ try:
     if world.image is not None:
         write_image(out/'world.hdr', world.image); images['world'] = {'file': 'world.hdr', 'color_space': 'Linear Rec.709'}
         preprocess_image(environment, out, float(sc.world.sun_threshold), float(sc.world.sun_angle))
-except Exception as e:
-    wall('World not translated', f'{type(e).__name__}: {e}; substitute implicit 0.05 environment illumination and black camera background'); environment = None; camera_background = [0,0,0]; materials = {}
+except UnsupportedWorld as e:
+    wall('World export refused', f'{e}; use a constant Background or a supported environment image; for fog use supported homogeneous Volume inputs or disconnect Volume; see vork help fog'); save(); raise
+if materials or any(r.get('medium') for r in writer.reports.values()):
+    surfaces = [r['material'] for r in writer.reports.values() if not r.get('medium')]
+    if surfaces:
+        from integrations.blender.materials import UnsupportedMaterial
+        raise UnsupportedMaterial(
+            'Fog cannot render alongside translated custom surface programs: '
+            + ', '.join(sorted(set(surfaces)))
+            + '; export fog-only carriers and add native std/openpbr surfaces in the '
+            'authored scene, or disconnect Volume for a surface-only export; see vork help fog')
 try:
     display = translate_display(sc, emit_display=writer.write_display, on_substitution=lambda field,reason,replacement:
         wall('display setting not translated', f'{field}: {reason}; {replacement}'))
-except Exception as e:
-    wall('display transform not translated', f'{type(e).__name__}: {e}'); display = dict(display={'program':'std/agx'})
+except ValueError as e:
+    wall('display export refused', f'{e}; use sRGB with Standard, AgX or Filmic and a matching look; disable unsupported display curves'); save(); raise
 path_transport = r.engine == 'CYCLES'
 render = dict(resolution=res, fps=r.fps/r.fps_base, duration=2.0, **display)
 render['background'] = 'transparent' if r.film_transparent else camera_background

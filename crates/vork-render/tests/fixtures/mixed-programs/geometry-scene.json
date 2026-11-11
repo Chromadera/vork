@@ -1,0 +1,69 @@
+{
+  "version": 2,
+  "buffers": {
+    "p": {
+      "type": "vec3",
+      "data": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ]
+      ]
+    }
+  },
+  "programs": {
+    "mixed": {
+      "source": "struct Inputs {}; Closure surface(ShadingContext c,Inputs i){return unlit(float3(.2,.4,.6));} void compute(ComputeContext c,Inputs i){uint j=geometry_source_vertex(c.id.x);if(geometry_attribute_count==0u || j>=geometry_vertex_count() || j>=geometry_vertex_capacity || j>=geometry_POSITION_count || j>=geometry_attribute_0_count || j>=previous_positions_count)return;positions_store(j,geometry_POSITION_load(j)+geometry_attribute_0_load(j)+previous_positions_load(j));}",
+      "schedule": "install",
+      "dispatch": 3,
+      "bindings": {
+        "positions": "p"
+      }
+    }
+  },
+  "materials": {
+    "m": {
+      "program": "mixed"
+    }
+  },
+  "nodes": [
+    {
+      "type": "mesh",
+      "name": "triangle",
+      "geometry": {
+        "attributes": {
+          "POSITION": "p"
+        }
+      },
+      "materials": [
+        "m"
+      ]
+    },
+    {
+      "type": "camera",
+      "name": "camera",
+      "translation": [
+        0,
+        0,
+        4
+      ]
+    }
+  ],
+  "render": {
+    "resolution": [
+      32,
+      24
+    ]
+  }
+}

@@ -92,3 +92,26 @@ fn file_base_and_optional_shader_compilation_share_render_installation() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn water_example_checks_without_a_gpu() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vork"))
+        .arg("check")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/water/scene.json"))
+        .env("VORK_GPU", "not-a-device")
+        .env("VK_ICD_FILENAMES", "/missing/check-must-not-open-vulkan.json")
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Scene checked successfully");
+}
+
+#[test]
+fn missing_fonts_are_reported_together() {
+    let scene = json!({"version":2,"nodes":[{"type":"camera"}],"geometry":{
+        "one":{"std":"text","body":"first","font":"missing-first.ttf"},
+        "two":{"std":"text","body":"second","font":"missing-second.otf"}}});
+    let output = check(&scene);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    for name in ["missing-first.ttf", "missing-second.otf", "restore its font"] {assert!(error.contains(name), "{error}");}
+}

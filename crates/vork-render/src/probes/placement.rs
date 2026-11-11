@@ -23,10 +23,10 @@ impl std::ops::DerefMut for Bricks {
     fn deref_mut(&mut self) -> &mut BrickMap { &mut self.cells }
 }
 #[derive(Debug)]
-struct MemoryPressure;
+struct MemoryPressure(String);
 impl std::fmt::Display for MemoryPressure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "probe storage exceeds native device capacity")
+        f.write_str(&self.0)
     }
 }
 impl std::error::Error for MemoryPressure {}
@@ -36,7 +36,10 @@ impl Bricks {
         let sizes=field_sizes(nodes,bricks,res);
         if nodes>u64::from(u32::MAX) || sizes.metadata/std::mem::size_of::<Grid>() as u64>u64::from(u32::MAX)
             || self.binding_limit.is_some_and(|limit|!sizes.fits(limit)) {
-            return Err(MemoryPressure.into());
+            return Err(MemoryPressure(crate::gpu_memory::limit_message("probe storage",
+                format_args!("{nodes} nodes; {} metadata rows; bindings in bytes: records={}, moments={}, sums={}, metadata={}, traced={}", sizes.metadata/std::mem::size_of::<Grid>() as u64, sizes.records,sizes.moments,sizes.sums,sizes.metadata,sizes.traced),
+                format_args!("{} nodes and metadata rows; binding={}",u32::MAX,self.binding_limit.map_or_else(|| "not reported".to_owned(), |bytes| format!("{bytes} bytes"))),
+                "reduce geometry density or choose --profile std/draft")).into());
         }
         self.check(sizes.retained())
     }
@@ -60,8 +63,10 @@ impl Bricks {
             }
         }
         self.available.set(available);
-        if available.is_some_and(|available| bytes > available) {
-            return Err(MemoryPressure.into());
+        if let Some(headroom) = available.filter(|headroom| bytes > *headroom) {
+            return Err(MemoryPressure(crate::gpu_memory::limit_message("probe storage",
+                format_args!("{bytes} bytes"), format_args!("{headroom} bytes of native memory headroom"),
+                "reduce geometry density or choose --profile std/draft, or close other GPU applications")).into());
         }
         Ok(())
     }
@@ -93,6 +98,7 @@ fn finest_fit<T>(mut place: impl FnMut(f32, &mut OpeningRange) -> Result<T>) -> 
     let mut high = f32::MAX.to_bits();
     let mut trial = 0.;
     let mut best = None;
+    let mut pressure = None;
     loop {
         let mut range = OpeningRange::default();
         match place(trial, &mut range) {
@@ -103,6 +109,7 @@ fn finest_fit<T>(mut place: impl FnMut(f32, &mut OpeningRange) -> Result<T>) -> 
             }
             Err(error) if error.is::<MemoryPressure>() => {
                 low = range.high.saturating_add(1);
+                pressure = Some(error);
             }
             Err(error) => return Err(error),
         }
@@ -114,7 +121,7 @@ fn finest_fit<T>(mut place: impl FnMut(f32, &mut OpeningRange) -> Result<T>) -> 
                 else { (trial*2.).min(f32::MAX).to_bits() }))
         };
     }
-    best.ok_or_else(|| anyhow::anyhow!("probe support cannot fit native device capacity"))
+    best.ok_or_else(|| pressure.expect("a failed support search encountered memory pressure"))
 }
 
 /// An automatic cache is fitted in camera-relative scene units. Remote support
@@ -496,7 +503,7 @@ impl Field {
     }
     fn grow_with(&self,requests:&BTreeSet<[i32;3]>,level:u32,bricks:bool,mut target:u32)->Result<Self> {
         loop {
-            ensure!(target<127,"probe support exceeds finite spatial range under device pressure");
+            ensure!(target<127,"{}",crate::gpu_memory::limit_message("probe spatial level under device pressure", target, 126, "reduce geometry density or choose --profile std/draft"));
             match self.grow_at_level(requests,level,target,bricks) {
                 Err(error) if error.is::<MemoryPressure>()=> {
                     target=target.max(self.header.field[3]).checked_add(1).context("probe spatial level overflow")?;
@@ -754,13 +761,25 @@ fn triangle_box(p: [Vec3; 3], centre: Vec3, half: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn exhausted_support_preserves_the_sized_limit_message() {
+        let error = finest_fit::<()>(|_, _| {
+            let field = Bricks {binding_limit: Some(128), ..Bricks::new()};
+            field.check_field(64, 1, [4;3])?;
+            unreachable!("the test field cannot fit the binding")
+        }).unwrap_err().to_string();
+        for expected in ["64 nodes", "binding=128 bytes", "reduce geometry density", "vork help limits"] {
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn pressure_search_refines_instead_of_accepting_the_first_coarse_jump() -> Result<()> {
         for threshold in [0., 1./512., 1./64., 0.249, 0.5] {
             let mut attempts=Vec::new();
             let accepted=finest_fit(|opening, range| {
                 attempts.push(opening);
                 range.decision(opening, 1., threshold);
-                if opening < threshold {Err(MemoryPressure.into())} else {Ok(threshold)}
+                if opening < threshold {Err(MemoryPressure("synthetic memory pressure".into()).into())} else {Ok(threshold)}
             })?;
             assert_eq!(accepted,threshold);
             assert_eq!(attempts[0],0.);

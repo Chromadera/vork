@@ -31,7 +31,7 @@ class InstallerTests(unittest.TestCase):
     def fixture(self, member='vork', binary=b'#!/bin/sh\necho fixture "$@"\n'):
         with tarfile.open(self.archive, 'w:gz') as tar:
             for name, data, mode in [(member, binary, 0o755),
-                                     ('examples/scene.json', b'{}', 0o644),
+                                     ('examples/scene.json', b'{}', 0o644), # export-example-generated: synthetic tar member
                                      ('slang/bin/slangc', b'compiler', 0o755),
                                      ('oidn/lib/model', b'model', 0o644),
                                      ('NOTICE', b'notices', 0o644)]:
@@ -459,7 +459,7 @@ class PowerShellInstallerTests(unittest.TestCase):
     def fixture(self, member, binary=b'not an executable'):
         with zipfile.ZipFile(self.archive, 'w') as z:
             z.writestr(member, binary)
-            z.writestr('examples/scene.json', '{}')
+            z.writestr('examples/scene.json', '{}') # export-example-generated: synthetic zip member
             z.writestr('NOTICE', 'notices')
             for name, variable in [('slang', 'VORK_TEST_SLANG'), ('oidn', 'VORK_TEST_OIDN')]:
                 if os.environ.get(variable):

@@ -10,7 +10,7 @@ const scene = geometry => ({version:2, geometry:{g:geometry}, nodes:[{type:'came
 
 test('editor schema accepts buffer geometry and authoring builders', () => {
   assert.equal(validate(scene({attributes:{POSITION:{type:'vec3',data:[[0,0,0],[1,0,0],[0,1,0]]}}})),true);
-  for (const std of ['box','sphere','grid','cylinder','cone','torus','capsule','revolve','rounded_box','text','extrude'])
+  for (const std of ['box','sphere','grid','cylinder','cone','torus','capsule','revolve','rounded_box','text','extrude','sweep'])
     assert.equal(validate(scene({std})),true);
 });
 
@@ -22,7 +22,7 @@ test('editor schema validates the bundled starter', () => {
 });
 
 test('editor schema validates representative public examples', () => {
-  for (const name of ['first-scene', 'black-hole/scene', 'water/scene',
+  for (const name of ['first-scene', 'sweep', 'black-hole/scene', 'water/scene',
     ...['fog-glow', 'ghosts', 'simple-star', 'streaks'].map(name => `compositor-effects/glare-${name}`)]) {
     const value = JSON.parse(readFileSync(new URL(`../../../examples/${name}.json`, import.meta.url)));
     assert.equal(validate(value), true, `${name}: ${JSON.stringify(validate.errors)}`);

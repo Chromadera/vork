@@ -1,8 +1,9 @@
-// Exposure report: alpha-weighted clipped/near-black counts, luma sum and coverage of the final
-// display image, each a 64-bit counter of two 32-bit words (portable atomics). The
+// Exposure report: alpha-weighted clipped/near-black counts, luma sum, coverage
+// and processed-pixel count of the final display image, each a 64-bit counter of
+// two 32-bit words (portable atomics). The
 // including shader imports vork_constants, declares `counters` and reads its display image.
 
-groupshared uint group_counts[4];
+groupshared uint group_counts[5];
 
 void add_wide(uint word, uint value) {
     uint previous;
@@ -10,10 +11,11 @@ void add_wide(uint word, uint value) {
     if (previous > 0xffffffffu - value) InterlockedAdd(counters[word + 1u], 1u);
 }
 void begin(uint lane) {
-    if (lane < 4u) group_counts[lane] = 0u;
+    if (lane < 5u) group_counts[lane] = 0u;
     GroupMemoryBarrierWithGroupSync();
 }
 void count(float4 rgba) {
+    InterlockedAdd(group_counts[4], 1u);
     float3 c = rgba.rgb;
     // RGBA8 coverage: even 64 * 255 * 65535 fits a group-local uint.
     uint weight = uint(round(saturate(rgba.a) * 255.));
@@ -26,5 +28,5 @@ void count(float4 rgba) {
 }
 void end(uint lane) {
     GroupMemoryBarrierWithGroupSync();
-    if (lane < 4u && group_counts[lane] != 0u) add_wide(2u * lane, group_counts[lane]);
+    if (lane < 5u && group_counts[lane] != 0u) add_wide(2u * lane, group_counts[lane]);
 }

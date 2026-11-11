@@ -1010,7 +1010,7 @@ impl Compiler {
         let capacity = std::cell::Cell::new(openpbr::BLEND_LOBES);
         let mut effects = String::new();
         let compiled = self.compile_with_capacity(abi, source, origin, tag, Some(&capacity), false, false, false, |inputs, declarations| {
-            ensure!(inputs.fields.iter().all(|field|field.ty!=Type::Geometry),"Geometry inputs require a compute program; bind collider geometry on the geometry producer");
+            ensure!(declarations.contains("compute") || inputs.fields.iter().all(|field|field.ty!=Type::Geometry),"Geometry inputs require a compute program; bind collider geometry on the geometry producer");
             (capabilities, effects) = self.surface_effects(abi, source, origin, declarations.contains("lit"), inputs)?;
             let needed = capabilities.blend_lobes.unwrap_or(openpbr::BLEND_LOBES).max(1);
             capacity.set(needed.max(openpbr::BLEND_LOBES));

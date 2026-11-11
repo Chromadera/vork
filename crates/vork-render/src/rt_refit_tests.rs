@@ -250,3 +250,53 @@ fn tlas_motion_budget_rebuilds_and_resets() {
     assert_eq!(motion, 0);
     assert!(rebuild_tlas(&mut motion, 100, 100, false));
 }
+
+// Query hits cannot distinguish a valid refit from a rebuild. Inspect the
+// native descriptors actually recorded through wgpu-core on the no-op backend.
+#[test]
+fn native_force_rebuild_records_build_then_resumes_update() -> anyhow::Result<()> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::NOOP,
+        backend_options: wgpu::BackendOptions {
+            noop: wgpu::NoopBackendOptions { enable: true }, ..Default::default()
+        }, ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
+    let (d, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+        required_limits: wgpu::Limits {
+            max_blas_geometry_count: 1, max_blas_primitive_count: 3,
+            max_tlas_instance_count: 1, ..Default::default()
+        },
+        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+        ..Default::default()
+    }))?;
+    let vertices = init(&d, "mode oracle vertices", bytemuck::cast_slice(&[0f32; 9]), wgpu::BufferUsages::BLAS_INPUT);
+    let indices = init(&d, "mode oracle indices", bytemuck::cast_slice(&[0u32, 1, 2]), wgpu::BufferUsages::BLAS_INPUT);
+    let size = triangles(false, 3, 3);
+    let bottom = d.create_blas(&wgpu::CreateBlasDescriptor {
+        label: None, flags: BUILD_FLAGS,
+        update_mode: wgpu::AccelerationStructureUpdateMode::PreferUpdate,
+    }, wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![size.clone()] });
+    let top = d.create_tlas(&wgpu::CreateTlasDescriptor {
+        label: None, max_instances: 1, flags: BUILD_FLAGS,
+        update_mode: wgpu::AccelerationStructureUpdateMode::PreferUpdate,
+    });
+    let entry = wgpu::BlasBuildEntry { blas: &bottom, geometry: geometry(&size, &vertices, 0, 12, &indices, 0) };
+    let (_, bytes) = bottom.native_tlas_instance(0, 255).expect("no-op native descriptor");
+    let descriptors = init(&d, "mode oracle descriptors", &bytes, wgpu::BufferUsages::TLAS_INPUT);
+    for (step, (force_rebuild, expected)) in [(false, (2, 0)), (false, (2, 1)),
+        (true, (3, 1)), (false, (3, 2))].into_iter().enumerate() {
+        let mut encoder = d.create_command_encoder(&Default::default());
+        if step == 0 { encoder.build_acceleration_structures([&entry], std::iter::empty()); }
+        unsafe { encoder.build_tlas_from_buffer(&top, &descriptors, 0, 1, &[&bottom], force_rebuild); }
+        queue.submit([encoder.finish()]);
+        d.poll(wgpu::PollType::wait_indefinitely())?;
+        // No-op submission is synchronous. These counters observe descriptors
+        // from the real core path, without mixing raw and tracked encoding.
+        let native = unsafe { queue.as_hal::<wgpu::hal::api::Noop>() }.expect("no-op queue");
+        assert_eq!(native.acceleration_structure_build_counts(), expected,
+            "step={step}, force_rebuild={force_rebuild}");
+    }
+    Ok(())
+}

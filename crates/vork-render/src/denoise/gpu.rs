@@ -20,9 +20,6 @@ unsafe extern "system" { fn CloseHandle(handle: Handle) -> i32; }
 /// Return an already committed GPU device that can share this renderer's memory,
 /// or why there is none. Metal must retain its queue at commit.
 pub(super) fn select(api: &Api, r: &Renderer) -> std::result::Result<Handle, String> {
-    if std::env::var_os("VORK_GPU_DENOISER").is_some_and(|value| value == "off") {
-        return Err("VORK_GPU_DENOISER=off".into());
-    }
     let committed = |handle: Handle, name: &str| -> std::result::Result<Handle, String> {
         if handle.is_null() { return Err(format!("OIDN could not create its {name} device")); }
         unsafe { (api.commit_device)(handle); }
@@ -99,7 +96,7 @@ struct Shared {
 impl Shared {
     fn new(r: &Renderer, device: &Arc<Device>, bytes: u64) -> Result<Self> {
         ensure!(bytes <= u64::from(r.device.limits().max_storage_buffer_binding_size)
-            && bytes <= r.device.limits().max_buffer_size, "OIDN workspace needs {bytes} bytes; exceeds device buffer limits");
+            && bytes <= r.device.limits().max_buffer_size, "{}", crate::gpu_memory::limit_message("OIDN workspace", format_args!("{bytes} bytes"), format_args!("storage binding={} bytes, buffer={} bytes",r.device.limits().max_storage_buffer_binding_size,r.device.limits().max_buffer_size), "reduce resolution or disable denoising with --set denoise=false"));
         let desc = wgpu::BufferDescriptor {label: Some("OIDN shared images"), size: bytes,
             usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false};
         #[cfg(any(target_os = "linux", target_os = "windows"))]

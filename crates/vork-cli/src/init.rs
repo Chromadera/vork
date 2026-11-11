@@ -40,7 +40,7 @@ impl Args {
                 if npm { include_str!("starter-python-npm.md").replace("{VERSION}", env!("CARGO_PKG_VERSION")) } else { include_str!("starter-python.md").to_owned() }
             }
         };
-        files.push(("README.md", format!("# Your first vork scene\n\n{author}\n```sh\n{command} render scene.json --out render.png\n{command} help\n```\n\nOpen render.png. Try changing the colours, camera target or light positions.\nThe default `std/final` profile is warmed by setup; use `--profile std/draft` for quicker previews. For interiors and full bounce lighting, use `--profile std/path --set samples=64` to start; raise samples for delivery. See `{command} help profiles` for the speed/quality table. No fetched assets are needed.\n")));
+        files.push(("README.md", format!("# Your first vork scene\n\n{author}\n```sh\n{command} render scene.json --out render.png\n{command} help\n```\n\nShape/revolve examples: `{command} help geometry`. Sun angular size: `{command} help lights`. Tone curve, grain and movies: `{command} help render`.\n\nOpen render.png. Try changing the colours, camera target or light positions.\nThe default `std/final` profile is warmed by setup; use `--profile std/draft` for quicker previews. For interiors and full bounce lighting, use `--profile std/path --set samples=64` to start; raise samples for delivery. See `{command} help profiles` for the speed/quality table. No fetched assets are needed.\n")));
         fs::create_dir_all(&self.dir).with_context(|| format!("create {}", self.dir.display()))?;
         for name in files.iter().map(|(name, _)| *name) {
             if self.dir.join(name).symlink_metadata().is_ok() {

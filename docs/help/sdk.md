@@ -18,6 +18,7 @@ VORK_BIN selects the executable. Types: vork.types, TS Scene; schema: sdk/scene.
 SDK render helpers require current completion metadata, including warnings.
 Writers preserve an explicit $schema but do not insert one. Use the matching
 SDK and executable; VORK_BIN selects the executable.
+Regenerate SDK-written scenes with the matching SDK after upgrading.
 
 Bundled SDK locations (not registry installs):
   Linux / Mac: ~/.local/lib/vork/python and ~/.local/lib/vork/sdk.

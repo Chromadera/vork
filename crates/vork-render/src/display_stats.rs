@@ -153,19 +153,31 @@ impl Stats {
         self.written.then_some(&self.readback)
     }
     /// Read the mapped counters of a `pixels`-pixel display image.
-    pub(crate) fn read(&mut self, pixels: u64) -> Option<Exposure> {
+    pub(crate) fn read(&mut self, pixels: u64) -> Result<Option<Exposure>> {
         if !std::mem::take(&mut self.written) {
-            return None;
+            return Ok(None);
         }
         let mapped = self.readback.get_mapped_range(..);
-        let words: &[u32] = bytemuck::cast_slice(&mapped);
-        let wide = |i: usize| (u64::from(words[2 * i]) | (u64::from(words[2 * i + 1]) << 32)) as f64;
-        let coverage = wide(3);
-        let exposure = Exposure { coverage: coverage / (pixels as f64 * 255.), clipped: wide(0) / coverage, near_black: wide(1) / coverage, mean: wide(2) / coverage / f64::from(EXPOSURE_LUMA_SCALE) };
+        let exposure = decode(bytemuck::cast_slice(&mapped), pixels);
         drop(mapped);
         self.readback.unmap();
-        Some(exposure)
+        exposure.map(Some)
     }
+}
+
+/// Coverage may legitimately be zero, but every display pixel must be visited.
+fn decode(words: &[u32], pixels: u64) -> Result<Exposure> {
+    let wide = |i: usize| u64::from(words[2 * i]) | (u64::from(words[2 * i + 1]) << 32);
+    let processed = wide(4);
+    anyhow::ensure!(processed == pixels,
+        "incomplete GPU exposure readback: expected {pixels} pixels, got {processed}");
+    let coverage = wide(3) as f64;
+    Ok(Exposure {
+        coverage: coverage / (pixels as f64 * 255.),
+        clipped: wide(0) as f64 / coverage,
+        near_black: wide(1) as f64 / coverage,
+        mean: wide(2) as f64 / coverage / f64::from(EXPOSURE_LUMA_SCALE),
+    })
 }
 
 fn pipelines(r: &Renderer) -> &[wgpu::ComputePipeline; 2] {
@@ -198,6 +210,24 @@ fn pipelines(r: &Renderer) -> &[wgpu::ComputePipeline; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroed_exposure_is_not_a_completed_transparent_image() {
+        let mut words = [0u32; EXPOSURE_WORDS];
+        assert!(decode(&words, 60).is_err(), "zero-filled exposure was accepted");
+        words[8] = 60;
+        let empty = decode(&words, 60).unwrap();
+        assert_eq!(empty.coverage, 0.);
+        assert!(empty.mean.is_nan());
+        words[6] = 60 * 255; // opaque black is also a valid image
+        words[2] = 60 * 255;
+        let black = decode(&words, 60).unwrap();
+        assert_eq!((black.coverage, black.near_black, black.mean), (1., 1., 0.));
+        words[8] = 59;
+        assert!(decode(&words, 60).is_err(), "partial reduction was accepted");
+        words[8] = 61;
+        assert!(decode(&words, 60).is_err(), "duplicate reduction was accepted");
+    }
 
     /// Both reductions preserve opaque statistics and weight mixed/empty coverage.
     #[test]
@@ -246,7 +276,7 @@ mod tests {
                 stats.pending().unwrap().map_async(wgpu::MapMode::Read, .., move |result| { let _ = tx.send(result); });
                 r.wait(Some(submission))?;
                 rx.recv()??;
-                let e = stats.read(u64::from(w * h)).unwrap();
+                let e = stats.read(u64::from(w * h))?.unwrap();
                 assert_eq!(e.coverage, coverage / (f64::from(w * h) * 255.));
                 if coverage == 0. {
                     assert!(e.clipped.is_nan() && e.near_black.is_nan() && e.mean.is_nan());
@@ -263,7 +293,7 @@ mod tests {
                 };
                 let mean = texels.iter().map(|&t| luma(t) * f64::from(t[3])).sum::<f64>() / coverage;
                 assert!((e.mean - mean).abs() < 1e-6, "{} != {mean}", e.mean);
-                assert!(stats.pending().is_none() && stats.read(1).is_none());
+                assert!(stats.pending().is_none() && stats.read(1)?.is_none());
             }
         }
         Ok(())

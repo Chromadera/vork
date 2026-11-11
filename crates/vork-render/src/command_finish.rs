@@ -143,6 +143,8 @@ impl Segments {
         commands: impl ExactSizeIterator<Item = wgpu::CommandBuffer>,
     ) -> wgpu::SubmissionIndex {
         ownership.submit(commands.len());
+        #[cfg(test)]
+        SUBMISSIONS.with(|count| count.set(count.get() + 1));
         queue.submit(commands)
     }
 }
@@ -813,3 +815,11 @@ mod tests {
         Ok(())
     }
 }
+
+// Per-test-thread counts exclude unrelated renderers running in parallel.
+#[cfg(test)]
+thread_local! {
+    static SUBMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn submission_count() -> usize { SUBMISSIONS.with(|count| count.get()) }

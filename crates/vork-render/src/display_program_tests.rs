@@ -92,3 +92,58 @@ fn display_program_runs_only_after_final_sample() -> Result<()> {
     assert!((i32::from(accumulated.rgba[0]) - 128).abs() <= 1);
     Ok(())
 }
+
+#[test]
+fn cloth_rest_edge_filter_keeps_small_crossing_edges_out_of_contacts() -> Result<()> {
+    let Some(r) = crate::test_renderer()? else { return Ok(()); };
+    // Execute the shipped Slang functions, rather than a Rust copy of their
+    // arithmetic. Display output is only a compact GPU numeric receipt.
+    let library = include_str!("../../../libraries/cloth/self.slang");
+    let segments = library.split_once("void cloth_segments(").unwrap().1
+        .split_once("void cloth_register(").unwrap().0;
+    let rest_edges = library.split_once("bool cloth_rest_edges(").unwrap().1
+        .split_once("bool cloth_self_boxes(").unwrap().0;
+    let source = format!(r#"
+        static const float SELF_MARGIN=3e-3;
+        void cloth_segments({segments}
+        float3 rest_position_load(uint i) {{
+            if(i==0) return float3(-4e-5,0,0);
+            if(i==1) return float3(4e-5,0,0);
+            if(i==2) return float3(0,-4e-5,0);
+            return float3(0,4e-5,0);
+        }}
+        bool cloth_rest_edges({rest_edges}
+        struct Inputs {{}};
+        float3 display(DisplayContext ctx, Inputs inputs) {{
+            bool ok=cloth_rest_edges(uint4(0,1,2,3),6e-6);
+            ok=ok&&!cloth_rest_edges(uint4(0,1,2,3),0);
+            for(uint i=0;i<3;i++) {{
+                float scale=i==0?8e-5:(i==1?1.:100.);
+                float3 p=float3(-.5,0,0)*scale,q=-p;
+                float3 a=float3(0,-.5,0)*scale,b=-a;
+                float s,t;cloth_segments(p,q,a,b,s,t);
+                ok=ok&&abs(s-.5)<1e-5&&abs(t-.5)<1e-5;
+                // Parallel, separated perpendicular and zero-length edges.
+                a=float3(-.5,1,0)*scale;b=float3(.5,1,0)*scale;
+                cloth_segments(p,q,a,b,s,t);
+                ok=ok&&abs(length(lerp(p,q,s)-lerp(a,b,t))/scale-1)<1e-5;
+                a=float3(0,-.5,1)*scale;b=float3(0,.5,1)*scale;
+                cloth_segments(p,q,a,b,s,t);
+                ok=ok&&abs(length(lerp(p,q,s)-lerp(a,b,t))/scale-1)<1e-5;
+                cloth_segments(float3(0),float3(0),a,b,s,t);
+                ok=ok&&s==0&&abs(t-.5)<1e-5;
+                cloth_segments(a,b,float3(0),float3(0),s,t);
+                ok=ok&&t==0&&abs(s-.5)<1e-5;
+                cloth_segments(float3(0),float3(0),float3(0),float3(0),s,t);
+                ok=ok&&s==0&&t==0;
+                cloth_segments(float3(0),float3(1e-10,0,0)*scale,a,b,s,t);
+                ok=ok&&s==0&&abs(t-.5)<1e-5;
+            }}
+            return ok?float3(1):float3(0);
+        }}
+    "#);
+    let result = render(&r, &source, 0.)?;
+    assert!(result.rgba.chunks_exact(4).all(|pixel| pixel[..3] == [255; 3]),
+        "cloth closest-point/rest-edge numeric receipt failed: {:?}", &result.rgba[..4]);
+    Ok(())
+}

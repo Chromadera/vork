@@ -211,21 +211,22 @@ pub(crate) fn scene_spectral(r: &Renderer, scene: &v2::Scene, base: &Path) -> Re
     let dynamic=materials::animated_inputs(scene)?;
     let mut abi=programs::abi();abi.aov_count=scene.render.aovs.len();
     let stages=programs::mesh_stages(r,scene,base)?;
-    for name in names {
-        let medium=stages.get(&name).is_none_or(|s|s.medium);
-        let surface=stages.get(&name).is_some_and(|s|s.surface);
-        let material=&scene.materials[&name];
-        let varying=dynamic.get(&name).cloned().unwrap_or_default();
+    let names: Vec<_> = names.into_iter().collect();
+    // Keep nested results in key order: speculative workers must not change
+    // serial error precedence or the first positive spectral proof.
+    let analyzed = programs::parallel_map_with_limit(&names, 4, |name| Ok((|| -> Result<bool> {
+        let medium=stages.get(name).is_none_or(|s|s.medium);
+        let surface=stages.get(name).is_some_and(|s|s.surface);
+        let material=&scene.materials[name];
+        let varying=dynamic.get(name).cloned().unwrap_or_default();
         if material.program=="std/openpbr" {
             let active=|field:&str| varying.contains(field) || match material.inputs.get(field) {
                 None=>false,Some(v2::Input::Number(v))=>*v!=0.,_=>true,
             };
             if active("transmission_weight") && active("transmission_dispersion_scale") {return Ok(true);}
-            continue;
+            return Ok(false);
         }
-        let (source,origin)=if let Some(source)=vork_slang::module_source(&material.program) {
-            (source.to_owned(),PathBuf::from(format!("{}.slang",material.program)))
-        } else {programs::program_source(base,&material.program,&scene.programs[&material.program])?};
+        let (source,origin)=programs::material_source(scene,base,&material.program)?;
         if medium {
             let mut hash=blake3::Hasher::new();hash.update(b"spectral-surface-v1");hash.update(abi.cache_identity()?.as_bytes());hash.update(source.as_bytes());hash.update(origin.to_string_lossy().as_bytes());
             let tag=hash.finalize().to_hex();
@@ -235,11 +236,15 @@ pub(crate) fn scene_spectral(r: &Renderer, scene: &v2::Scene, base: &Path) -> Re
                 |compiler|compiler.compile_medium(&abi,&source,&origin,&tag[..12]))?;
             let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?))).collect::<Result<BTreeMap<_,_>>>()?;
             if program.needs_spectral(&abi,&program.inputs.effect_words(&values,&varying)?)? {return Ok(true);}
-            if !surface {continue;}
+            if !surface {return Ok(false);}
         }
         let program=programs::compile(r,&vork_slang::Compiler::discover(),&abi,&source,&origin)?;
         let values=material.inputs.iter().map(|(k,v)|Ok((k.clone(),serde_json::to_value(v)?))).collect::<Result<BTreeMap<_,_>>>()?;
         if program.needs_spectral(&abi,&program.inputs.effect_words(&values,&varying)?)? {return Ok(true);}
+        Ok(false)
+    })()))?;
+    for spectral in analyzed {
+        if spectral? { return Ok(true); }
     }
     Ok(false)
 }

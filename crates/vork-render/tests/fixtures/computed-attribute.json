@@ -1,0 +1,173 @@
+{
+  "version": 2,
+  "buffers": {
+    "positions": {
+      "type": "vec3",
+      "data": [
+        [
+          -1,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ]
+      ]
+    }
+  },
+  "programs": {
+    "copy_predecessor": {
+      "source": "import vork;\nstruct Inputs {};\nvoid compute(ComputeContext ctx, Inputs inputs) { p_store(ctx.id.x, geometry_POSITION_load(ctx.id.x)); }\n",
+      "schedule": "simulation",
+      "dispatch": 3,
+      "bindings": {
+        "p": "positions"
+      }
+    },
+    "reader_surface": {
+      "source": "import vork;\nstruct Inputs { Attribute<float3> observed; };\nClosure surface(ShadingContext ctx, Inputs inputs) { return unlit(abs(read_attribute(inputs.observed,ctx).value)); }\n"
+    }
+  },
+  "materials": {
+    "compute_inputs": {
+      "program": "copy_predecessor"
+    },
+    "reader_material": {
+      "program": "reader_surface",
+      "inputs": {
+        "observed": {
+          "attribute": "observed_position"
+        }
+      }
+    }
+  },
+  "nodes": [
+    {
+      "type": "mesh",
+      "name": "computed_triangle",
+      "geometry": {
+        "attributes": {
+          "POSITION": "positions"
+        },
+        "indices": {
+          "type": "u32",
+          "data": [
+            0,
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "type": "mesh",
+      "name": "reader",
+      "translation": [
+        10,
+        0,
+        0
+      ],
+      "geometry": {
+        "attributes": {
+          "POSITION": {
+            "type": "vec3",
+            "data": [
+              [
+                -1,
+                0,
+                0
+              ],
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                1,
+                0
+              ]
+            ]
+          }
+        },
+        "indices": {
+          "type": "u32",
+          "data": [
+            0,
+            1,
+            2
+          ]
+        }
+      },
+      "instances": {
+        "attributes": {
+          "TRANSLATION": {
+            "type": "vec3",
+            "data": [
+              [
+                0,
+                0,
+                0
+              ],
+              [
+                3,
+                0,
+                0
+              ],
+              [
+                6,
+                0,
+                0
+              ]
+            ]
+          },
+          "observed_position": "positions"
+        }
+      },
+      "materials": [
+        "reader_material"
+      ]
+    },
+    {
+      "type": "camera",
+      "name": "camera",
+      "translation": [
+        0,
+        0,
+        5
+      ],
+      "target": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "simulation": {
+    "t0": 0,
+    "dt": 0.1,
+    "seed": 17,
+    "state": [
+      "positions"
+    ],
+    "init": [
+      "copy_predecessor"
+    ],
+    "steps": [
+      "copy_predecessor"
+    ]
+  },
+  "render": {
+    "resolution": [
+      64,
+      64
+    ]
+  }
+}

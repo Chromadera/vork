@@ -97,9 +97,9 @@ pub(crate) fn prepare(
     // Every output vertex has a float3 position. Other retained streams check
     // their exact byte demands when packing; do not impose a full-Vertex stride
     // on a split position/attribute buffer.
-    crate::gpu_memory::storage_binding(&limits, "subdivision positions", vertices * 12)?;
+    crate::gpu_memory::storage_binding(&limits, "subdivision positions", vertices * 12, "reduce subdivision level or source mesh size")?;
     ensure!(indices_count*4 <= limits.max_buffer_size,
-        "subdivision triangle indices need {} bytes; device max_buffer_size={} bytes", indices_count*4, limits.max_buffer_size);
+        "{}", crate::gpu_memory::limit_message("subdivision triangle indices", format_args!("{} bytes",indices_count*4), format_args!("max_buffer_size={} bytes",limits.max_buffer_size), "reduce subdivision level or source mesh size"));
     let path = r.disk_cache.path("subdivision", 2, key.finalize());
     if let Some(bytes) = disk_cache::read(&path) {
         if let Ok(mut baked) = serde_json::from_slice::<Baked>(&bytes) {
@@ -341,8 +341,8 @@ mod tests {
     fn subdivision_fixture_frames_preserve_repeated_requests() -> Result<()> {
         let Some(r)=crate::test_renderer()? else {return Ok(())};
         for (name,source) in [
-            ("skin",include_str!("../../../examples/subdivision-skin.json")),
-            ("morph",include_str!("../../../examples/subdivision-deform.json")),
+            ("skin",include_str!("../../../examples/subdivision-skin.json")), // export-example-private: cfg(vork_private_tests) fixture
+            ("morph",include_str!("../../../examples/subdivision-deform.json")), // export-example-private: cfg(vork_private_tests) fixture
             ("hero",include_str!("../../../scenes/subdivision-hero.json")),
         ] {
             let mut scene:serde_json::Value=vork_scene::v2::from_test_str(source)?;

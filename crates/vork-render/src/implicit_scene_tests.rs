@@ -859,3 +859,68 @@ fn water_040_without_status_loads_and_renders() -> Result<()> {
     assert!(pixels.iter().any(|p|p[..3].iter().any(|v|*v>0.01)),"empty water frame");
     Ok(())
 }
+
+// Greenlight's authored-size water frame, with only the internal admission
+// policy changed. Keep the exact strategy available to each profile as its oracle.
+fn water_boundary_admission_preserves_picture(level:u8) -> Result<()> {
+    let base=std::env::var_os("VORK_TEST_WATER_ROOT").map(PathBuf::from)
+        .unwrap_or_else(||Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/water"));
+    let document=serde_json::from_str(include_str!("../../../examples/water/scene.json"))?;
+    let scene=crate::test_scene(document,&base)?;
+    let resolution=scene.render.resolution;
+    let renderer=Renderer::new()?;
+    let mut expected:Option<(Vec<u8>,Vec<u32>)>=None;
+    for approximate in [false,true] {
+        let mut scene=scene.clone();
+        let intent=serde_json::from_value(serde_json::json!({"samples":8,"seed":11,"denoise":false}))?;
+        scene.render.settings=vork_scene::Settings::for_level(level,intent);
+        scene.render.settings.approximate_field_boundaries=approximate;
+        let installed=renderer.install(scene,&base)?;
+        let mut frame=installed.create_frame_slot(&renderer,ReadbackPrecision::Float)?;
+        frame.submit_outputs(&installed,&renderer,0.,ReadbackOutputs {
+            color:true,float:FloatOutputs {color:true,..Default::default()},..Default::default()
+        })?;
+        let output=frame.collect(&renderer)?;
+        if let Some(directory)=std::env::var_os("VORK_TEST_OUTPUT_DIR") {
+            std::fs::create_dir_all(&directory)?;
+            image::save_buffer(Path::new(&directory).join(if approximate {"approximate.png"} else {"exact.png"}),
+                &output.rgba,resolution[0],resolution[1],image::ColorType::Rgba8)?;
+        }
+        let linear=output.linear_rgba.context("missing water linear frame")?;
+        ensure!(linear.len()==(resolution[0]*resolution[1]) as usize,"incomplete water frame");
+        ensure!(linear.iter().flatten().all(|v|v.is_finite()),"nonfinite water frame");
+        ensure!(linear.iter().any(|p|p[..3].iter().any(|v|*v>0.01)),"empty water frame");
+        if let Some(directory)=std::env::var_os("VORK_TEST_OUTPUT_DIR") {
+            exr::prelude::write_rgba_file(Path::new(&directory).join(if approximate {"approximate.exr"} else {"exact.exr"}),
+                resolution[0] as usize,resolution[1] as usize,|x,y| {
+                    let p=linear[y*resolution[0] as usize+x];(p[0],p[1],p[2],p[3])
+                })?;
+        }
+        let bits:Vec<_>=linear.iter().flatten().map(|v|v.to_bits()).collect();
+        if let Some((display,reference))=&expected {
+            ensure!(output.rgba==*display,"profile level {level}: water display pixels changed");
+            let changed=bits.iter().zip(reference.iter()).filter(|(a,b)|a!=b).count();
+            let max_error=bits.iter().zip(reference.iter()).map(|(&a,&b)|(f32::from_bits(a)-f32::from_bits(b)).abs()).fold(0.,f32::max);
+            ensure!(changed==0,"profile level {level}: water changed {changed} scene-linear components; max-abs={max_error}");
+        } else {expected=Some((output.rgba,bits));}
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires real GPU, pinned Slang, and production-size fluid buffers"]
+fn draft_water_boundary_admission_preserves_picture() -> Result<()> {
+    water_boundary_admission_preserves_picture(0)
+}
+
+#[test]
+#[ignore = "requires real GPU, pinned Slang, and production-size fluid buffers"]
+fn previs_water_boundary_admission_preserves_picture() -> Result<()> {
+    water_boundary_admission_preserves_picture(3)
+}
+
+#[test]
+#[ignore = "requires real GPU, pinned Slang, and production-size fluid buffers"]
+fn final_water_boundary_admission_preserves_picture() -> Result<()> {
+    water_boundary_admission_preserves_picture(1)
+}

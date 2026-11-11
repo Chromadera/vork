@@ -17,14 +17,15 @@ std/previs: fast iteration on framing, materials and direct lighting. It omits
 indirect lighting; raster surfaces use central-emitter hard shadows. Broad-light
 highlights can narrow or change brightness; ray-camera effects can remain grainy.
 Judge the finished lighting with final or path.
-In std/previs, a used std/openpbr material with geometry_opacity < 1 or
-alpha_cutoff >= 0 switches the whole view to path transport, including opaque
-objects. Texture/attribute bindings or animation of either input also reserve
-this transport. This preserves transparent emission but can make previs much
-slower; the cost is not limited to transparent pixels. The sample budget and
-denoise setting stay unchanged. For framing, use an opaque preview copy with
-these inputs omitted; use std/draft to preview opacity with raster transport
-when no other effect requires whole-view path transport.
+In std/previs, scalar std/openpbr geometry_opacity and alpha_cutoff use each
+material's raster coverage, retaining direct lighting and visible emission. Fractional
+coverage is sampled and can look grainy at the preview sample budget. Bindings
+or animation of either input, and opacity combined with transmission, retain
+whole-view path transport until qualified. Other effects can also require path
+transport. The sample budget and denoise setting stay unchanged.
+Raster previs uses analytic lights and environment approximations. Emissive
+meshes stay visible, but light they cast on other objects needs std/draft,
+std/final or std/path; the former alpha-triggered path view included that light.
 Hair uses complete-camera path transport automatically, including render-image
 captures. Promoted views keep the sample budget and default to denoising;
 --set denoise=false turns it off. Glass and water retain final’s raster transport.
@@ -34,8 +35,14 @@ Final's approximate GI can omit bounced paths such as camera → diffuse → glo
 A custom surface material selects the older one-hit GI for the whole scene.
 More samples cannot recover omitted paths; choose --profile std/path for full bounce lighting.
 std/path: 64 samples, independent of denoise; full path transport.
+Previs, draft and final use a cheaper implicit-field boundary test; exact zero
+faces, edges and tangencies can differ. Use path to judge those shapes.
+Views promoted to path transport retain the exact boundary test.
 Draft, final and path denoise with bundled OIDN by default. --set denoise=false uses the profile
-reconstruction (raw path samples for path); --set seed=42 makes sampling repeatable on the same backend.
+reconstruction (raw path samples for path); --set seed=42 makes sampling repeatable with
+unchanged evaluated scene inputs, frame identity, render settings and backend.
+Reauthoring a pose can change its floating-point transform and resulting image.
+The same machine, build and inputs produce identical pictures; different GPU models or driver versions can produce slight numerical differences that are not visible, so compare against references made on the same hardware; the operating system does not matter.
 --set samples=N overrides the profile budget (1..4096); more samples means cleaner and slower.
 Small text, thin geometry and subpixel bevel highlights can need extra camera samples;
 see vork help geometry for the spatial sampling limits.

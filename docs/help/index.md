@@ -14,6 +14,9 @@ Existing files are never overwritten. Source authoring requires the matching SDK
 Edit the source, regenerate JSON, then render.
 Paths are relative to scene.json. RGB background changes the backdrop, not lighting.
 
+Sun angular size: `vork help lights`. Tone curve and grain: `vork help render`.
+Shape/revolve examples: `vork help geometry`. Movie rendering: `vork help render`.
+
 Supported features and known limits: vork help limits. Source builds: vork help build.
 
 RENDERING
@@ -57,6 +60,14 @@ Coordinates: right-handed Y-up; camera local -Z. Names exclude '/'; paths are sc
 Resources accept a name or inline definition. Named tables use {name: definition}.
 Node type fields are flat siblings; type: node has only common fields.
 Normal maps: tangent-space +Y; TEXCOORD v=0 is the image top. Topology and program code are fixed during rendering.
+
+INSTANCES
+Mesh Node.instances takes equal-length custom attribute columns in instances.attributes;
+a material reads a column with {"attribute": name}. Two instances with different colours:
+{"type":"mesh","geometry":{"std":"sphere"},
+ "instances":{"attributes":{"TRANSLATION":{"type":"vec3","data":[[0,0,0],[2,0,0]]},
+                            "tint":{"type":"vec3","data":[[1,0,0],[0,0,1]]}}},
+ "materials":[{"inputs":{"base_color":{"attribute":"tint"}}}]}
 
 COMMON FIELDS (advanced fields: vork help TOPIC --all; exact field: vork help field PATH)
 <!-- generated-api:start -->
@@ -107,7 +118,7 @@ Light (type: light) {
   material: material-name|inline material|null; environment program; omitted = uniform color × energy radiance
   medium: material-name|inline material|null; environment only; authored medium program for world fog
   shape: sun|point|spot|rectangle|ellipse|environment
-  size: number = 1; rectangle full side, ellipse diameter; size_y sets the second axis
+  size: number = 1; only rectangle or ellipse lights; rectangle full side, ellipse diameter; size_y sets the second axis
 }
 
 Material {
@@ -126,7 +137,7 @@ Texture binding {
 
 Image {
   color_space: sRGB|Linear Rec.709|Non-Color|null = null; null: hdr/exr/ies linear, others sRGB
-  file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed, use 16-bit for exact data; ies: LM-63 Type C
+  file: file-path; XOR render; png jpg tif hdr exr ies mov mp4 mkv or %04d frame pattern; 8-bit may be block-compressed; 16-bit integer and floating-point inputs use uncompressed half-float precision, not exact source integer codes; ies: LM-63 Type C
 }
 
 Render {
@@ -185,6 +196,15 @@ diagnostics: timings and environment variables
 limits: hardware and rendering limits
 build: source build prerequisites
 
-Scene JSON supports `"$schema": "https://raw.githubusercontent.com/voyager-so/vork/v0.5.0/packages/ts/scene.schema.json"` for editor
+Scene JSON supports `"$schema": "https://raw.githubusercontent.com/voyager-so/vork/v0.5.1/packages/ts/scene.schema.json"` for editor
 completion and validation. `vork init` includes it; SDK writers preserve an explicit
 $schema but do not insert one. vork never fetches it or changes the render.
+
+UPDATE NOTICES
+Vork checks npm for a newer stable version at most once a day in a detached background worker
+after command completion, caches the result in your user cache directory, and shows a one-line
+notice on stderr on a later run, including when stderr is redirected for agents. Set
+VORK_NO_UPDATE_NOTIFIER (any value, including empty) to disable both checks and notices; CI also
+disables them. The check sends only a package-version request to the npm registry, with no
+identifiers or telemetry. Network and cache failures are silent and never change rendered files
+or exit status.

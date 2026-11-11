@@ -95,9 +95,28 @@ fn shorter_overwrite_and_benchmarks_do_not_claim_old_frames() {
     assert!(out.join("000003.png").exists());
     assert!(out.join("camera.json").exists());
     std::fs::write(out.join("notes.txt"), "keep").unwrap();
+    let preserved: Vec<_> = [0, 2, 3].into_iter().flat_map(|frame| {
+        [".png", ".depth.png"].into_iter().map(move |suffix| format!("{frame:06}{suffix}"))
+    }).map(|name| {
+        let bytes = std::fs::read(out.join(&name)).unwrap();
+        (name, bytes)
+    }).collect();
     render(&["--frame-start", "1", "--frame-end", "1"]);
     assert!(out.join("000001.png").exists());
-    for name in ["000000.png", "000002.png", "000003.png", "000001.depth.png", "camera.json", "timings.json"] {
+    for (name, bytes) in &preserved {
+        assert_eq!(std::fs::read(out.join(name)).unwrap(), *bytes, "preserve {name}");
+    }
+    for name in ["000001.depth.png", "camera.json", "timings.json"] {
+        assert!(!out.join(name).exists(), "stale {name}");
+    }
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["frames"].as_array().unwrap().len(), 1);
+    assert_eq!(meta["frames"][0]["index"], 1);
+    // A shorter whole clip still replaces the entire generated namespace.
+    std::fs::write(&scene, r#"{"version":2,"render":{"resolution":[8,8],"duration":0.25,"fps":4},"nodes":[{"type":"camera"}]}"#).unwrap();
+    render(&[]);
+    assert!(out.join("000000.png").exists());
+    for name in ["000001.png", "000002.png", "000003.png", "000000.depth.png", "000001.depth.png", "000002.depth.png", "000003.depth.png", "camera.json", "timings.json"] {
         assert!(!out.join(name).exists(), "stale {name}");
     }
     assert!(out.join("notes.txt").exists());
